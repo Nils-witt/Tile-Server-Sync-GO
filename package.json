@@ -1,0 +1,17 @@
+{
+  "name": "go-sync-objects",
+  "version": "1.0.0",
+  "description": "Fetches geo objects from one or more [tileserve-go](https://github.com/Nils-witt/Tileserve-GO) maps (at given versions) and writes them into a MariaDB database.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepare": "husky"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}

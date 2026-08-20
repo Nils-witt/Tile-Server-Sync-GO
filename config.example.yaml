@@ -1,0 +1,53 @@
+# Copy this file to config.yaml and fill in your own values.
+# config.yaml is git-ignored so real credentials never get committed.
+
+api:
+  baseUrl: "http://localhost:8085"
+  # Either username/password (a login JWT is requested at startup)...
+  username: "admin"
+  password: "changeme"
+  # ...or a pre-issued token (login or API key JWT), which skips POST /login.
+  # token: ""
+
+database:
+  # Go MySQL driver DSN. MariaDB is wire-compatible with the mysql driver.
+  dsn: "user:password@tcp(127.0.0.1:3306)/tileserve?parseTime=true"
+
+  # Target table. Defaults to "geo_objects" if omitted; created automatically
+  # (see internal/store) if it doesn't already exist.
+  # table: "geo_objects"
+
+  # Maps GeoObject fields onto target table column names. Any field left out
+  # here uses its default column name (shown below). Set a field to "" to
+  # skip it entirely, e.g. when syncing into an existing table that doesn't
+  # have a matching column. "uuid" may not be skipped: it's the key upserts
+  # match existing rows on.
+  # columns:
+  #   uuid: "uuid"
+  #   mapUuid: "map_uuid"
+  #   version: "version"
+  #   name: "name"
+  #   externalId: "external_id"
+  #   latitude: "latitude"
+  #   longitude: "longitude"
+  #   street: "street"
+  #   housenumber: "housenumber"
+  #   postcode: "postcode"
+  #   createdAt: "created_at"
+  #   updatedAt: "updated_at"
+  #   createdBy: "created_by"
+  #   updatedBy: "updated_by"
+  #   syncedAt: "synced_at"    # not a GeoObject field; bookkeeping timestamp
+
+# One entry per map to sync; each map may list multiple versions. A version
+# may be a real numeric version, the literal "current", or a user-defined
+# alias (see PUT /maps/{id}/aliases/{alias} in the tileserve-go API).
+maps:
+  - id: "00000000-0000-0000-0000-000000000000"
+    versions:
+      - "current"
+  - id: "11111111-1111-1111-1111-111111111111"
+    versions:
+      - "3"
+      - "4"
+      - "current"
