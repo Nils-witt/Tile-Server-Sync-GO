@@ -39,6 +39,17 @@ database:
   #   updatedBy: "updated_by"
   #   syncedAt: "synced_at"    # not a GeoObject field; bookkeeping timestamp
 
+  # If true, after each map/version sync, rows previously stored for that
+  # same map_uuid+version are deleted if their uuid was not present in this
+  # sync's fetch response, i.e. objects removed from tileserve-go since the
+  # last sync. Scoped per map_uuid+version using the configured version
+  # string below (e.g. "current"), which is what's stored in the version
+  # column, not whatever concrete version the API resolves it to. A fetch
+  # that returns zero objects prunes every row in that map/version's scope.
+  # Requires columns.mapUuid and columns.version to both be set (not skipped
+  # above). Defaults to false.
+  # pruneMissing: false
+
 # One entry per map to sync; each map may list multiple versions. A version
 # may be a real numeric version, the literal "current", or a user-defined
 # alias (see PUT /maps/{id}/aliases/{alias} in the tileserve-go API).
@@ -46,6 +57,13 @@ maps:
   - id: "00000000-0000-0000-0000-000000000000"
     versions:
       - "current"
+    # Extra target table columns, written with a fixed value on every row
+    # synced from this map. Column names must not collide with any name
+    # used by database.columns and are created automatically (as
+    # VARCHAR(255) NOT NULL DEFAULT '') by EnsureSchema.
+    # staticColumns:
+    #   source: "hq"
+    #   region: "north"
   - id: "11111111-1111-1111-1111-111111111111"
     versions:
       - "3"

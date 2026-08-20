@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 )
@@ -60,6 +61,12 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 type MapTarget struct {
 	ID       string   `yaml:"id"`
 	Versions []string `yaml:"versions"`
+	// StaticColumns maps extra target table column names onto fixed values
+	// written to every row synced from this map (e.g. a "source" or
+	// "region" tag). These columns are in addition to the ones GeoObject
+	// fields map onto via Database.Columns and are created automatically
+	// (as VARCHAR(255) NOT NULL DEFAULT '') by EnsureSchema.
+	StaticColumns map[string]string `yaml:"staticColumns"`
 }
 
 // API holds connection details for the tileserve-go instance.
@@ -87,6 +94,15 @@ type Database struct {
 	// FieldUUID may not be skipped: it's the key UpsertGeoObjects matches
 	// existing rows on.
 	Columns map[string]string `yaml:"columns"`
+	// PruneMissing, if true, deletes rows belonging to a synced map/version
+	// whose uuid was not present in that sync's fetch response, i.e. objects
+	// that have been removed on the tileserve-go side since the last sync.
+	// Pruning is scoped per map_uuid+version (the version column holds the
+	// configured version string, e.g. "current", not whatever concrete
+	// version the API resolved it to — see main.go); a fetch that returns
+	// zero objects prunes every row in that map/version's scope. Requires
+	// Columns["mapUuid"] and Columns["version"] to both be set (not skipped).
+	PruneMissing bool `yaml:"pruneMissing"`
 }
 
 // Config is the root configuration document.
@@ -138,6 +154,21 @@ func (c *Config) validate() error {
 		return errors.New("at least one entry under maps is required")
 	}
 
+	return c.validateMaps()
+}
+
+// validateMaps checks every maps[] entry, including that each map's
+// staticColumns are valid SQL identifiers that don't collide with a
+// database.columns target (split out from validate to keep its cyclomatic
+// complexity down).
+func (c *Config) validateMaps() error {
+	reservedCols := make(map[string]bool, len(c.Database.Columns))
+	for _, col := range c.Database.Columns {
+		if col != "" {
+			reservedCols[col] = true
+		}
+	}
+
 	for i, m := range c.Maps {
 		if m.ID == "" {
 			return fmt.Errorf("maps[%d].id is required", i)
@@ -146,9 +177,42 @@ func (c *Config) validate() error {
 		if len(m.Versions) == 0 {
 			return fmt.Errorf("maps[%d].versions must contain at least one version", i)
 		}
+
+		for col := range m.StaticColumns {
+			if !identifierPattern.MatchString(col) {
+				return fmt.Errorf("maps[%d].staticColumns has invalid column name %q", i, col)
+			}
+
+			if reservedCols[col] {
+				return fmt.Errorf("maps[%d].staticColumns[%q] collides with a database.columns target", i, col)
+			}
+		}
 	}
 
 	return nil
+}
+
+// StaticColumnNames returns the sorted, de-duplicated set of column names
+// referenced by any map's staticColumns. store.EnsureSchema uses it to
+// create the extra columns and store.UpsertGeoObjects uses it to fix the
+// column order used when binding per-map static values.
+func (c *Config) StaticColumnNames() []string {
+	set := make(map[string]struct{})
+
+	for _, m := range c.Maps {
+		for col := range m.StaticColumns {
+			set[col] = struct{}{}
+		}
+	}
+
+	names := make([]string, 0, len(set))
+	for col := range set {
+		names = append(names, col)
+	}
+
+	sort.Strings(names)
+
+	return names
 }
 
 // validate fills in defaults for Table and any unset Columns entries, then
@@ -164,6 +228,26 @@ func (d *Database) validate() error {
 		return fmt.Errorf("database.table %q is not a valid SQL identifier", d.Table)
 	}
 
+	if err := d.validateColumns(); err != nil {
+		return err
+	}
+
+	if d.Columns[FieldUUID] == "" {
+		return fmt.Errorf("database.columns[%q] may not be skipped: it's the upsert key", FieldUUID)
+	}
+
+	if d.PruneMissing && (d.Columns[FieldMapUUID] == "" || d.Columns[FieldVersion] == "") {
+		return fmt.Errorf("database.pruneMissing requires database.columns[%q] and database.columns[%q] to be set",
+			FieldMapUUID, FieldVersion)
+	}
+
+	return nil
+}
+
+// validateColumns checks any explicitly configured Columns entries, then
+// fills in defaults for every field left unset (split out from validate to
+// keep its cyclomatic complexity down).
+func (d *Database) validateColumns() error {
 	if d.Columns == nil {
 		d.Columns = make(map[string]string, len(defaultColumns))
 	}
@@ -182,10 +266,6 @@ func (d *Database) validate() error {
 		if _, set := d.Columns[field]; !set {
 			d.Columns[field] = def
 		}
-	}
-
-	if d.Columns[FieldUUID] == "" {
-		return fmt.Errorf("database.columns[%q] may not be skipped: it's the upsert key", FieldUUID)
 	}
 
 	return nil

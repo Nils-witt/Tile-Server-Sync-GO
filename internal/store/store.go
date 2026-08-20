@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"go-sync-objects/internal/config"
 	"go-sync-objects/internal/tileserve"
+	"log"
 	"strings"
 
 	// Registers the "mysql" driver with database/sql; never referenced
@@ -21,6 +22,15 @@ type Store struct {
 	db      *sql.DB
 	table   string
 	columns map[string]string
+	// staticColumns is the sorted, de-duplicated set of extra column names
+	// referenced by any map's staticColumns (config.Config.StaticColumnNames).
+	// It fixes the column order used by both EnsureSchema and the upsert
+	// statement built by upsertSQL.
+	staticColumns []string
+	// pruneMissing mirrors config.Database.PruneMissing: when true,
+	// UpsertGeoObjects deletes rows for the map_uuid/version scopes it
+	// upserts that weren't present in the objects it was given.
+	pruneMissing bool
 }
 
 // Open connects to MariaDB using dbCfg.DSN (e.g.
@@ -28,7 +38,9 @@ type Store struct {
 // required so DATETIME columns scan into time.Time) and configures the
 // target table/columns geo objects are synced to. dbCfg must already have
 // passed config.Load's validation, which fills in Table/Columns defaults.
-func Open(ctx context.Context, dbCfg config.Database) (*Store, error) {
+// staticColumns is the full set of extra static-value column names across
+// all configured maps (see config.Config.StaticColumnNames).
+func Open(ctx context.Context, dbCfg config.Database, staticColumns []string) (*Store, error) {
 	db, err := sql.Open("mysql", dbCfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -39,7 +51,13 @@ func Open(ctx context.Context, dbCfg config.Database) (*Store, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	return &Store{db: db, table: dbCfg.Table, columns: dbCfg.Columns}, nil
+	return &Store{
+		db:            db,
+		table:         dbCfg.Table,
+		columns:       dbCfg.Columns,
+		staticColumns: staticColumns,
+		pruneMissing:  dbCfg.PruneMissing,
+	}, nil
 }
 
 // Close closes the underlying database connection.
@@ -104,6 +122,10 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		defs = append(defs, syncedAt+" "+syncedAtSQLType)
 	}
 
+	for _, col := range s.staticColumns {
+		defs = append(defs, col+" "+varcharDefaultEmpty)
+	}
+
 	if mapUUID, version := s.col(config.FieldMapUUID), s.col(config.FieldVersion); mapUUID != "" && version != "" {
 		defs = append(defs, fmt.Sprintf("INDEX idx_%s_map_version (%s, %s)", s.table, mapUUID, version))
 	}
@@ -132,6 +154,8 @@ func (s *Store) upsertSQL() (stmt string, accessors []func(tileserve.GeoObject) 
 		}
 	}
 
+	cols = append(cols, s.staticColumns...)
+
 	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(cols)), ", ")
 
 	uuidCol := s.col(config.FieldUUID)
@@ -158,13 +182,19 @@ func (s *Store) upsertSQL() (stmt string, accessors []func(tileserve.GeoObject) 
 
 // UpsertGeoObjects writes each geo object to the configured table, inserting
 // new rows and updating existing ones (matched by the FieldUUID column). It
-// runs inside a single transaction per call.
-func (s *Store) UpsertGeoObjects(ctx context.Context, objects []tileserve.GeoObject) error {
-	if len(objects) == 0 {
+// runs inside a single transaction per call. staticValues supplies the
+// values for this map's configured staticColumns (config.MapTarget); any
+// column in s.staticColumns absent from staticValues is written as "".
+// mapUUID and version identify the map/version objects was fetched for
+// (main.go's m.ID and the configured version string) and, when pruning is
+// enabled, scope the delete even if objects is empty — an object list alone
+// can't tell us that, since there's nothing in it to read a scope from.
+func (s *Store) UpsertGeoObjects(
+	ctx context.Context, objects []tileserve.GeoObject, staticValues map[string]string, mapUUID, version string,
+) error {
+	if len(objects) == 0 && !s.pruneMissing {
 		return nil
 	}
-
-	stmt, accessors := s.upsertSQL()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -172,13 +202,49 @@ func (s *Store) UpsertGeoObjects(ctx context.Context, objects []tileserve.GeoObj
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if len(objects) > 0 {
+		if err := s.upsertObjects(ctx, tx, objects, staticValues); err != nil {
+			return err
+		}
+	}
+
+	if s.pruneMissing {
+		keepUUIDs := make([]string, len(objects))
+		for i, o := range objects {
+			keepUUIDs[i] = o.UUID
+		}
+
+		if err := s.pruneMissingRows(ctx, tx, mapUUID, version, keepUUIDs); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// upsertObjects runs the INSERT ... ON DUPLICATE KEY UPDATE statement for
+// each of objects within tx. Split out of UpsertGeoObjects to keep it small
+// now that UpsertGeoObjects also has to handle an empty objects list.
+func (s *Store) upsertObjects(
+	ctx context.Context, tx *sql.Tx, objects []tileserve.GeoObject, staticValues map[string]string,
+) error {
+	stmt, accessors := s.upsertSQL()
+
 	prepared, err := tx.PrepareContext(ctx, stmt)
 	if err != nil {
 		return fmt.Errorf("prepare upsert statement: %w", err)
 	}
 	defer func() { _ = prepared.Close() }()
 
-	args := make([]any, len(accessors))
+	args := make([]any, len(accessors)+len(s.staticColumns))
+
+	for i, col := range s.staticColumns {
+		args[len(accessors)+i] = staticValues[col]
+	}
 
 	for _, o := range objects {
 		for i, accessor := range accessors {
@@ -190,8 +256,41 @@ func (s *Store) UpsertGeoObjects(ctx context.Context, objects []tileserve.GeoObj
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
+	return nil
+}
+
+// pruneMissingRows deletes rows previously stored for mapUUID+version whose
+// uuid is not in keepUUIDs, i.e. objects tileserve-go no longer reports for
+// that map/version. An empty keepUUIDs (the map/version's fetch returned no
+// objects at all) deletes every row in that scope.
+func (s *Store) pruneMissingRows(ctx context.Context, tx *sql.Tx, mapUUID, version string, keepUUIDs []string) error {
+	mapUUIDCol := s.col(config.FieldMapUUID)
+	versionCol := s.col(config.FieldVersion)
+	uuidCol := s.col(config.FieldUUID)
+
+	args := []any{mapUUID, version}
+
+	var stmt string
+
+	if len(keepUUIDs) == 0 {
+		stmt = fmt.Sprintf("DELETE FROM %s WHERE %s = ? AND %s = ?;", s.table, mapUUIDCol, versionCol)
+	} else {
+		placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(keepUUIDs)), ", ")
+		stmt = fmt.Sprintf("DELETE FROM %s WHERE %s = ? AND %s = ? AND %s NOT IN (%s);",
+			s.table, mapUUIDCol, versionCol, uuidCol, placeholders)
+
+		for _, u := range keepUUIDs {
+			args = append(args, u)
+		}
+	}
+
+	res, err := tx.ExecContext(ctx, stmt, args...)
+	if err != nil {
+		return fmt.Errorf("prune missing geo objects for map %s version %s: %w", mapUUID, version, err)
+	}
+
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		log.Printf("pruned %d missing geo object(s) for map %s version %s", n, mapUUID, version)
 	}
 
 	return nil

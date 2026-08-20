@@ -49,11 +49,16 @@ config.Load()  →  tileserve.Client  →  store.Store
   `CREATE TABLE IF NOT EXISTS`) and writes (`UpsertGeoObjects`, one transaction per call, batched
   `INSERT ... ON DUPLICATE KEY UPDATE` keyed on `uuid`). Depends on `internal/tileserve` for the
   `GeoObject` type — the same struct flows from HTTP decode straight into SQL bind params with no
-  intermediate model.
+  intermediate model. Each map may also configure `staticColumns` (fixed extra column values
+  written on every row synced from that map) and the database may enable `pruneMissing` (delete,
+  within the same transaction, any previously-synced row for a map_uuid+version scope that the
+  latest fetch no longer returned).
 
 `main.go`'s `run(configPath)` orchestrates the whole flow and is the place to look first when
 tracing behavior end-to-end: load config → authenticate → open DB → ensure schema → for each
-map × version, fetch then upsert, logging counts as it goes.
+map × version, fetch, overwrite each object's `Version` with the configured version string
+(so an alias like `"current"` is what lands in the database, not whatever concrete version the
+API resolved it to), then upsert (and prune, if enabled), logging counts as it goes.
 
 Sync is idempotent: rows are upserted by `uuid`, so re-running updates existing rows rather than
 duplicating them.

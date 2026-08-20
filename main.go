@@ -42,7 +42,7 @@ func run(ctx context.Context, configPath string) error {
 		}
 	}
 
-	db, err := store.Open(ctx, cfg.Database)
+	db, err := store.Open(ctx, cfg.Database, cfg.StaticColumnNames())
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
 	}
@@ -63,7 +63,15 @@ func run(ctx context.Context, configPath string) error {
 				return fmt.Errorf("fetch geo objects for map %s version %s: %w", m.ID, version, err)
 			}
 
-			if err := db.UpsertGeoObjects(ctx, objects); err != nil {
+			// Store the configured version (which may be "current" or a
+			// user-defined alias) rather than whatever concrete version the
+			// API resolved it to and echoed back on each object, so the
+			// version column always matches what's in config.yaml.
+			for i := range objects {
+				objects[i].Version = version
+			}
+
+			if err := db.UpsertGeoObjects(ctx, objects, m.StaticColumns, m.ID, version); err != nil {
 				return fmt.Errorf("store geo objects for map %s version %s: %w", m.ID, version, err)
 			}
 
