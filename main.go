@@ -117,7 +117,7 @@ func run(ctx context.Context, configPath string) error {
 		writers = append(writers, logFile)
 	}
 
-	log.SetOutput(io.MultiWriter(writers...))
+	log.SetOutput(fanoutWriter(writers))
 
 	if cfg.WebServer.Enabled {
 		stopWebServer := startWebServer(cfg.WebServer.Address, rec)
@@ -151,6 +151,22 @@ func run(ctx context.Context, configPath string) error {
 	}
 
 	return runLoop(ctx, cfg, client, db, interval, rec)
+}
+
+// fanoutWriter writes p to every writer in the slice, independently of
+// whether earlier writers error. Unlike io.MultiWriter, which stops at the
+// first failing writer, this makes sure a broken sink (e.g. stderr under a
+// Windows service, which has no console and can fail on write) can't starve
+// the others, such as the in-memory recorder the status web server reads
+// from or the log file.
+type fanoutWriter []io.Writer
+
+func (f fanoutWriter) Write(p []byte) (int, error) {
+	for _, w := range f {
+		_, _ = w.Write(p)
+	}
+
+	return len(p), nil
 }
 
 // openLogFile opens (creating if needed, appending if not) a
