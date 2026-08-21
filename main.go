@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -102,7 +103,21 @@ func run(ctx context.Context, configPath string) error {
 	}
 
 	rec := status.New()
-	log.SetOutput(io.MultiWriter(log.Writer(), rec))
+
+	writers := []io.Writer{log.Writer(), rec}
+
+	// logFile is intentionally left open for the lifetime of the process
+	// (the OS closes it on exit) rather than deferred-closed here: run's
+	// caller logs a final fatal error, if any, after run returns, and that
+	// message should still reach the log file.
+	logFile, err := openLogFile(configPath)
+	if err != nil {
+		log.Printf("open log file: %v", err)
+	} else {
+		writers = append(writers, logFile)
+	}
+
+	log.SetOutput(io.MultiWriter(writers...))
 
 	if cfg.WebServer.Enabled {
 		stopWebServer := startWebServer(cfg.WebServer.Address, rec)
@@ -136,6 +151,22 @@ func run(ctx context.Context, configPath string) error {
 	}
 
 	return runLoop(ctx, cfg, client, db, interval, rec)
+}
+
+// openLogFile opens (creating if needed, appending if not) a
+// go-sync-objects.log file next to the config file at configPath, so logs
+// land alongside the config that produced them rather than wherever the
+// process happens to be run from (e.g. the Windows service's working
+// directory).
+func openLogFile(configPath string) (*os.File, error) {
+	logPath := filepath.Join(filepath.Dir(configPath), "go-sync-objects.log")
+
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // configPath is a trusted, user-supplied CLI flag
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", logPath, err)
+	}
+
+	return f, nil
 }
 
 // startWebServer starts the status/log web server in a goroutine and
