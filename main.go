@@ -30,11 +30,32 @@ var (
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to the YAML config file")
 	showVersion := flag.Bool("version", false, "print version information and exit")
+	serviceCmd := flag.String("service", "",
+		"Windows service control: install, uninstall, start, stop, or run (Windows only)")
 
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("go-sync-objects %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
+
+	if *serviceCmd != "" {
+		if err := handleServiceCommand(*serviceCmd, *configPath); err != nil {
+			log.Fatalf("service %s: %v", *serviceCmd, err)
+		}
+
+		return
+	}
+
+	// A service installed via `-service install` is launched by the SCM
+	// with `-service run` already on its command line, so this only
+	// matters as a fallback if the SCM ever invokes the exe without args.
+	if isService, err := isWindowsService(); err == nil && isService {
+		if err := runAsService(*configPath); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+
 		return
 	}
 
@@ -46,6 +67,26 @@ func main() {
 
 	if err != nil {
 		log.Fatalf("error: %v", err)
+	}
+}
+
+// handleServiceCommand dispatches `-service <cmd>` to the platform-specific
+// implementations in service_windows.go (real Windows SCM integration) or
+// service_other.go (stubs that report the feature is Windows-only).
+func handleServiceCommand(cmd, configPath string) error {
+	switch cmd {
+	case "install":
+		return installService(configPath)
+	case "uninstall":
+		return uninstallService()
+	case "start":
+		return startService()
+	case "stop":
+		return stopService()
+	case "run":
+		return runAsService(configPath)
+	default:
+		return fmt.Errorf("unknown -service value %q (want install, uninstall, start, stop, or run)", cmd)
 	}
 }
 

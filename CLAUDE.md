@@ -71,6 +71,22 @@ behavior.
 Sync is idempotent: rows are upserted by `uuid`, so re-running (whether manually or via
 `interval`) updates existing rows rather than duplicating them.
 
+### Windows service support
+
+`-service install|uninstall|start|stop|run` (handled by `handleServiceCommand` in `main.go`)
+lets the binary register/manage itself as a Windows service instead of running in a console
+session — pairs naturally with `interval` for an unattended long-running sync. The real
+implementation lives in `service_windows.go` (build-tagged `windows`), using
+`golang.org/x/sys/windows/svc`/`svc/mgr`/`svc/eventlog`; `install` records the current exe path
+plus an absolute `-config` path and `-service run` as the service's launch command, and registers
+an event log source. `service_other.go` (build-tagged `!windows`) provides stub implementations
+that return an explanatory error, so `go vet`/`golangci-lint`/builds stay green on
+linux/darwin. `main.go` also calls `isWindowsService()` at startup (true only when actually built
+for and running under Windows) as a fallback to route into service mode even without `-service
+run` on the command line. Neither service file changes `run`/`runLoop`/`syncAll` — the service
+wrapper just runs `run(ctx, configPath)` in a goroutine and cancels its context on a Stop/Shutdown
+SCM request.
+
 ## Linting notes
 
 `.golangci.yml` enables a deliberately broad linter set (correctness, style, complexity,

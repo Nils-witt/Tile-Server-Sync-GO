@@ -56,6 +56,28 @@ go build -o go-sync-objects .
 ./go-sync-objects -config config.yaml
 ```
 
+## Running as a Windows service
+
+On Windows, go-sync-objects can install itself as a service instead of
+running in a console window (most useful together with `interval` in
+`config.yaml`, so it keeps syncing in the background across reboots):
+
+```
+go-sync-objects -service install -config C:\path\to\config.yaml
+go-sync-objects -service start
+```
+
+`-service install` registers the service (as `go-sync-objects`, start type
+Automatic) using the current executable's path and an absolute path to the
+given `-config`, and registers an event log source so start/stop/error
+messages show up in the Windows Event Log (Application log, source
+`go-sync-objects`). Manage it afterwards with `-service start`,
+`-service stop`, `-service uninstall`, or the regular `services.msc` /
+`sc.exe` tools. `-service run` is used internally — it's what the SCM
+invokes to actually start the process — and isn't normally run by hand.
+This flag only works in binaries built for Windows (`GOOS=windows`); on
+other platforms it fails with an explanatory error.
+
 ## Database schema
 
 By default, geo objects are synced into a `geo_objects` table using the
@@ -96,6 +118,7 @@ existing rows rather than duplicating them.
 ## Layout
 
 - `main.go` — CLI entry point / orchestration.
+- `service_windows.go` / `service_other.go` — Windows service install/start/stop/uninstall (`-service ...`); no-op stubs on non-Windows builds.
 - `internal/config` — YAML config loading and validation.
 - `internal/tileserve` — minimal tileserve-go API client (login + geo-objects fetch).
 - `internal/store` — MariaDB schema management and upserts.
