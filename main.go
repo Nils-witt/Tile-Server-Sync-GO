@@ -13,6 +13,10 @@ import (
 	"go-sync-objects/internal/store"
 	"go-sync-objects/internal/tileserve"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -20,7 +24,13 @@ func main() {
 
 	flag.Parse()
 
-	if err := run(context.Background(), *configPath); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	err := run(ctx, *configPath)
+
+	stop()
+
+	if err != nil {
 		log.Fatalf("error: %v", err)
 	}
 }
@@ -52,6 +62,44 @@ func run(ctx context.Context, configPath string) error {
 		return err
 	}
 
+	interval := cfg.SyncInterval()
+	if interval <= 0 {
+		return syncAll(ctx, cfg, client, db)
+	}
+
+	return runLoop(ctx, cfg, client, db, interval)
+}
+
+// runLoop runs syncAll immediately, then repeats it every interval until ctx
+// is cancelled (e.g. by SIGINT/SIGTERM). Errors from an individual sync are
+// logged rather than aborting the loop, so a transient failure (e.g. a
+// network blip) doesn't take down an otherwise long-running process.
+func runLoop(
+	ctx context.Context,
+	cfg *config.Config,
+	client *tileserve.Client,
+	db *store.Store,
+	interval time.Duration,
+) error {
+	log.Printf("running sync every %s (press Ctrl+C to stop)", interval)
+
+	for {
+		if err := syncAll(ctx, cfg, client, db); err != nil {
+			log.Printf("sync error: %v", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			log.Print("shutting down")
+			return nil
+		case <-time.After(interval):
+		}
+	}
+}
+
+// syncAll fetches and upserts geo objects for every configured map/version
+// pair once.
+func syncAll(ctx context.Context, cfg *config.Config, client *tileserve.Client, db *store.Store) error {
 	var totalSynced int
 
 	for _, m := range cfg.Maps {

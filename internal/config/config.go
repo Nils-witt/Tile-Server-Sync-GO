@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -110,6 +111,17 @@ type Config struct {
 	API      API         `yaml:"api"`
 	Database Database    `yaml:"database"`
 	Maps     []MapTarget `yaml:"maps"`
+	// Interval, if set, is a Go duration string (e.g. "5m", "1h") for how
+	// often to repeat the full sync. If empty, the sync runs once and exits.
+	Interval string `yaml:"interval"`
+	// interval is Interval parsed by validate(); read it via SyncInterval.
+	interval time.Duration
+}
+
+// SyncInterval returns the parsed Interval, or 0 if none was configured,
+// meaning: run the sync once and exit.
+func (c *Config) SyncInterval() time.Duration {
+	return c.interval
 }
 
 // Load reads and parses the YAML config file at path. path is a
@@ -154,7 +166,32 @@ func (c *Config) validate() error {
 		return errors.New("at least one entry under maps is required")
 	}
 
+	if err := c.validateInterval(); err != nil {
+		return err
+	}
+
 	return c.validateMaps()
+}
+
+// validateInterval parses Interval (if set) and stores the result in
+// interval for SyncInterval to return.
+func (c *Config) validateInterval() error {
+	if c.Interval == "" {
+		return nil
+	}
+
+	d, err := time.ParseDuration(c.Interval)
+	if err != nil {
+		return fmt.Errorf("interval %q is not a valid duration: %w", c.Interval, err)
+	}
+
+	if d <= 0 {
+		return fmt.Errorf("interval %q must be positive", c.Interval)
+	}
+
+	c.interval = d
+
+	return nil
 }
 
 // validateMaps checks every maps[] entry, including that each map's

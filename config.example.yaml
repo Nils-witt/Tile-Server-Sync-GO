@@ -9,6 +9,11 @@ api:
   # ...or a pre-issued token (login or API key JWT), which skips POST /login.
   # token: ""
 
+# If set, a Go duration string (e.g. "5m", "1h") for how often to repeat the
+# full sync. If omitted, the sync runs once and exits (the previous
+# behavior). Login happens once at startup, not on every interval tick.
+# interval: "5m"
+
 database:
   # Go MySQL driver DSN. MariaDB is wire-compatible with the mysql driver.
   dsn: "user:password@tcp(127.0.0.1:3306)/tileserve?parseTime=true"

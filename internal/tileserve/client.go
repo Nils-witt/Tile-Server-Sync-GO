@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,6 +22,13 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	token      string
+
+	// username and password are retained from Login so a request that gets
+	// a 401 (e.g. an expired token) can transparently re-login and retry
+	// once. Left unset when the token was supplied directly via SetToken,
+	// in which case a 401 is simply returned to the caller.
+	username string
+	password string
 }
 
 // New creates a Client for the given base URL (e.g. "http://localhost:8085").
@@ -87,6 +95,8 @@ func (c *Client) Login(ctx context.Context, username, password string) error {
 	}
 
 	c.token = lr.Token
+	c.username = username
+	c.password = password
 
 	return nil
 }
@@ -117,31 +127,27 @@ func (c *Client) GeoObjects(ctx context.Context, mapID, version string) ([]GeoOb
 		return nil, errors.New("client is not authenticated: call Login or SetToken first")
 	}
 
-	reqURL := fmt.Sprintf("%s/maps/%s/version/%s/geo-objects",
-		c.baseURL, url.PathEscape(mapID), url.PathEscape(version))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	body, status, err := c.geoObjectsOnce(ctx, mapID, version)
 	if err != nil {
-		return nil, fmt.Errorf("build geo-objects request: %w", err)
+		return nil, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/json")
+	if status == http.StatusUnauthorized && c.username != "" {
+		log.Printf("geo-objects request for map %s version %s got 401, re-authenticating", mapID, version)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("geo-objects request for map %s version %s: %w", mapID, version, err)
+		if err := c.Login(ctx, c.username, c.password); err != nil {
+			return nil, fmt.Errorf("re-login after 401 for map %s version %s: %w", mapID, version, err)
+		}
+
+		body, status, err = c.geoObjectsOnce(ctx, mapID, version)
+		if err != nil {
+			return nil, err
+		}
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read geo-objects response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("geo-objects request for map %s version %s failed (%s): %s",
-			mapID, version, resp.Status, strings.TrimSpace(string(body)))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("geo-objects request for map %s version %s failed (%d): %s",
+			mapID, version, status, strings.TrimSpace(string(body)))
 	}
 
 	var objects []GeoObject
@@ -150,4 +156,34 @@ func (c *Client) GeoObjects(ctx context.Context, mapID, version string) ([]GeoOb
 	}
 
 	return objects, nil
+}
+
+// geoObjectsOnce performs a single GET /maps/{id}/version/{version}/geo-objects
+// request and returns the raw response body and status code without
+// interpreting non-200 statuses, so the caller can decide whether to retry
+// (e.g. after a 401) before treating the status as an error.
+func (c *Client) geoObjectsOnce(ctx context.Context, mapID, version string) ([]byte, int, error) {
+	reqURL := fmt.Sprintf("%s/maps/%s/version/%s/geo-objects",
+		c.baseURL, url.PathEscape(mapID), url.PathEscape(version))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("build geo-objects request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("geo-objects request for map %s version %s: %w", mapID, version, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read geo-objects response: %w", err)
+	}
+
+	return body, resp.StatusCode, nil
 }

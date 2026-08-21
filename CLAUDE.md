@@ -54,14 +54,22 @@ config.Load()  →  tileserve.Client  →  store.Store
   within the same transaction, any previously-synced row for a map_uuid+version scope that the
   latest fetch no longer returned).
 
-`main.go`'s `run(configPath)` orchestrates the whole flow and is the place to look first when
-tracing behavior end-to-end: load config → authenticate → open DB → ensure schema → for each
-map × version, fetch, overwrite each object's `Version` with the configured version string
-(so an alias like `"current"` is what lands in the database, not whatever concrete version the
-API resolved it to), then upsert (and prune, if enabled), logging counts as it goes.
+`main.go`'s `run(ctx, configPath)` orchestrates the whole flow and is the place to look first when
+tracing behavior end-to-end: load config → authenticate → open DB → ensure schema, then hand off
+to `syncAll(ctx, cfg, client, db)` for each map × version: fetch, overwrite each object's
+`Version` with the configured version string (so an alias like `"current"` is what lands in the
+database, not whatever concrete version the API resolved it to), then upsert (and prune, if
+enabled), logging counts as it goes. Login happens once in `run`, not per sync.
 
-Sync is idempotent: rows are upserted by `uuid`, so re-running updates existing rows rather than
-duplicating them.
+If top-level `interval` is set in config (a Go duration string, e.g. `"5m"`), `run` calls
+`runLoop` instead of running `syncAll` once: it repeats `syncAll` on that interval until the
+process receives SIGINT/SIGTERM (`main` wires a `signal.NotifyContext` for this), logging and
+continuing past a sync error rather than exiting, since a transient failure shouldn't kill an
+otherwise long-running process. No `interval` (the default) preserves the original run-once
+behavior.
+
+Sync is idempotent: rows are upserted by `uuid`, so re-running (whether manually or via
+`interval`) updates existing rows rather than duplicating them.
 
 ## Linting notes
 
