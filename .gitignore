@@ -3,3 +3,8 @@ node_modules/
 /.idea/
 
 /dist
+
+# Installed agent skill packages (reproducible from skills-lock.json)
+/agent/
+/.agents/
+/.claude/skills/
