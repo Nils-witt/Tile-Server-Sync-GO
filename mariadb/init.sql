@@ -26,6 +26,10 @@ CREATE TABLE `objekte` (
     `TYP` smallint(6) DEFAULT NULL,
     `EDPCID` int(11) DEFAULT NULL,
     `EDPCUSER` varchar(50) DEFAULT NULL,
-    PRIMARY KEY (`ID`)
-    ) ENGINE=InnoDB AUTO_INCREMENT=6883 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Tabelle mit den erfassten Objekten'
+    `sync_uuid` uuid DEFAULT NULL,
+    `sync_map` uuid DEFAULT NULL,
+    `sync_version` text DEFAULT NULL,
+    PRIMARY KEY (`ID`),
+    UNIQUE KEY `objekte_pk` (`sync_uuid`)
+    ) ENGINE=InnoDB AUTO_INCREMENT=5343 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Tabelle mit den erfassten Objekten'
 
