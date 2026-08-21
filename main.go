@@ -7,12 +7,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"go-sync-objects/internal/config"
+	"go-sync-objects/internal/status"
 	"go-sync-objects/internal/store"
 	"go-sync-objects/internal/tileserve"
+	"go-sync-objects/internal/webserver"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -96,6 +101,14 @@ func run(ctx context.Context, configPath string) error {
 		return err
 	}
 
+	rec := status.New()
+	log.SetOutput(io.MultiWriter(log.Writer(), rec))
+
+	if cfg.WebServer.Enabled {
+		stopWebServer := startWebServer(cfg.WebServer.Address, rec)
+		defer stopWebServer()
+	}
+
 	client := tileserve.New(cfg.API.BaseURL)
 	if cfg.API.Token != "" {
 		client.SetToken(cfg.API.Token)
@@ -119,10 +132,35 @@ func run(ctx context.Context, configPath string) error {
 
 	interval := cfg.SyncInterval()
 	if interval <= 0 {
-		return syncAll(ctx, cfg, client, db)
+		return syncAll(ctx, cfg, client, db, rec)
 	}
 
-	return runLoop(ctx, cfg, client, db, interval)
+	return runLoop(ctx, cfg, client, db, interval, rec)
+}
+
+// startWebServer starts the status/log web server in a goroutine and
+// returns a function that shuts it down; run defers a call to it, so the
+// server stops when run returns (including on ctx cancellation, since that's
+// what ends syncAll/runLoop). Listen errors (other than a clean shutdown) are
+// logged rather than returned, since a status page failing to start
+// shouldn't stop the sync itself.
+func startWebServer(addr string, rec *status.Recorder) (stop func()) {
+	srv := webserver.New(addr, rec)
+
+	go func() {
+		log.Printf("status web server listening on %s", addr)
+
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("status web server error: %v", err)
+		}
+	}()
+
+	return func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_ = srv.Shutdown(shutdownCtx)
+	}
 }
 
 // runLoop runs syncAll immediately, then repeats it every interval until ctx
@@ -135,11 +173,12 @@ func runLoop(
 	client *tileserve.Client,
 	db *store.Store,
 	interval time.Duration,
+	rec *status.Recorder,
 ) error {
 	log.Printf("running sync every %s (press Ctrl+C to stop)", interval)
 
 	for {
-		if err := syncAll(ctx, cfg, client, db); err != nil {
+		if err := syncAll(ctx, cfg, client, db, rec); err != nil {
 			log.Printf("sync error: %v", err)
 		}
 
@@ -153,17 +192,25 @@ func runLoop(
 }
 
 // syncAll fetches and upserts geo objects for every configured map/version
-// pair once.
-func syncAll(ctx context.Context, cfg *config.Config, client *tileserve.Client, db *store.Store) error {
+// pair once, recording each pair's outcome and the run as a whole in rec for
+// the status web server to display.
+func syncAll(
+	ctx context.Context, cfg *config.Config, client *tileserve.Client, db *store.Store, rec *status.Recorder,
+) (err error) {
 	var totalSynced int
+
+	defer func() { rec.RecordRun(totalSynced, err) }()
 
 	for _, m := range cfg.Maps {
 		for _, version := range m.Versions {
 			log.Printf("fetching geo objects for map %s version %s", m.ID, version)
 
-			objects, err := client.GeoObjects(ctx, m.ID, version)
-			if err != nil {
-				return fmt.Errorf("fetch geo objects for map %s version %s: %w", m.ID, version, err)
+			objects, fetchErr := client.GeoObjects(ctx, m.ID, version)
+			if fetchErr != nil {
+				err = fmt.Errorf("fetch geo objects for map %s version %s: %w", m.ID, version, fetchErr)
+				rec.RecordMapVersion(m.ID, version, 0, err)
+
+				return err
 			}
 
 			// Store the configured version (which may be "current" or a
@@ -174,11 +221,15 @@ func syncAll(ctx context.Context, cfg *config.Config, client *tileserve.Client, 
 				objects[i].Version = version
 			}
 
-			if err := db.UpsertGeoObjects(ctx, objects, m.StaticColumns, m.ID, version); err != nil {
-				return fmt.Errorf("store geo objects for map %s version %s: %w", m.ID, version, err)
+			if storeErr := db.UpsertGeoObjects(ctx, objects, m.StaticColumns, m.ID, version); storeErr != nil {
+				err = fmt.Errorf("store geo objects for map %s version %s: %w", m.ID, version, storeErr)
+				rec.RecordMapVersion(m.ID, version, 0, err)
+
+				return err
 			}
 
 			log.Printf("synced %d geo object(s) for map %s version %s", len(objects), m.ID, version)
+			rec.RecordMapVersion(m.ID, version, len(objects), nil)
 			totalSynced += len(objects)
 		}
 	}

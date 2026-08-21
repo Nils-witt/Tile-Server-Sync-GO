@@ -14,6 +14,13 @@ api:
 # behavior). Login happens once at startup, not on every interval tick.
 # interval: "5m"
 
+# Optional HTTP server exposing a status page (last sync results per
+# map/version and recent log output) at "/". Most useful together with
+# interval for a long-running sync.
+# webServer:
+#   enabled: true
+#   address: ":8080"
+
 database:
   # Go MySQL driver DSN. MariaDB is wire-compatible with the mysql driver.
   dsn: "user:password@tcp(127.0.0.1:3306)/tileserve?parseTime=true"

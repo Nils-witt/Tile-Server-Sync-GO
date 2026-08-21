@@ -106,17 +106,30 @@ type Database struct {
 	PruneMissing bool `yaml:"pruneMissing"`
 }
 
+// WebServer configures the optional HTTP server that exposes sync status and
+// recent log output.
+type WebServer struct {
+	Enabled bool `yaml:"enabled"`
+	// Address is the address (see net/http.Server.Addr) the server listens
+	// on, e.g. ":8080" or "127.0.0.1:8080". Defaults to ":8080" if enabled
+	// and left empty.
+	Address string `yaml:"address"`
+}
+
 // Config is the root configuration document.
 type Config struct {
-	API      API         `yaml:"api"`
-	Database Database    `yaml:"database"`
-	Maps     []MapTarget `yaml:"maps"`
+	API       API         `yaml:"api"`
+	Database  Database    `yaml:"database"`
+	Maps      []MapTarget `yaml:"maps"`
+	WebServer WebServer   `yaml:"webServer"`
 	// Interval, if set, is a Go duration string (e.g. "5m", "1h") for how
 	// often to repeat the full sync. If empty, the sync runs once and exits.
 	Interval string `yaml:"interval"`
 	// interval is Interval parsed by validate(); read it via SyncInterval.
 	interval time.Duration
 }
+
+const defaultWebServerAddress = ":8080"
 
 // SyncInterval returns the parsed Interval, or 0 if none was configured,
 // meaning: run the sync once and exit.
@@ -168,6 +181,10 @@ func (c *Config) validate() error {
 
 	if err := c.validateInterval(); err != nil {
 		return err
+	}
+
+	if c.WebServer.Enabled && c.WebServer.Address == "" {
+		c.WebServer.Address = defaultWebServerAddress
 	}
 
 	return c.validateMaps()
