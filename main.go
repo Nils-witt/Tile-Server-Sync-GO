@@ -19,10 +19,24 @@ import (
 	"time"
 )
 
+// version, commit, and date are set via -ldflags at build time by GoReleaser
+// (see .goreleaser.yaml); they stay at these defaults for `go build`/`go run`.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to the YAML config file")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("go-sync-objects %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
