@@ -15,8 +15,14 @@ api:
 # interval: "5m"
 
 # Optional HTTP server exposing a status page (last sync results per
-# map/version and recent log output) at "/". Most useful together with
-# interval for a long-running sync.
+# map/version and recent log output) at "/", plus a config editor at
+# "/config" that can view and rewrite this file (every option below is
+# adjustable there). The editor's "Apply saved config now" button makes a
+# saved change take effect immediately, without a restart (except for
+# webServer settings themselves, which still need one), and its "Sync now"
+# button runs a sync immediately instead of waiting for the next interval
+# tick. Most useful together with interval for a long-running sync. None of
+# this has authentication, so only enable it on a trusted network.
 # webServer:
 #   enabled: true
 #   address: ":8080"

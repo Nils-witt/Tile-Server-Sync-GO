@@ -60,33 +60,33 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // be synced. Version may be a real numeric version, the literal "current",
 // or a user-defined alias.
 type MapTarget struct {
-	ID       string   `yaml:"id"`
-	Versions []string `yaml:"versions"`
+	ID       string   `yaml:"id"                 json:"id"`
+	Versions []string `yaml:"versions"           json:"versions"`
 	// StaticColumns maps extra target table column names onto fixed values
 	// written to every row synced from this map (e.g. a "source" or
 	// "region" tag). These columns are in addition to the ones GeoObject
 	// fields map onto via Database.Columns and are created automatically
 	// (as VARCHAR(255) NOT NULL DEFAULT '') by EnsureSchema.
-	StaticColumns map[string]string `yaml:"staticColumns"`
+	StaticColumns map[string]string `yaml:"staticColumns" json:"staticColumns"`
 }
 
 // API holds connection details for the tileserve-go instance.
 type API struct {
-	BaseURL  string `yaml:"baseUrl"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
+	BaseURL  string `yaml:"baseUrl"  json:"baseUrl"`
+	Username string `yaml:"username" json:"username"`
+	Password string `yaml:"password" json:"password"`
 	// Token, if set, is used directly instead of logging in with
 	// Username/Password.
-	Token string `yaml:"token"`
+	Token string `yaml:"token" json:"token"`
 }
 
 // Database holds the MariaDB connection string (Go MySQL driver DSN, e.g.
 // "user:pass@tcp(127.0.0.1:3306)/dbname?parseTime=true") plus where and how
 // synced geo objects are written.
 type Database struct {
-	DSN string `yaml:"dsn"`
+	DSN string `yaml:"dsn" json:"dsn"`
 	// Table is the target table name. Defaults to "geo_objects".
-	Table string `yaml:"table"`
+	Table string `yaml:"table" json:"table"`
 	// Columns maps GeoObject field keys (see FieldUUID etc.) and
 	// FieldSyncedAt onto target table column names. Any field omitted from
 	// the map uses its default column name. A field explicitly mapped to ""
@@ -94,7 +94,7 @@ type Database struct {
 	// with a different, narrower schema) that only has some of the columns.
 	// FieldUUID may not be skipped: it's the key UpsertGeoObjects matches
 	// existing rows on.
-	Columns map[string]string `yaml:"columns"`
+	Columns map[string]string `yaml:"columns" json:"columns"`
 	// PruneMissing, if true, deletes rows belonging to a synced map/version
 	// whose uuid was not present in that sync's fetch response, i.e. objects
 	// that have been removed on the tileserve-go side since the last sync.
@@ -103,28 +103,28 @@ type Database struct {
 	// version the API resolved it to — see main.go); a fetch that returns
 	// zero objects prunes every row in that map/version's scope. Requires
 	// Columns["mapUuid"] and Columns["version"] to both be set (not skipped).
-	PruneMissing bool `yaml:"pruneMissing"`
+	PruneMissing bool `yaml:"pruneMissing" json:"pruneMissing"`
 }
 
 // WebServer configures the optional HTTP server that exposes sync status and
 // recent log output.
 type WebServer struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Address is the address (see net/http.Server.Addr) the server listens
 	// on, e.g. ":8080" or "127.0.0.1:8080". Defaults to ":8080" if enabled
 	// and left empty.
-	Address string `yaml:"address"`
+	Address string `yaml:"address" json:"address"`
 }
 
 // Config is the root configuration document.
 type Config struct {
-	API       API         `yaml:"api"`
-	Database  Database    `yaml:"database"`
-	Maps      []MapTarget `yaml:"maps"`
-	WebServer WebServer   `yaml:"webServer"`
+	API       API         `yaml:"api"       json:"api"`
+	Database  Database    `yaml:"database"  json:"database"`
+	Maps      []MapTarget `yaml:"maps"      json:"maps"`
+	WebServer WebServer   `yaml:"webServer" json:"webServer"`
 	// Interval, if set, is a Go duration string (e.g. "5m", "1h") for how
 	// often to repeat the full sync. If empty, the sync runs once and exits.
-	Interval string `yaml:"interval"`
+	Interval string `yaml:"interval" json:"interval"`
 	// interval is Interval parsed by validate(); read it via SyncInterval.
 	interval time.Duration
 }
@@ -146,13 +146,26 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
 
+	cfg, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w (from %q)", err, path)
+	}
+
+	return cfg, nil
+}
+
+// Parse unmarshals and validates a YAML config document already in memory
+// (e.g. one assembled by the web config editor, or a file already read by
+// the caller), applying the same defaulting and validation Load does. On
+// success, every field left unset in data is filled with its default value.
+func Parse(data []byte) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config %q: %w", path, err)
+		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
 	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("invalid config %q: %w", path, err)
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	return &cfg, nil

@@ -45,6 +45,23 @@ config.Load()  →  tileserve.Client  →  store.Store
   exchanges username/password for a bearer token; `SetToken()` bypasses login when a token is
   already known. `GeoObjects(mapID, version)` fetches and JSON-decodes one map/version's objects
   (`GeoObject` struct mirrors the API's schema exactly — field-for-field, including JSON tags).
+- **`internal/webserver`** — besides the status page (`/`), serves a config editor at `/config`
+  (HTML+vanilla JS, no build step) backed by a JSON API at `/api/config`
+  (`internal/webserver/config.go`). GET re-reads `configPath` off disk and returns it as
+  `config.Config` JSON (via `config.Parse`, exported from `internal/config` alongside `Load` for
+  exactly this reuse) plus the raw file text; POST accepts either a structured `config` object
+  (marshaled to YAML server-side) or a `raw` YAML string, validates it the same way `Load` does,
+  and only writes `configPath` (0600, no comments preserved) if that validation passes — an
+  invalid save is rejected with the validation error and the file is left untouched. The page
+  falls back to a raw-YAML textarea if the current file doesn't parse. Two action endpoints round
+  it out: `POST /api/reload` calls the `reload func(context.Context) error` passed into
+  `webserver.New` (wired to `runtime.reload` — see below) to make the *running* process pick up
+  whatever is currently saved on disk immediately, without a restart — the config page's "Apply
+  saved config now" button hits it after a save; `POST /api/sync` calls the
+  `syncNow func(context.Context) (int, error)` passed alongside it (wired to `runtime.runSync`) to
+  run a sync immediately rather than waiting for the next `interval` tick — the "Sync now" button.
+  Like the status page, none of this has authentication — only enable `webServer` on a trusted
+  network.
 - **`internal/store`** — owns the MariaDB schema (`EnsureSchema`, idempotent
   `CREATE TABLE IF NOT EXISTS`) and writes (`UpsertGeoObjects`, one transaction per call, batched
   `INSERT ... ON DUPLICATE KEY UPDATE` keyed on `uuid`). Depends on `internal/tileserve` for the
@@ -59,14 +76,37 @@ tracing behavior end-to-end: load config → authenticate → open DB → ensure
 to `syncAll(ctx, cfg, client, db)` for each map × version: fetch, overwrite each object's
 `Version` with the configured version string (so an alias like `"current"` is what lands in the
 database, not whatever concrete version the API resolved it to), then upsert (and prune, if
-enabled), logging counts as it goes. Login happens once in `run`, not per sync.
+enabled), logging counts as it goes.
+
+The client and database connection aren't held directly by `run`, though — they're wrapped in a
+`*runtime` (`runtime.go`), a mutex-guarded holder of the current `{cfg, client, db}` triple, plus
+a second mutex (`syncMu`) dedicated to serializing syncs. `runtime.runSync(ctx, rec)` is what both
+`runLoop`'s scheduled ticks and the run-once path in `run` call: it locks `syncMu`, reads the
+current `{cfg, client, db}` via `runtime.current()`, and calls `syncAll` — the `syncMu` lock is
+what stops a manual "sync now" request from the web UI (`/api/sync`, wired to the same
+`runSync`) from running concurrently with a scheduled tick against the same database, which could
+otherwise race on `pruneMissing` deleting rows the other's insert just wrote.
+
+`runtime.reload(ctx, configPath)` is what the config web UI's `/api/reload` endpoint calls (wired
+in as a closure passed to `startWebServer`/`webserver.New`, alongside a `syncNow` closure over
+`runSync` for `/api/sync`): it re-`Load`s configPath, builds a fresh client (re-logging in, unless
+a token is configured) and database connection (`newClient`/`openStore`, factored out of `run` so
+both it and `reload` share them), and only swaps them into the runtime — closing the old database
+connection afterwards — if all of that succeeds, so an invalid edit or an unreachable API/DB
+leaves the previous, still-working state in place. This is how config changes made through the web
+UI (new maps, credentials, DB settings, interval) take effect without a process restart.
+`webServer.enabled`/`address` are the one exception: changing those still needs a restart, since
+the server the reload request arrives on can't safely restart itself mid-request.
 
 If top-level `interval` is set in config (a Go duration string, e.g. `"5m"`), `run` calls
-`runLoop` instead of running `syncAll` once: it repeats `syncAll` on that interval until the
+`runLoop` instead of running `runSync` once: it repeats `runSync` on that interval (re-reading the
+interval from `runtime.current()` after every call, so a reload can change the cadence) until the
 process receives SIGINT/SIGTERM (`main` wires a `signal.NotifyContext` for this), logging and
 continuing past a sync error rather than exiting, since a transient failure shouldn't kill an
 otherwise long-running process. No `interval` (the default) preserves the original run-once
-behavior.
+behavior — and skips `runLoop` entirely; `run` returns as soon as that single `runSync` call
+completes, so `webServer` (and therefore `/config`, `/api/reload`, `/api/sync`) is only actually
+useful together with `interval`, as the config example file already says.
 
 Sync is idempotent: rows are upserted by `uuid`, so re-running (whether manually or via
 `interval`) updates existing rows rather than duplicating them.

@@ -119,38 +119,37 @@ func run(ctx context.Context, configPath string) error {
 
 	log.SetOutput(fanoutWriter(writers))
 
-	if cfg.WebServer.Enabled {
-		stopWebServer := startWebServer(cfg.WebServer.Address, rec)
-		defer stopWebServer()
-	}
-
-	client := tileserve.New(cfg.API.BaseURL)
-	if cfg.API.Token != "" {
-		client.SetToken(cfg.API.Token)
-	} else {
-		log.Printf("logging in to %s as %s", cfg.API.BaseURL, cfg.API.Username)
-
-		if err := client.Login(ctx, cfg.API.Username, cfg.API.Password); err != nil {
-			return fmt.Errorf("login: %w", err)
-		}
-	}
-
-	db, err := store.Open(ctx, cfg.Database, cfg.StaticColumnNames())
+	client, err := newClient(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("connect to database: %w", err)
+		return fmt.Errorf("login: %w", err)
 	}
-	defer func() { _ = db.Close() }()
 
-	if err := db.EnsureSchema(ctx); err != nil {
+	db, err := openStore(ctx, cfg)
+	if err != nil {
 		return err
 	}
 
-	interval := cfg.SyncInterval()
-	if interval <= 0 {
-		return syncAll(ctx, cfg, client, db, rec)
+	rt := newRuntime(cfg, client, db)
+
+	defer func() {
+		_, _, latestDB := rt.current()
+		_ = latestDB.Close()
+	}()
+
+	if cfg.WebServer.Enabled {
+		reload := func(reloadCtx context.Context) error { return rt.reload(reloadCtx, configPath) }
+		syncNow := func(syncCtx context.Context) (int, error) { return rt.runSync(syncCtx, rec) }
+
+		stopWebServer := startWebServer(cfg.WebServer.Address, rec, configPath, reload, syncNow)
+		defer stopWebServer()
 	}
 
-	return runLoop(ctx, cfg, client, db, interval, rec)
+	if cfg.SyncInterval() <= 0 {
+		_, err := rt.runSync(ctx, rec)
+		return err
+	}
+
+	return runLoop(ctx, rt, rec)
 }
 
 // fanoutWriter writes p to every writer in the slice, independently of
@@ -185,14 +184,17 @@ func openLogFile(configPath string) (*os.File, error) {
 	return f, nil
 }
 
-// startWebServer starts the status/log web server in a goroutine and
+// startWebServer starts the status/log/config web server in a goroutine and
 // returns a function that shuts it down; run defers a call to it, so the
 // server stops when run returns (including on ctx cancellation, since that's
 // what ends syncAll/runLoop). Listen errors (other than a clean shutdown) are
 // logged rather than returned, since a status page failing to start
 // shouldn't stop the sync itself.
-func startWebServer(addr string, rec *status.Recorder) (stop func()) {
-	srv := webserver.New(addr, rec)
+func startWebServer(
+	addr string, rec *status.Recorder, configPath string,
+	reload func(context.Context) error, syncNow func(context.Context) (int, error),
+) (stop func()) {
+	srv := webserver.New(addr, rec, configPath, reload, syncNow)
 
 	go func() {
 		log.Printf("status web server listening on %s", addr)
@@ -214,38 +216,48 @@ func startWebServer(addr string, rec *status.Recorder) (stop func()) {
 // is cancelled (e.g. by SIGINT/SIGTERM). Errors from an individual sync are
 // logged rather than aborting the loop, so a transient failure (e.g. a
 // network blip) doesn't take down an otherwise long-running process.
-func runLoop(
-	ctx context.Context,
-	cfg *config.Config,
-	client *tileserve.Client,
-	db *store.Store,
-	interval time.Duration,
-	rec *status.Recorder,
-) error {
-	log.Printf("running sync every %s (press Ctrl+C to stop)", interval)
+//
+// rt.runSync re-fetches rt.current() at the top of every call (rather than
+// this loop capturing it once), so a config reload triggered via the web
+// UI — new maps, API credentials, database settings, or interval — takes
+// effect on the very next sync without a process restart. runSync also
+// serializes against a manual "sync now" request from the web UI, so the two
+// can't run concurrently. If a reload leaves no interval configured, the
+// loop keeps using the last positive interval it saw rather than
+// busy-looping, since runLoop is only entered when the initial config had
+// one.
+func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
+	cfg, _, _ := rt.current()
+	lastInterval := cfg.SyncInterval()
+
+	log.Printf("running sync every %s (press Ctrl+C to stop)", lastInterval)
 
 	for {
-		if err := syncAll(ctx, cfg, client, db, rec); err != nil {
+		if _, err := rt.runSync(ctx, rec); err != nil {
 			log.Printf("sync error: %v", err)
+		}
+
+		cfg, _, _ := rt.current()
+		if d := cfg.SyncInterval(); d > 0 {
+			lastInterval = d
 		}
 
 		select {
 		case <-ctx.Done():
 			log.Print("shutting down")
 			return nil
-		case <-time.After(interval):
+		case <-time.After(lastInterval):
 		}
 	}
 }
 
 // syncAll fetches and upserts geo objects for every configured map/version
 // pair once, recording each pair's outcome and the run as a whole in rec for
-// the status web server to display.
+// the status web server to display, and returns the total number of objects
+// synced (0 if it fails before syncing anything).
 func syncAll(
 	ctx context.Context, cfg *config.Config, client *tileserve.Client, db *store.Store, rec *status.Recorder,
-) (err error) {
-	var totalSynced int
-
+) (totalSynced int, err error) {
 	defer func() { rec.RecordRun(totalSynced, err) }()
 
 	for _, m := range cfg.Maps {
@@ -257,7 +269,7 @@ func syncAll(
 				err = fmt.Errorf("fetch geo objects for map %s version %s: %w", m.ID, version, fetchErr)
 				rec.RecordMapVersion(m.ID, version, 0, err)
 
-				return err
+				return totalSynced, err
 			}
 
 			// Store the configured version (which may be "current" or a
@@ -272,7 +284,7 @@ func syncAll(
 				err = fmt.Errorf("store geo objects for map %s version %s: %w", m.ID, version, storeErr)
 				rec.RecordMapVersion(m.ID, version, 0, err)
 
-				return err
+				return totalSynced, err
 			}
 
 			log.Printf("synced %d geo object(s) for map %s version %s", len(objects), m.ID, version)
@@ -283,5 +295,5 @@ func syncAll(
 
 	log.Printf("done: synced %d geo object(s) total", totalSynced)
 
-	return nil
+	return totalSynced, nil
 }
