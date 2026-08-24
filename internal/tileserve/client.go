@@ -148,7 +148,7 @@ func (c *Client) GeoObjects(ctx context.Context, mapID, version string) ([]GeoOb
 	}
 
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("geo-objects request for map %s version %s failed (%d): %s",
+		return nil, fmt.Errorf("geo-objects request for map %s version %s failed (%d): %s ",
 			mapID, version, status, strings.TrimSpace(string(body)))
 	}
 

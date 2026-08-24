@@ -254,11 +254,21 @@ func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
 // syncAll fetches and upserts geo objects for every configured map/version
 // pair once, recording each pair's outcome and the run as a whole in rec for
 // the status web server to display, and returns the total number of objects
-// synced (0 if it fails before syncing anything).
+// synced across every pair that succeeded.
+//
+// A failure on one map/version (a fetch error or a store error) is logged
+// and recorded against that pair, but does not stop the others from being
+// attempted — one map being unreachable or misconfigured shouldn't prevent
+// the rest of the fleet from syncing. If any pair failed, syncAll still
+// returns a non-nil error (joining every failure) after all pairs have been
+// attempted, so callers (runLoop's logging, the run-once path, the web UI's
+// "sync now") can tell the run as a whole was not fully successful.
 func syncAll(
 	ctx context.Context, cfg *config.Config, client *tileserve.Client, db *store.Store, rec *status.Recorder,
 ) (totalSynced int, err error) {
 	defer func() { rec.RecordRun(totalSynced, err) }()
+
+	var errs []error
 
 	for _, m := range cfg.Maps {
 		for _, version := range m.Versions {
@@ -266,10 +276,12 @@ func syncAll(
 
 			objects, fetchErr := client.GeoObjects(ctx, m.ID, version)
 			if fetchErr != nil {
-				err = fmt.Errorf("fetch geo objects for map %s version %s: %w", m.ID, version, fetchErr)
-				rec.RecordMapVersion(m.ID, version, 0, err)
+				pairErr := fmt.Errorf("fetch geo objects for map %s version %s: %w", m.ID, version, fetchErr)
+				log.Printf("sync error: %v", pairErr)
+				rec.RecordMapVersion(m.ID, version, 0, pairErr)
+				errs = append(errs, pairErr)
 
-				return totalSynced, err
+				continue
 			}
 
 			// Store the configured version (which may be "current" or a
@@ -281,10 +293,12 @@ func syncAll(
 			}
 
 			if storeErr := db.UpsertGeoObjects(ctx, objects, m.StaticColumns, m.ID, version); storeErr != nil {
-				err = fmt.Errorf("store geo objects for map %s version %s: %w", m.ID, version, storeErr)
-				rec.RecordMapVersion(m.ID, version, 0, err)
+				pairErr := fmt.Errorf("store geo objects for map %s version %s: %w", m.ID, version, storeErr)
+				log.Printf("sync error: %v", pairErr)
+				rec.RecordMapVersion(m.ID, version, 0, pairErr)
+				errs = append(errs, pairErr)
 
-				return totalSynced, err
+				continue
 			}
 
 			log.Printf("synced %d geo object(s) for map %s version %s", len(objects), m.ID, version)
@@ -295,5 +309,5 @@ func syncAll(
 
 	log.Printf("done: synced %d geo object(s) total", totalSynced)
 
-	return totalSynced, nil
+	return totalSynced, errors.Join(errs...)
 }
