@@ -128,7 +128,8 @@ const configPageHTML = `<!DOCTYPE html>
     ["uuid", "UUID (upsert key)"], ["mapUuid", "Map UUID"], ["version", "Version"],
     ["name", "Name"], ["externalId", "External ID"], ["latitude", "Latitude"],
     ["longitude", "Longitude"], ["street", "Street"], ["housenumber", "House number"],
-    ["postcode", "Postcode"], ["createdAt", "Created at"], ["updatedAt", "Updated at"],
+    ["postcode", "Postcode"], ["city", "City"], ["cityDistrict", "City district"],
+    ["createdAt", "Created at"], ["updatedAt", "Updated at"],
     ["createdBy", "Created by"], ["updatedBy", "Updated by"], ["syncedAt", "Synced at (bookkeeping)"]
   ];
 

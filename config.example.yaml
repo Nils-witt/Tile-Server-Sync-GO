@@ -51,6 +51,8 @@ database:
   #   street: "street"
   #   housenumber: "housenumber"
   #   postcode: "postcode"
+  #   city: "city"
+  #   cityDistrict: "city_district"
   #   createdAt: "created_at"
   #   updatedAt: "updated_at"
   #   createdBy: "created_by"

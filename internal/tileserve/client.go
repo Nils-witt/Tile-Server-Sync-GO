@@ -103,20 +103,22 @@ func (c *Client) Login(ctx context.Context, username, password string) error {
 
 // GeoObject mirrors the GeoObject schema from openapi.yaml.
 type GeoObject struct {
-	UUID        string    `json:"uuid"`
-	MapUUID     string    `json:"mapUuid"`
-	Version     string    `json:"version"`
-	Name        string    `json:"name"`
-	ExternalID  string    `json:"externalId"`
-	Latitude    float64   `json:"latitude"`
-	Longitude   float64   `json:"longitude"`
-	Street      string    `json:"street"`
-	Housenumber string    `json:"housenumber"`
-	Postcode    string    `json:"postcode"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	CreatedBy   string    `json:"createdBy"`
-	UpdatedBy   string    `json:"updatedBy"`
+	UUID         string    `json:"uuid"`
+	MapUUID      string    `json:"mapUuid"`
+	Version      string    `json:"version"`
+	Name         string    `json:"name"`
+	ExternalID   string    `json:"externalId"`
+	Latitude     float64   `json:"latitude"`
+	Longitude    float64   `json:"longitude"`
+	Street       string    `json:"street"`
+	Housenumber  string    `json:"housenumber"`
+	Postcode     string    `json:"postcode"`
+	City         string    `json:"city"`
+	CityDistrict string    `json:"cityDistrict"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	CreatedBy    string    `json:"createdBy"`
+	UpdatedBy    string    `json:"updatedBy"`
 }
 
 // GeoObjects fetches every geo object for a given map id and version via

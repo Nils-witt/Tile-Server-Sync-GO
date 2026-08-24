@@ -96,6 +96,8 @@ var geoObjectColumns = []fieldColumn{
 	{config.FieldStreet, varcharDefaultEmpty, func(o tileserve.GeoObject) any { return o.Street }},
 	{config.FieldHousenumber, "VARCHAR(64)  NOT NULL DEFAULT ''", func(o tileserve.GeoObject) any { return o.Housenumber }},
 	{config.FieldPostcode, "VARCHAR(32)  NOT NULL DEFAULT ''", func(o tileserve.GeoObject) any { return o.Postcode }},
+	{config.FieldCity, varcharDefaultEmpty, func(o tileserve.GeoObject) any { return o.City }},
+	{config.FieldCityDistrict, varcharDefaultEmpty, func(o tileserve.GeoObject) any { return o.CityDistrict }},
 	{config.FieldCreatedAt, "DATETIME     NULL", func(o tileserve.GeoObject) any { return o.CreatedAt }},
 	{config.FieldUpdatedAt, "DATETIME     NULL", func(o tileserve.GeoObject) any { return o.UpdatedAt }},
 	{config.FieldCreatedBy, varcharDefaultEmpty, func(o tileserve.GeoObject) any { return o.CreatedBy }},

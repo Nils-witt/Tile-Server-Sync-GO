@@ -15,20 +15,22 @@ import (
 // Field keys usable in database.columns to map a GeoObject field (or the
 // synced_at bookkeeping column) onto a target table column name.
 const (
-	FieldUUID        = "uuid"
-	FieldMapUUID     = "mapUuid"
-	FieldVersion     = "version"
-	FieldName        = "name"
-	FieldExternalID  = "externalId"
-	FieldLatitude    = "latitude"
-	FieldLongitude   = "longitude"
-	FieldStreet      = "street"
-	FieldHousenumber = "housenumber"
-	FieldPostcode    = "postcode"
-	FieldCreatedAt   = "createdAt"
-	FieldUpdatedAt   = "updatedAt"
-	FieldCreatedBy   = "createdBy"
-	FieldUpdatedBy   = "updatedBy"
+	FieldUUID         = "uuid"
+	FieldMapUUID      = "mapUuid"
+	FieldVersion      = "version"
+	FieldName         = "name"
+	FieldExternalID   = "externalId"
+	FieldLatitude     = "latitude"
+	FieldLongitude    = "longitude"
+	FieldStreet       = "street"
+	FieldHousenumber  = "housenumber"
+	FieldPostcode     = "postcode"
+	FieldCity         = "city"
+	FieldCityDistrict = "cityDistrict"
+	FieldCreatedAt    = "createdAt"
+	FieldUpdatedAt    = "updatedAt"
+	FieldCreatedBy    = "createdBy"
+	FieldUpdatedBy    = "updatedBy"
 	// FieldSyncedAt is not part of GeoObject; it's the bookkeeping column
 	// that records when a row was last synced.
 	FieldSyncedAt = "syncedAt"
@@ -37,21 +39,23 @@ const (
 const defaultTable = "geo_objects"
 
 var defaultColumns = map[string]string{
-	FieldUUID:        "uuid",
-	FieldMapUUID:     "map_uuid",
-	FieldVersion:     "version",
-	FieldName:        "name",
-	FieldExternalID:  "external_id",
-	FieldLatitude:    "latitude",
-	FieldLongitude:   "longitude",
-	FieldStreet:      "street",
-	FieldHousenumber: "housenumber",
-	FieldPostcode:    "postcode",
-	FieldCreatedAt:   "created_at",
-	FieldUpdatedAt:   "updated_at",
-	FieldCreatedBy:   "created_by",
-	FieldUpdatedBy:   "updated_by",
-	FieldSyncedAt:    "synced_at",
+	FieldUUID:         "uuid",
+	FieldMapUUID:      "map_uuid",
+	FieldVersion:      "version",
+	FieldName:         "name",
+	FieldExternalID:   "external_id",
+	FieldLatitude:     "latitude",
+	FieldLongitude:    "longitude",
+	FieldStreet:       "street",
+	FieldHousenumber:  "housenumber",
+	FieldPostcode:     "postcode",
+	FieldCity:         "city",
+	FieldCityDistrict: "city_district",
+	FieldCreatedAt:    "created_at",
+	FieldUpdatedAt:    "updated_at",
+	FieldCreatedBy:    "created_by",
+	FieldUpdatedBy:    "updated_by",
+	FieldSyncedAt:     "synced_at",
 }
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
