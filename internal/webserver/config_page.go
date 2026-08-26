@@ -11,6 +11,7 @@ const configPageHTML = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
+<script>` + themeInitScript + `</script>
 <title>go-sync-objects config</title>
 <style>` + baseCSS + `</style>
 </head>
@@ -19,8 +20,11 @@ const configPageHTML = `<!DOCTYPE html>
   <span class="brand">go-sync-objects</span>
   <nav>
     <a href="/">Status</a>
-    <a href="/config" class="active">Config</a>
+    <a href="/config" class="active" id="nav-config">Config</a>
+    <a href="/users" id="nav-users">Users</a>
   </nav>
+  <nav id="account-nav"></nav>
+  <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode"></button>
 </div>
 
 <main>
@@ -52,6 +56,9 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     <input type="text" id="api-password" placeholder="unchanged &mdash; leave blank to keep the current password">
     <label for="api-token">Token (used instead of username/password if set)</label>
     <input type="text" id="api-token">
+    <div class="actions-row">
+      <button type="button" class="primary" id="save-api">Save API section</button>
+    </div>
   </section>
 
   <section class="card tab-panel" id="section-db" data-tab="db">
@@ -67,6 +74,9 @@ instead of waiting for a map's interval, use the per-map Sync button on the
       <summary style="cursor:pointer; font-weight:500; font-size:0.85rem;">Column mapping (advanced &mdash; leave blank to use defaults)</summary>
       <div class="col-grid" id="col-grid"></div>
     </details>
+    <div class="actions-row">
+      <button type="button" class="primary" id="save-database">Save database section</button>
+    </div>
   </section>
 
   <section class="card tab-panel" id="section-maps" data-tab="maps">
@@ -75,11 +85,11 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     <div id="maps-container"></div>
     <div class="actions-row">
       <button type="button" id="add-map">+ Add map</button>
+      <button type="button" class="primary" id="save-maps">Save maps section</button>
     </div>
   </section>
 
   <div class="actions-row">
-    <button type="button" class="primary" id="save-structured">Save</button>
     <button type="button" id="reload">Discard changes (reload form)</button>
   </div>
 
@@ -87,9 +97,12 @@ instead of waiting for a map's interval, use the per-map Sync button on the
 
 </main>
 
+<script>` + accountNavJS + themeToggleJS + `</script>
 <script>
 (function () {
   "use strict";
+
+  initThemeToggle();
 
   var COLUMN_FIELDS = [
     ["uuid", "UUID (upsert key)"], ["mapUuid", "Map UUID"], ["version", "Version"],
@@ -285,28 +298,26 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     (cfg.maps || []).forEach(function (m) { mapsContainer.appendChild(buildMapRow(m, false)); });
   }
 
-  function collectForm() {
+  function collectAPI() {
+    return {
+      baseUrl: document.getElementById("api-baseurl").value.trim(),
+      username: document.getElementById("api-username").value,
+      password: document.getElementById("api-password").value,
+      token: document.getElementById("api-token").value.trim()
+    };
+  }
+
+  function collectDatabase() {
     var cols = {};
     COLUMN_FIELDS.forEach(function (f) {
       cols[f[0]] = document.getElementById("col-" + f[0]).value.trim();
     });
 
     return {
-      api: {
-        baseUrl: document.getElementById("api-baseurl").value.trim(),
-        username: document.getElementById("api-username").value,
-        password: document.getElementById("api-password").value,
-        token: document.getElementById("api-token").value.trim()
-      },
-      // webServer is intentionally omitted: it's fixed by the bootstrap
-      // file and the server ignores/overwrites it on save regardless.
-      database: {
-        dsn: document.getElementById("db-dsn").value.trim(),
-        table: document.getElementById("db-table").value.trim(),
-        pruneMissing: document.getElementById("db-prune").checked,
-        columns: cols
-      },
-      maps: collectMaps()
+      dsn: document.getElementById("db-dsn").value.trim(),
+      table: document.getElementById("db-table").value.trim(),
+      pruneMissing: document.getElementById("db-prune").checked,
+      columns: cols
     };
   }
 
@@ -328,11 +339,11 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     }).catch(function (e) { showMessage(false, "Failed to load config: " + e); });
   }
 
-  document.getElementById("save-structured").addEventListener("click", function () {
-    fetch("/api/config", {
+  function saveSection(endpoint, body) {
+    fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config: collectForm() })
+      body: JSON.stringify(body)
     }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) {
         if (res.ok) {
@@ -341,13 +352,41 @@ instead of waiting for a map's interval, use the per-map Sync button on the
           } else {
             showMessage(false, "Saved, but failed to apply to the running process: " + res.body.applyError);
           }
+          if (res.body.config) populateForm(res.body.config);
         } else {
           showMessage(false, "Not saved: " + res.body.error);
         }
       }).catch(function (e) { showMessage(false, "Failed to save config: " + e); });
+  }
+
+  document.getElementById("save-api").addEventListener("click", function () {
+    saveSection("/api/config/api", { api: collectAPI() });
+  });
+  document.getElementById("save-database").addEventListener("click", function () {
+    saveSection("/api/config/database", { database: collectDatabase() });
+  });
+  document.getElementById("save-maps").addEventListener("click", function () {
+    saveSection("/api/config/maps", { maps: collectMaps() });
   });
 
   document.getElementById("reload").addEventListener("click", load);
+
+  // Disable each tab's save button (and its input fields) when the
+  // logged-in user lacks that tab's edit permission. The server enforces
+  // this regardless (see requirePermission in webserver.go) — this is
+  // purely so the UI doesn't invite an edit that will just be rejected.
+  function disableSection(sectionID, disabled) {
+    var section = document.getElementById(sectionID);
+    if (!section) return;
+    section.querySelectorAll("input, textarea, button").forEach(function (el) { el.disabled = disabled; });
+  }
+
+  initAccountNav(function (me) {
+    var perms = me.permissions || {};
+    disableSection("section-api", !perms.editConfigAPI);
+    disableSection("section-db", !perms.editConfigDatabase);
+    disableSection("section-maps", !perms.editConfigMaps);
+  });
 
   load();
 })();

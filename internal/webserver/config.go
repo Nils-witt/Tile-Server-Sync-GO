@@ -3,7 +3,6 @@ package webserver
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"go-sync-objects/internal/config"
 	"go-sync-objects/internal/configdb"
@@ -15,21 +14,22 @@ import (
 )
 
 // configGetResponse is what GET /api/config returns, and (with Applied/
-// ApplyError additionally set) what POST /api/config returns too. Cfg is the
-// loaded config (WebServer overlaid from the fixed bootstrap value for
-// display) — always set on success, even when it's all zero values (e.g. a
-// brand new install with nothing saved yet), so the structured editor always
-// has something to render; Raw is the same config marshaled as YAML, offered
-// as a raw-text editing mode. In both Cfg and Raw, API.Password and
-// Database.DSN (which typically embeds the MariaDB credentials) are
-// redacted (never sent back to the browser once saved — see redactSecrets)
-// so stored secrets never round-trip into the config page's form fields.
-// Error/no Cfg only happens on a genuine load failure (a database problem),
-// not on an unconfigured-but-loadable state. Applied reports whether a
-// POST's save was also successfully applied to the running process (see
-// saveConfig); ApplyError carries why not, if the save itself succeeded but
-// applying it live failed (e.g. an unreachable API or database) — the save
-// is not rolled back in that case, only the live apply.
+// ApplyError additionally set) what each of the section save endpoints
+// below returns too. Cfg is the loaded config (WebServer overlaid from the
+// fixed bootstrap value for display) — always set on success, even when
+// it's all zero values (e.g. a brand new install with nothing saved yet), so
+// the structured editor always has something to render; Raw is the same
+// config marshaled as YAML, offered as a raw-text editing mode. In both Cfg
+// and Raw, API.Password and Database.DSN (which typically embeds the
+// MariaDB credentials) are redacted (never sent back to the browser once
+// saved — see redactSecrets) so stored secrets never round-trip into the
+// config page's form fields. Error/no Cfg only happens on a genuine load
+// failure (a database problem), not on an unconfigured-but-loadable state.
+// Applied reports whether a save was also successfully applied to the
+// running process (see finishConfigSave); ApplyError carries why not, if
+// the save itself succeeded but applying it live failed (e.g. an
+// unreachable API or database) — the save is not rolled back in that case,
+// only the live apply.
 type configGetResponse struct {
 	Cfg        *config.Config `json:"config,omitempty"`
 	Raw        string         `json:"raw"`
@@ -38,33 +38,21 @@ type configGetResponse struct {
 	ApplyError string         `json:"applyError,omitempty"`
 }
 
-// configSaveRequest is what POST /api/config accepts: either Raw (YAML
-// text, unmarshaled) or Cfg (a structured config) — Raw takes priority if
-// both are somehow set. Either way, the WebServer field of whatever's
-// submitted is discarded server-side (see saveConfig): it's fixed by the
-// bootstrap file and can't be changed through this API.
-type configSaveRequest struct {
-	Cfg *config.Config `json:"config,omitempty"`
-	Raw *string        `json:"raw,omitempty"`
-}
-
-// configAPIHandler serves the JSON API the config page's script uses to load
-// and save the SQLite-backed config in cfgDB. webServer is the fixed,
-// bootstrap-sourced value overlaid onto every response and enforced (never
-// read from the request) on every save. reload is called after every
-// successful save so the change takes effect on the running process right
-// away — see saveConfig.
-func configAPIHandler(cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error) http.HandlerFunc {
+// configAPIHandler serves GET /api/config, the JSON the config page's script
+// uses to populate all three tabs. Saving is done per-section instead — see
+// saveAPISectionHandler/saveDatabaseSectionHandler/saveMapsSectionHandler/
+// saveRawConfigHandler — so each tab's edit permission is enforced
+// independently at the route level (see webserver.go).
+func configAPIHandler(cfgDB *configdb.Store, webServer config.WebServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			getConfig(r.Context(), w, cfgDB, webServer)
-		case http.MethodPost:
-			saveConfig(w, r, cfgDB, webServer, reload)
-		default:
-			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
 		}
+
+		getConfig(r.Context(), w, cfgDB, webServer)
 	}
 }
 
@@ -75,7 +63,8 @@ func getConfig(ctx context.Context, w http.ResponseWriter, cfgDB *configdb.Store
 		return
 	}
 
-	// Overlay for display/context only — never persisted (see saveConfig).
+	// Overlay for display/context only — never persisted (see
+	// finishConfigSave).
 	cfg.WebServer = webServer
 	redactSecrets(cfg)
 
@@ -93,42 +82,205 @@ func getConfig(ctx context.Context, w http.ResponseWriter, cfgDB *configdb.Store
 
 const maxConfigBodyBytes = 1 << 20 // 1 MiB; config is never remotely this large
 
-func saveConfig(
+// apiSectionRequest/databaseSectionRequest/mapsSectionRequest are the
+// request bodies for the three section-specific save endpoints — each
+// submits only its own tab's fields, unlike the old whole-config POST
+// /api/config.
+type apiSectionRequest struct {
+	API config.API `json:"api"`
+}
+
+type databaseSectionRequest struct {
+	Database config.Database `json:"database"`
+}
+
+type mapsSectionRequest struct {
+	Maps []config.MapTarget `json:"maps"`
+}
+
+// sectionSaveHandler is the shared shape behind saveAPISectionHandler/
+// saveDatabaseSectionHandler/saveMapsSectionHandler: 405 on anything but
+// POST, decode the request body via decode, then merge just that section
+// into the stored config via saveConfigSection.
+func sectionSaveHandler(
+	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+	decode func(w http.ResponseWriter, r *http.Request) (merge func(cfg *config.Config), err error),
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		merge, err := decode(w, r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
+			return
+		}
+
+		saveConfigSection(w, r, cfgDB, webServer, reload, merge)
+	}
+}
+
+// decodeSectionHandler builds a sectionSaveHandler that decodes its request
+// body as a T and hands it to merge, factoring out the otherwise-identical
+// decode-then-merge shape shared by every section save endpoint below.
+func decodeSectionHandler[T any](
+	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+	merge func(cfg *config.Config, req T),
+) http.HandlerFunc {
+	return sectionSaveHandler(cfgDB, webServer, reload, func(w http.ResponseWriter, r *http.Request) (func(*config.Config), error) {
+		var req T
+		if err := decodeConfigBody(w, r, &req); err != nil {
+			return nil, err
+		}
+
+		return func(cfg *config.Config) { merge(cfg, req) }, nil
+	})
+}
+
+// saveAPISectionHandler serves POST /api/config/api: loads the currently
+// stored config, replaces just its API section with the request body, and
+// saves it. Requires edit_config_api (enforced at the route level).
+func saveAPISectionHandler(
+	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+) http.HandlerFunc {
+	return decodeSectionHandler(cfgDB, webServer, reload,
+		func(cfg *config.Config, req apiSectionRequest) { cfg.API = req.API })
+}
+
+// saveDatabaseSectionHandler serves POST /api/config/database, the Database
+// analogue of saveAPISectionHandler. Requires edit_config_database.
+func saveDatabaseSectionHandler(
+	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+) http.HandlerFunc {
+	return decodeSectionHandler(cfgDB, webServer, reload,
+		func(cfg *config.Config, req databaseSectionRequest) { cfg.Database = req.Database })
+}
+
+// saveMapsSectionHandler serves POST /api/config/maps, the Maps analogue of
+// saveAPISectionHandler. Requires edit_config_maps.
+func saveMapsSectionHandler(
+	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+) http.HandlerFunc {
+	return decodeSectionHandler(cfgDB, webServer, reload,
+		func(cfg *config.Config, req mapsSectionRequest) { cfg.Maps = req.Maps })
+}
+
+// saveRawConfigHandler serves POST /api/config/raw: the whole-config raw
+// YAML save mode, kept for API completeness. Since it can touch any
+// section, it's gated (at the route level, in webserver.go) behind holding
+// all three edit_config_* permissions together.
+func saveRawConfigHandler(
+	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		var req struct {
+			Raw string `json:"raw"`
+		}
+		if err := decodeConfigBody(w, r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
+			return
+		}
+
+		var cfg config.Config
+		if err := yaml.Unmarshal([]byte(req.Raw), &cfg); err != nil {
+			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: fmt.Sprintf("parse raw YAML: %v", err)})
+			return
+		}
+
+		// Unlike a section save (see finishConfigSave's doc comment), raw
+		// represents the *entire* config in one shot, just like a YAML file
+		// passed to config.Parse — so, matching Parse's semantics, it's
+		// required to already be complete/valid before persisting.
+		cfg.WebServer = webServer
+
+		if cfg.API.Password == "" || cfg.Database.DSN == "" {
+			if err := fillStoredSecrets(r.Context(), cfgDB, &cfg); err != nil {
+				writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
+				return
+			}
+		}
+
+		if err := cfg.Validate(); err != nil {
+			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
+			return
+		}
+
+		finishConfigSave(w, r, cfgDB, webServer, reload, &cfg)
+	}
+}
+
+func decodeConfigBody(w http.ResponseWriter, r *http.Request, v any) error {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBodyBytes)).Decode(v); err != nil {
+		return fmt.Errorf("decode request: %w", err)
+	}
+
+	return nil
+}
+
+// saveConfigSection loads the currently stored config, applies merge (which
+// overwrites just one section), and hands off to finishConfigSave. Loading
+// first means every section untouched by merge keeps its existing stored
+// value, matching each tab's "save just this tab" semantics.
+func saveConfigSection(
 	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
-	reload func(context.Context) error,
+	reload func(context.Context) error, merge func(cfg *config.Config),
 ) {
-	var req configSaveRequest
-
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBodyBytes)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, configGetResponse{Error: fmt.Sprintf("decode request: %v", err)})
-		return
-	}
-
-	cfg, err := configSaveConfig(req)
+	cfg, err := cfgDB.Load(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
+		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
 		return
 	}
 
-	// Discard whatever WebServer the client submitted before validating, so
-	// a bad/irrelevant webServer value in the request can never even
-	// surface as a validation error — it's fixed by the bootstrap file.
+	merge(cfg)
+	finishConfigSave(w, r, cfgDB, webServer, reload, cfg)
+}
+
+// finishConfigSave is the common tail shared by every save path (per-section
+// and raw): discard/overwrite WebServer with the fixed bootstrap value, fill
+// back in any secret left blank (meaning "unchanged" — see
+// fillStoredSecrets), save, and apply the change live via reload.
+//
+// Deliberately not gated on cfg.Validate(): Config.Validate requires the
+// *whole* config to be complete (api.baseUrl, api credentials, database.dsn,
+// at least one map — see internal/config's Validate), which a single
+// section save can never satisfy on its own during initial setup — saving
+// just the API tab would always fail because Database/Maps aren't filled in
+// yet, and vice versa, so nothing could ever be saved for the first time.
+// Instead, an incomplete-but-persisted config is simply not applied live:
+// reload() below runs Validate() itself and reports why via ApplyError
+// (the same "saved, but not yet applied" outcome already used for a
+// valid-but-unreachable API/database), so each tab's edit is never lost
+// while the other tabs are still being filled in. saveRawConfigHandler is
+// the one exception — see its own comment.
+func finishConfigSave(
+	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
+	reload func(context.Context) error, cfg *config.Config,
+) {
+	// Discard whatever WebServer was submitted (or, for a raw save,
+	// unmarshaled) before saving, so a bad/irrelevant webServer value can
+	// never take effect — it's fixed by the bootstrap file.
 	cfg.WebServer = webServer
 
 	// The config page never shows stored secrets back to the browser (see
-	// getConfig/redactSecrets), so a blank password/DSN field means
-	// "unchanged", not "clear it" — fill them back in from what's already
-	// stored before validating/saving.
+	// getConfig/redactSecrets), so a blank password/DSN means "unchanged",
+	// not "clear it" — fill them back in from what's already stored before
+	// saving.
 	if cfg.API.Password == "" || cfg.Database.DSN == "" {
 		if err := fillStoredSecrets(r.Context(), cfgDB, cfg); err != nil {
 			writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
 			return
 		}
-	}
-
-	if err := cfg.Validate(); err != nil {
-		writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
-		return
 	}
 
 	if err := cfgDB.Save(r.Context(), cfg); err != nil {
@@ -155,26 +307,6 @@ func saveConfig(
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// configSaveConfig turns a configSaveRequest into a *config.Config: req.Raw
-// (YAML-unmarshaled, unvalidated) if set, else req.Cfg directly. Validation
-// happens once, uniformly, in saveConfig after the WebServer overlay.
-func configSaveConfig(req configSaveRequest) (*config.Config, error) {
-	if req.Raw != nil {
-		var cfg config.Config
-		if err := yaml.Unmarshal([]byte(*req.Raw), &cfg); err != nil {
-			return nil, fmt.Errorf("parse raw YAML: %w", err)
-		}
-
-		return &cfg, nil
-	}
-
-	if req.Cfg == nil {
-		return nil, errors.New("request has neither raw nor config")
-	}
-
-	return req.Cfg, nil
-}
-
 // redactSecrets clears cfg.API.Password and cfg.Database.DSN in place before
 // a *config.Config is sent to the browser (in either JSON or the Raw YAML
 // alongside it), so stored secrets are never echoed back into the config
@@ -189,7 +321,7 @@ func redactSecrets(cfg *config.Config) {
 // fillStoredSecrets fills cfg.API.Password and/or cfg.Database.DSN in from
 // the currently stored config when a save request submits either blank,
 // since the config page never shows the real values back to the browser, so
-// leaving a field blank means "unchanged" (see saveConfig). A brand
+// leaving a field blank means "unchanged" (see finishConfigSave). A brand
 // new/unconfigured install has no stored values to fall back to, which is
 // fine: the field just stays empty, exactly as if the user had typed
 // nothing.
@@ -214,6 +346,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// errorJSON builds the {"error": msg} body shared by every JSON handler in
+// this package that doesn't use configGetResponse's own Error field.
+func errorJSON(msg string) map[string]string {
+	return map[string]string{"error": msg}
 }
 
 // syncResponse is what POST /api/sync/{mapID} returns.

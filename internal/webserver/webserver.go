@@ -13,16 +13,18 @@ import (
 )
 
 // New builds an *http.Server serving the status page at "/" (with a
-// per-map "Sync" button hitting "/api/sync/{mapID}") and a config editor at
-// "/config" (backed by a JSON API at "/api/config") that reads and writes
-// cfgDB. It does not start listening; call ListenAndServe (typically in a
-// goroutine).
+// per-map "Sync" button hitting "/api/sync/{mapID}"), a config editor at
+// "/config" (backed by a JSON API at "/api/config" and its per-section save
+// endpoints), and a user management page at "/users" — all gated behind a
+// session-cookie login (see auth.go) and the logged-in user's permissions
+// (see configdb.Permissions). While no account exists yet, every request is
+// redirected to a one-time "/setup" page (setupGate) that creates the first,
+// fully-permissioned superuser account. It does not start listening; call
+// ListenAndServe (typically in a goroutine).
 //
-// A successful POST /api/config save also calls reload itself, so the
-// running process picks up the change immediately without a separate
-// action — see saveConfig. None of the config editor or sync endpoints have
-// authentication of their own, matching the status page they sit alongside —
-// only expose addr on a trusted network. webServer is the fixed,
+// A successful config save also calls reload itself, so the running process
+// picks up the change immediately without a separate action — see
+// finishConfigSave in config.go. webServer is the fixed,
 // bootstrap-file-sourced WebServer value: the config editor always displays
 // it for context but can never change it, since applying a changed
 // webServer.enabled/address needs a process restart the server itself can't
@@ -32,16 +34,52 @@ func New(
 	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
 ) *http.Server {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", statusHandler(rec))
-	mux.HandleFunc("/config", configPageHandler)
-	mux.HandleFunc("/api/config", configAPIHandler(cfgDB, webServer, reload))
-	mux.HandleFunc("/api/sync/", syncMapAPIHandler(syncMap))
+
+	mux.HandleFunc("/setup", setupHandler(cfgDB))
+	mux.HandleFunc("/login", loginHandler(cfgDB))
+	mux.HandleFunc("/logout", logoutHandler(cfgDB))
+	mux.HandleFunc("/api/me", requireUser(cfgDB, false)(meAPIHandler))
+
+	mux.HandleFunc("/", requirePermission(cfgDB, true, permViewStatus)(statusHandler(rec)))
+	mux.HandleFunc("/config", requirePermission(cfgDB, true, permViewConfig)(configPageHandler))
+	mux.HandleFunc("/users", requireSuperuser(cfgDB, true)(usersPageHandler))
+
+	mux.HandleFunc("/api/config", requirePermission(cfgDB, false, permViewConfig)(configAPIHandler(cfgDB, webServer)))
+	mux.HandleFunc("/api/config/api",
+		requirePermission(cfgDB, false, permEditConfigAPI)(saveAPISectionHandler(cfgDB, webServer, reload)))
+	mux.HandleFunc("/api/config/database",
+		requirePermission(cfgDB, false, permEditConfigDatabase)(saveDatabaseSectionHandler(cfgDB, webServer, reload)))
+	mux.HandleFunc("/api/config/maps",
+		requirePermission(cfgDB, false, permEditConfigMaps)(saveMapsSectionHandler(cfgDB, webServer, reload)))
+	mux.HandleFunc("/api/config/raw",
+		requirePermission(cfgDB, false, permAllEditConfig)(saveRawConfigHandler(cfgDB, webServer, reload)))
+	mux.HandleFunc("/api/sync/", requirePermission(cfgDB, false, permTriggerSync)(syncMapAPIHandler(syncMap)))
+
+	mux.HandleFunc("/api/users", requireSuperuser(cfgDB, false)(usersAPIHandler(cfgDB)))
+	mux.HandleFunc("/api/users/", requireSuperuser(cfgDB, false)(userAPIHandler(cfgDB)))
 
 	return &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           setupGate(cfgDB, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+}
+
+// permViewStatus and friends adapt configdb.Permissions' fields to the
+// func(configdb.Permissions) bool shape requirePermission expects.
+func permViewStatus(p configdb.Permissions) bool    { return p.ViewStatus }
+func permTriggerSync(p configdb.Permissions) bool   { return p.TriggerSync }
+func permViewConfig(p configdb.Permissions) bool    { return p.ViewConfig }
+func permEditConfigAPI(p configdb.Permissions) bool { return p.EditConfigAPI }
+
+func permEditConfigDatabase(p configdb.Permissions) bool { return p.EditConfigDatabase }
+func permEditConfigMaps(p configdb.Permissions) bool     { return p.EditConfigMaps }
+
+// permAllEditConfig gates the whole-config raw YAML save mode, which can
+// touch any section, behind holding all three edit_config_* permissions
+// together.
+func permAllEditConfig(p configdb.Permissions) bool {
+	return p.EditConfigAPI && p.EditConfigDatabase && p.EditConfigMaps
 }
 
 func statusHandler(rec *status.Recorder) http.HandlerFunc {
@@ -63,6 +101,7 @@ const statusPageHTML = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
+<script>` + themeInitScript + `</script>
 <title>go-sync-objects status</title>
 <meta http-equiv="refresh" content="10">
 <style>` + baseCSS + `</style>
@@ -72,8 +111,11 @@ const statusPageHTML = `<!DOCTYPE html>
   <span class="brand">go-sync-objects</span>
   <nav>
     <a href="/" class="active">Status</a>
-    <a href="/config">Config</a>
+    <a href="/config" id="nav-config">Config</a>
+    <a href="/users" id="nav-users">Users</a>
   </nav>
+  <nav id="account-nav"></nav>
+  <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode"></button>
 </div>
 
 <main>
@@ -140,9 +182,18 @@ const statusPageHTML = `<!DOCTYPE html>
 
 </main>
 
+<script>` + accountNavJS + themeToggleJS + `</script>
 <script>
 (function () {
   "use strict";
+
+  initThemeToggle();
+
+  initAccountNav(function (me) {
+    if (!me.permissions.triggerSync) {
+      document.querySelectorAll(".sync-map-btn").forEach(function (btn) { btn.style.display = "none"; });
+    }
+  });
 
   var msg = document.getElementById("msg");
   function showMessage(ok, text) {

@@ -112,6 +112,12 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		}
 	}
 
+	for _, stmt := range userSchemaStatements {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("create user schema: %w", err)
+		}
+	}
+
 	return s.migrateMapsInterval(ctx)
 }
 

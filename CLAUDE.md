@@ -74,7 +74,14 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   `PRAGMA foreign_keys = ON` (needed for `ON DELETE CASCADE` on `maps` deletes) reliably applies —
   SQLite pragmas are per-connection, and `database/sql`'s pool would otherwise silently hand out a
   fresh, pragma-less one. Unrelated to `internal/store` (MariaDB geo-object storage); no shared
-  code.
+  code. The same database also holds `users` and `sessions` tables (`internal/configdb/users.go`),
+  backing the web server's authentication — see the `internal/webserver` bullet below. Unlike the
+  config tables, these get real per-row CRUD methods (`CreateUser`, `VerifyPassword`, `ListUsers`,
+  `GetUser`, `UpdateUser`, `DeleteUser`, `CreateSession`, `SessionUser`, `DeleteSession`,
+  `UserCount`) rather than a single whole-graph `Load`/`Save`, since accounts are managed one at a
+  time through a real form, not a bulk editor like `maps`. Passwords are hashed with
+  `golang.org/x/crypto/bcrypt`; a session's random token is only ever stored as its SHA-256 hash
+  (`sessions.token_hash`) — the raw token lives solely in the browser's session cookie.
 - **`internal/tileserve`** — minimal synchronous HTTP client for tileserve-go. `Login()`
   exchanges username/password for a bearer token; `SetToken()` bypasses login when a token is
   already known. `GeoObjects(mapID, version)` fetches and JSON-decodes one map/version's objects
@@ -83,23 +90,28 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   (HTML+vanilla JS, no build step, sections split into tabs — API / Database / Maps) backed by a
   JSON API at `/api/config` (`internal/webserver/config.go`), now reading/writing a
   `*configdb.Store` instead of a file path. GET calls `cfgDB.Load` and overlays the fixed bootstrap
-  `WebServer` value onto the returned `Config` (still present in the JSON response and used
-  server-side for validation) — an empty/unconfigured database is not an error, so the structured
-  form always renders (blank on a fresh install) rather than falling back to raw-YAML mode, which
-  is now reserved for genuine load failures. POST accepts either a structured `config` object or a
-  `raw` YAML string, discards/overwrites whatever `webServer` value was submitted with the fixed
-  bootstrap one *before* validating (so a bad or irrelevant `webServer` edit can never even trigger
-  a validation error), validates via `Config.Validate`, and only calls `cfgDB.Save` if that
-  passes — an invalid save is rejected with the validation error and the database is left
-  untouched, and also calls `reload` (see below) on every successful save so the change applies to
-  the running process immediately. `webServer.enabled`/`address` have no inputs in the config page
-  at all (removed entirely, not just disabled) since changing them isn't possible through this API
-  and always needs a process restart — see below. The status page instead carries one action per
-  configured map: a "Sync" button next to each map/version row in the results table posts to
-  `POST /api/sync/{mapID}` (`syncMapAPIHandler`, with the ID taken from the URL path), wired to
-  `runtime.runSyncMaps` with a single-ID set, to run that one map's sync immediately rather than
-  waiting for its next `interval` tick. Like the status page, none of this has authentication —
-  only enable `webServer` on a trusted network.
+  `WebServer` value onto the returned `Config` (still present in the JSON response) — an
+  empty/unconfigured database is not an error, so the structured form always renders (blank on a
+  fresh install) rather than falling back to raw-YAML mode, which is now reserved for genuine load
+  failures. Saving is per-section rather than one whole-config POST: each tab posts to its own
+  endpoint (`POST /api/config/api`, `/api/config/database`, `/api/config/maps`), which loads the
+  currently stored config, replaces just that one section, and saves — deliberately *not* gated on
+  `Config.Validate()` passing for the whole merged config (see `finishConfigSave`'s doc comment in
+  `config.go`), since that would make it impossible to ever save a single tab during initial setup
+  (each tab alone is always "incomplete"). Instead every save calls `reload` (see below)
+  immediately afterward and reports whether the *whole* config was valid enough to apply live via
+  the response's `applied`/`applyError` fields — the same mechanism already used for a valid-but-
+  unreachable API/database. `POST /api/config/raw` is the one exception: it's a whole-config raw
+  YAML save (kept for API completeness, no longer exposed in the tabbed UI) and, like a YAML file
+  passed to `config.Parse`, *is* required to already be complete/valid before it's persisted.
+  `webServer.enabled`/`address` have no inputs in the config page at all (removed entirely, not
+  just disabled) since changing them isn't possible through this API and always needs a process
+  restart — see below. The status page carries one action per configured map: a "Sync" button next
+  to each map/version row in the results table posts to `POST /api/sync/{mapID}`
+  (`syncMapAPIHandler`, with the ID taken from the URL path), wired to `runtime.runSyncMaps` with a
+  single-ID set, to run that one map's sync immediately rather than waiting for its next `interval`
+  tick. A `/users` page (superuser-only) manages accounts. See "Authentication & permissions"
+  below for how every route in this package is now gated.
 - **`internal/store`** — owns the MariaDB schema (`EnsureSchema`, idempotent
   `CREATE TABLE IF NOT EXISTS`) and writes (`UpsertGeoObjects`, one transaction per call, batched
   `INSERT ... ON DUPLICATE KEY UPDATE` keyed on `uuid`). Depends on `internal/tileserve` for the
@@ -108,6 +120,38 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   written on every row synced from that map) and the database may enable `pruneMissing` (delete,
   within the same transaction, any previously-synced row for a map_uuid+version scope that the
   latest fetch no longer returned).
+
+### Authentication & permissions
+
+Every route the web server serves requires a logged-in account — there is no public route
+anymore, including the status page. Accounts live in `configdb`'s `users`/`sessions` tables (see
+above) and are managed at `/users` (superuser-only, backed by `/api/users`, `/api/users/{id}`).
+
+Each account has six independent boolean permissions (`configdb.Permissions`): `view_status`,
+`trigger_sync`, `view_config`, and three config-editing permissions — `edit_config_api`,
+`edit_config_database`, `edit_config_maps` — one per `/config` tab, enforced independently at each
+tab's own save endpoint (see the `internal/webserver` bullet above). There is deliberately no
+umbrella "edit config" flag. A separate `is_superuser` flag (not one of the six) gates `/users`
+only — it's orthogonal to the six feature permissions, not a superset of them, so a superuser
+account with none of the six still can't see the status page or `/config`, and a fully-permissioned
+non-superuser still can't reach `/users`.
+
+`internal/webserver/auth.go` implements this: `requireUser`/`requirePermission`/`requireSuperuser`
+are `http.HandlerFunc` wrappers, parameterized by `page bool` — `true` redirects an unauthenticated/
+unauthorized browser request to `/login` (or 403s with a plain-text page), `false` writes a JSON
+401/403 for the fetch-driven API. Sessions are a random token (in an `HttpOnly`, `SameSite=Lax`
+cookie — `Secure` only when the request arrived over TLS, since the server is still meant to work
+unencrypted on a trusted network) resolved via `configdb.Store.SessionUser`, which only ever sees
+the token's SHA-256 hash.
+
+While the `users` table is empty (a fresh install), `setupGate` (wrapping the whole mux) redirects
+every request to a one-time `/setup` page instead; the account created there always gets every
+permission plus superuser, since there's no one else yet to have granted anything more selectively.
+Once at least one account exists, `/setup` redirects to `/login` forever after. `/api/me` returns
+the logged-in user's username/permissions/superuser flag, and every page's shared inline script
+(`accountNavJS` in `shared_script.go`) calls it to render the topbar's account/logout control and
+hide nav links / disable form sections the user can't use — purely a UX nicety, since every actual
+enforcement happens server-side per route.
 
 `main.go`'s `run(ctx, configPath)` orchestrates the whole flow and is the place to look first when
 tracing behavior end-to-end: load the bootstrap file → open `configdb` → attempt an initial
