@@ -41,8 +41,8 @@ const configPageHTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>go-sync-objects config</h1>
-<p><a href="/">&larr; Back to status</a> &middot; <a href="#" id="toggle-raw">Edit as raw YAML</a></p>
-<p class="hint">Saving writes to the config database (comments are not preserved in the raw-YAML view).</p>
+<p><a href="/">&larr; Back to status</a></p>
+<p class="hint">Saving writes to the config database.</p>
 
 <div id="msg"></div>
 
@@ -110,16 +110,6 @@ const configPageHTML = `<!DOCTYPE html>
   <div class="actions">
     <button type="button" class="primary" id="save-structured">Save</button>
     <button type="button" id="reload">Discard changes (reload form)</button>
-  </div>
-</div>
-
-<div id="raw-editor" hidden>
-  <label for="raw-yaml">Raw YAML</label>
-  <p class="hint">webServer is shown here for reference only &mdash; edits to it are discarded on save.</p>
-  <textarea id="raw-yaml" rows="30" spellcheck="false"></textarea>
-  <div class="actions">
-    <button type="button" class="primary" id="save-raw">Save</button>
-    <button type="button" id="reload-raw">Discard changes (reload form)</button>
   </div>
 </div>
 
@@ -284,14 +274,12 @@ const configPageHTML = `<!DOCTYPE html>
 
   function load() {
     fetch("/api/config").then(function (r) { return r.json(); }).then(function (resp) {
-      document.getElementById("raw-yaml").value = resp.raw || "";
       if (resp.config) {
         populateForm(resp.config);
         msg.className = "";
         msg.textContent = "";
       } else {
-        showMessage(false, "Failed to load config; showing raw YAML instead.\n" + (resp.error || ""));
-        setRawMode(true);
+        showMessage(false, "Failed to load config.\n" + (resp.error || ""));
       }
     }).catch(function (e) { showMessage(false, "Failed to load config: " + e); });
   }
@@ -301,22 +289,6 @@ const configPageHTML = `<!DOCTYPE html>
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: collectForm() })
-    }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        if (res.ok) {
-          showMessage(true, "Saved. Click \"Apply saved config now\" to use it without restarting.");
-          document.getElementById("raw-yaml").value = res.body.raw || "";
-        } else {
-          showMessage(false, "Not saved: " + res.body.error);
-        }
-      }).catch(function (e) { showMessage(false, "Failed to save config: " + e); });
-  });
-
-  document.getElementById("save-raw").addEventListener("click", function () {
-    fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ raw: document.getElementById("raw-yaml").value })
     }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) {
         if (res.ok) {
@@ -361,20 +333,6 @@ const configPageHTML = `<!DOCTYPE html>
   });
 
   document.getElementById("reload").addEventListener("click", load);
-  document.getElementById("reload-raw").addEventListener("click", load);
-
-  var rawMode = false;
-  function setRawMode(on) {
-    rawMode = on;
-    document.getElementById("structured-editor").hidden = on;
-    document.getElementById("raw-editor").hidden = !on;
-    document.getElementById("toggle-raw").textContent = on ? "Edit as form" : "Edit as raw YAML";
-  }
-
-  document.getElementById("toggle-raw").addEventListener("click", function (e) {
-    e.preventDefault();
-    setRawMode(!rawMode);
-  });
 
   load();
 })();
