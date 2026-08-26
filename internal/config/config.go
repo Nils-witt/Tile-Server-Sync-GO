@@ -72,6 +72,21 @@ type MapTarget struct {
 	// fields map onto via Database.Columns and are created automatically
 	// (as VARCHAR(255) NOT NULL DEFAULT '') by EnsureSchema.
 	StaticColumns map[string]string `yaml:"staticColumns" json:"staticColumns"`
+	// Interval, if set, is a Go duration string (e.g. "5m", "1h") for how
+	// often this map re-syncs. If empty, this map is synced once (at
+	// startup, or once picked up by a live config reload) and not
+	// automatically repeated — other maps with their own Interval keep
+	// repeating on their own schedule regardless. See runLoop in main.go.
+	Interval string `yaml:"interval" json:"interval"`
+	// interval is Interval parsed by validateInterval(); read it via
+	// SyncInterval.
+	interval time.Duration
+}
+
+// SyncInterval returns m's parsed Interval, or 0 if none was configured,
+// meaning: sync this map once and don't automatically repeat.
+func (m *MapTarget) SyncInterval() time.Duration {
+	return m.interval
 }
 
 // API holds connection details for the tileserve-go instance.
@@ -136,19 +151,22 @@ type Config struct {
 	Database  Database    `yaml:"database"  json:"database"`
 	Maps      []MapTarget `yaml:"maps"      json:"maps"`
 	WebServer WebServer   `yaml:"webServer" json:"webServer"`
-	// Interval, if set, is a Go duration string (e.g. "5m", "1h") for how
-	// often to repeat the full sync. If empty, the sync runs once and exits.
-	Interval string `yaml:"interval" json:"interval"`
-	// interval is Interval parsed by validate(); read it via SyncInterval.
-	interval time.Duration
 }
 
 const defaultWebServerAddress = ":8080"
 
-// SyncInterval returns the parsed Interval, or 0 if none was configured,
-// meaning: run the sync once and exit.
-func (c *Config) SyncInterval() time.Duration {
-	return c.interval
+// HasRecurringMaps reports whether any configured map has a positive
+// Interval. If false, every configured map is one-shot, so a caller that
+// only runs once when there's nothing to repeat (see main.go's run, when
+// webServer is disabled) knows it can sync once and exit rather than loop.
+func (c *Config) HasRecurringMaps() bool {
+	for _, m := range c.Maps {
+		if m.SyncInterval() > 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Load reads and parses the YAML config file at path. path is a
@@ -211,40 +229,16 @@ func (c *Config) Validate() error {
 		return errors.New("at least one entry under maps is required")
 	}
 
-	if err := c.validateInterval(); err != nil {
-		return err
-	}
-
 	c.WebServer.applyDefault()
 
 	return c.validateMaps()
 }
 
-// validateInterval parses Interval (if set) and stores the result in
-// interval for SyncInterval to return.
-func (c *Config) validateInterval() error {
-	if c.Interval == "" {
-		return nil
-	}
-
-	d, err := time.ParseDuration(c.Interval)
-	if err != nil {
-		return fmt.Errorf("interval %q is not a valid duration: %w", c.Interval, err)
-	}
-
-	if d <= 0 {
-		return fmt.Errorf("interval %q must be positive", c.Interval)
-	}
-
-	c.interval = d
-
-	return nil
-}
-
-// validateMaps checks every maps[] entry, including that each map's
+// validateMaps checks every maps[] entry — including parsing its Interval
+// (storing the result for SyncInterval to return) and checking that its
 // staticColumns are valid SQL identifiers that don't collide with a
-// database.columns target (split out from validate to keep its cyclomatic
-// complexity down).
+// database.columns target — split out from validate to keep its cyclomatic
+// complexity down.
 func (c *Config) validateMaps() error {
 	reservedCols := make(map[string]bool, len(c.Database.Columns))
 	for _, col := range c.Database.Columns {
@@ -253,13 +247,19 @@ func (c *Config) validateMaps() error {
 		}
 	}
 
-	for i, m := range c.Maps {
+	for i := range c.Maps {
+		m := &c.Maps[i]
+
 		if m.ID == "" {
 			return fmt.Errorf("maps[%d].id is required", i)
 		}
 
 		if len(m.Versions) == 0 {
 			return fmt.Errorf("maps[%d].versions must contain at least one version", i)
+		}
+
+		if err := m.validateInterval(i); err != nil {
+			return err
 		}
 
 		for col := range m.StaticColumns {
@@ -272,6 +272,28 @@ func (c *Config) validateMaps() error {
 			}
 		}
 	}
+
+	return nil
+}
+
+// validateInterval parses m.Interval (if set) and stores the result in
+// m.interval for SyncInterval to return. i is the map's index in Config.Maps,
+// used only to name it in an error.
+func (m *MapTarget) validateInterval(i int) error {
+	if m.Interval == "" {
+		return nil
+	}
+
+	d, err := time.ParseDuration(m.Interval)
+	if err != nil {
+		return fmt.Errorf("maps[%d].interval %q is not a valid duration: %w", i, m.Interval, err)
+	}
+
+	if d <= 0 {
+		return fmt.Errorf("maps[%d].interval %q must be positive", i, m.Interval)
+	}
+
+	m.interval = d
 
 	return nil
 }

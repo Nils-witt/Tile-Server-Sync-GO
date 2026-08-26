@@ -2,20 +2,21 @@
 #
 # This is now just a small bootstrap file: it points at the SQLite database
 # holding the rest of the configuration (API credentials, database target,
-# maps, interval) and configures the optional status/config web server.
-# Everything that used to live directly in this file (api, database, maps,
-# interval) is entered instead through that web server's "/config" page
-# after startup — there's no other way to set it on a fresh install, so
-# webServer.enabled needs to be true at least once to configure anything.
+# and maps — each with its own optional sync interval) and configures the
+# optional status/config web server. Everything that used to live directly
+# in this file (api, database, maps) is entered instead through that web
+# server's "/config" page after startup — there's no other way to set it on
+# a fresh install, so webServer.enabled needs to be true at least once to
+# configure anything.
 #
 # config.yaml is git-ignored so nothing sensitive lands in it — the SQLite
 # database itself (default "config.db", next to this file) does hold
 # credentials, so treat its file permissions the same way you would this
 # file's.
 
-# Path to the SQLite database file holding api/database/maps/interval
-# config. Relative paths resolve against this file's own directory.
-# Defaults to "config.db" if omitted.
+# Path to the SQLite database file holding api/database/maps (each map's
+# own interval included) config. Relative paths resolve against this file's
+# own directory. Defaults to "config.db" if omitted.
 # configDb: "config.db"
 
 # Optional HTTP server exposing a status page (last sync results per

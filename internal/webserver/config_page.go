@@ -3,67 +3,47 @@ package webserver
 // configPageHTML is the config editor page served at GET /config. It is a
 // static page (unlike the status page, it doesn't need server-side
 // templating: all data comes from and goes to /api/config via fetch), styled
-// to match the status page. The script builds DOM nodes with
-// createElement/textContent rather than innerHTML for any server-supplied
-// value, since that value is attacker-controllable if configPath is ever
-// edited by something untrusted.
+// to match the status page via the shared baseCSS. The script builds DOM
+// nodes with createElement/textContent rather than innerHTML for any
+// server-supplied value, since that value is attacker-controllable if
+// configPath is ever edited by something untrusted.
 const configPageHTML = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <title>go-sync-objects config</title>
-<style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; max-width: 60rem; }
-  h1 { font-size: 1.3rem; }
-  h2 { font-size: 1.05rem; margin-top: 2rem; }
-  fieldset { border: 1px solid #ccc; border-radius: 4px; margin: 0 0 1rem; padding: 0.75rem 1rem; }
-  legend { font-weight: 600; padding: 0 0.4rem; }
-  label { display: block; font-size: 0.85rem; margin: 0.5rem 0 0.15rem; }
-  input[type=text], input[type=password], textarea {
-    width: 100%; box-sizing: border-box; font: inherit; font-size: 0.9rem;
-    padding: 0.3rem 0.4rem; border: 1px solid #bbb; border-radius: 3px;
-  }
-  textarea { font-family: ui-monospace, monospace; }
-  .checkbox-row { display: flex; align-items: center; gap: 0.4rem; margin: 0.5rem 0; }
-  .checkbox-row label { margin: 0; }
-  .col-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem 1rem; }
-  .map-row { border: 1px dashed #bbb; border-radius: 4px; padding: 0.6rem 0.8rem; margin-bottom: 0.6rem; }
-  button { font: inherit; font-size: 0.85rem; padding: 0.35rem 0.8rem; border-radius: 4px; border: 1px solid #999; background: #f5f5f5; cursor: pointer; }
-  button.primary { background: #1a7f37; color: #fff; border-color: #1a7f37; }
-  button.danger { background: #fff; color: #c0392b; border-color: #c0392b; }
-  button:hover { filter: brightness(0.95); }
-  #msg { padding: 0.6rem 0.8rem; border-radius: 4px; margin: 1rem 0; display: none; }
-  #msg.ok { display: block; background: #e6f4ea; color: #1a7f37; }
-  #msg.err { display: block; background: #fbeaea; color: #c0392b; white-space: pre-wrap; }
-  .hint { color: #666; font-size: 0.8rem; margin: 0.15rem 0 0; }
-  .actions { margin-top: 1.5rem; display: flex; gap: 0.5rem; }
-</style>
+<style>` + baseCSS + `</style>
 </head>
 <body>
-<h1>go-sync-objects config</h1>
-<p><a href="/">&larr; Back to status</a></p>
-<p class="hint">Saving writes to the config database.</p>
+<div class="topbar">
+  <span class="brand">go-sync-objects</span>
+  <nav>
+    <a href="/">Status</a>
+    <a href="/config" class="active">Config</a>
+  </nav>
+</div>
 
-<div id="msg"></div>
+<main>
 
-<p>
-  <button type="button" class="primary" id="reload-running">Apply saved config now</button>
-  <span class="hint">Makes the running process re-read the file on disk and use it immediately &mdash;
-  API credentials, database settings, maps, and interval all take effect right away, no restart
-  needed. The web server's own enabled/address setting is the one exception: that still needs a
-  restart.</span>
-</p>
+<div id="msg" class="banner"></div>
 
-<p>
-  <button type="button" id="sync-now">Sync now</button>
-  <span class="hint">Runs a sync immediately using whatever the running process currently has
-  loaded, instead of waiting for the next scheduled interval. Save and apply your changes above
-  first if you want this sync to use them. May take a while for large maps.</span>
-</p>
+<p class="hint" style="margin-bottom:1.1rem;">Saving writes to the config database and applies it
+to the running process immediately &mdash; API credentials, database settings, and maps (including
+each map's own interval) all take effect right away, no restart needed. To run a sync immediately
+instead of waiting for a map's interval, use the per-map Sync button on the
+<a href="/">status page</a>.</p>
 
 <div id="structured-editor">
-  <fieldset>
-    <legend>API</legend>
+
+  <div class="tabs" role="tablist">
+    <button type="button" class="tab-btn" data-tab="api" role="tab">API</button>
+    <button type="button" class="tab-btn" data-tab="db" role="tab">Database</button>
+    <button type="button" class="tab-btn" data-tab="maps" role="tab">Maps</button>
+  </div>
+
+  <section class="card tab-panel" id="section-api" data-tab="api">
+    <h2>API</h2>
+    <p class="hint">Credentials for the tileserve-go instance objects are fetched from.</p>
     <label for="api-baseurl">Base URL</label>
     <input type="text" id="api-baseurl" placeholder="http://localhost:8085">
     <label for="api-username">Username</label>
@@ -72,46 +52,40 @@ const configPageHTML = `<!DOCTYPE html>
     <input type="text" id="api-password">
     <label for="api-token">Token (used instead of username/password if set)</label>
     <input type="text" id="api-token">
-  </fieldset>
+  </section>
 
-  <fieldset>
-    <legend>Sync</legend>
-    <label for="interval">Interval (Go duration, e.g. "5m"; empty = run once and exit)</label>
-    <input type="text" id="interval" placeholder="5m">
-  </fieldset>
-
-  <fieldset>
-    <legend>Status web server</legend>
-    <div class="checkbox-row"><input type="checkbox" id="ws-enabled" disabled><label for="ws-enabled">Enabled</label></div>
-    <label for="ws-address">Address</label>
-    <input type="text" id="ws-address" placeholder=":8080" disabled>
-    <p class="hint">Set via the bootstrap config file's webServer.enabled/address and requires a
-    process restart to change &mdash; edits here are not saved.</p>
-  </fieldset>
-
-  <fieldset>
-    <legend>Database</legend>
+  <section class="card tab-panel" id="section-db" data-tab="db">
+    <h2>Database</h2>
+    <p class="hint">Where synced geo objects are written.</p>
     <label for="db-dsn">DSN</label>
     <input type="text" id="db-dsn" placeholder="user:password@tcp(127.0.0.1:3306)/tileserve?parseTime=true">
     <label for="db-table">Table</label>
     <input type="text" id="db-table" placeholder="geo_objects">
     <div class="checkbox-row"><input type="checkbox" id="db-prune"><label for="db-prune">Prune missing rows after each map/version sync</label></div>
 
-    <label>Column mapping (blank = skip that column)</label>
-    <div class="col-grid" id="col-grid"></div>
-  </fieldset>
+    <details style="margin-top:0.9rem;">
+      <summary style="cursor:pointer; font-weight:500; font-size:0.85rem;">Column mapping (advanced &mdash; leave blank to use defaults)</summary>
+      <div class="col-grid" id="col-grid"></div>
+    </details>
+  </section>
 
-  <fieldset>
-    <legend>Maps</legend>
+  <section class="card tab-panel" id="section-maps" data-tab="maps">
+    <h2>Maps</h2>
+    <p class="hint">Each map is fetched independently, on its own optional interval.</p>
     <div id="maps-container"></div>
-    <button type="button" id="add-map">+ Add map</button>
-  </fieldset>
+    <div class="actions-row">
+      <button type="button" id="add-map">+ Add map</button>
+    </div>
+  </section>
 
-  <div class="actions">
+  <div class="actions-row">
     <button type="button" class="primary" id="save-structured">Save</button>
     <button type="button" id="reload">Discard changes (reload form)</button>
   </div>
+
 </div>
+
+</main>
 
 <script>
 (function () {
@@ -140,13 +114,56 @@ const configPageHTML = `<!DOCTYPE html>
     colGrid.appendChild(wrap);
   });
 
+  var tabButtons = Array.prototype.slice.call(document.querySelectorAll(".tab-btn"));
+  var tabPanels = Array.prototype.slice.call(document.querySelectorAll(".tab-panel"));
+
+  function activateTab(name) {
+    tabButtons.forEach(function (btn) { btn.classList.toggle("active", btn.dataset.tab === name); });
+    tabPanels.forEach(function (panel) { panel.hidden = panel.dataset.tab !== name; });
+  }
+
+  tabButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      activateTab(btn.dataset.tab);
+      history.replaceState(null, "", "#" + btn.dataset.tab);
+    });
+  });
+
+  var initialTab = (location.hash || "").replace("#", "");
+  if (!tabButtons.some(function (btn) { return btn.dataset.tab === initialTab; })) {
+    initialTab = "api";
+  }
+  activateTab(initialTab);
+
   var mapsContainer = document.getElementById("maps-container");
 
-  function buildMapRow(m) {
-    m = m || { id: "", versions: [], staticColumns: {} };
+  function summarizeMap(idInput, versionsInput, intervalInput, idSpan, metaSpan) {
+    idSpan.textContent = idInput.value.trim() || "(new map)";
+    var versions = versionsInput.value.split(",").map(function (v) { return v.trim(); }).filter(Boolean);
+    var parts = [];
+    parts.push(versions.length === 1 ? "1 version" : versions.length + " versions");
+    parts.push(intervalInput.value.trim() ? "every " + intervalInput.value.trim() : "one-shot");
+    metaSpan.textContent = parts.join(" · ");
+  }
 
-    var row = document.createElement("div");
-    row.className = "map-row";
+  function buildMapRow(m, openByDefault) {
+    m = m || { id: "", versions: [], interval: "", staticColumns: {} };
+
+    var details = document.createElement("details");
+    details.className = "map-card";
+    details.open = !!openByDefault;
+
+    var summary = document.createElement("summary");
+    var idSpan = document.createElement("span");
+    idSpan.className = "map-summary-id";
+    var metaSpan = document.createElement("span");
+    metaSpan.className = "map-summary-meta";
+    summary.appendChild(idSpan);
+    summary.appendChild(metaSpan);
+    details.appendChild(summary);
+
+    var body = document.createElement("div");
+    body.className = "map-body";
 
     var idLabel = document.createElement("label");
     idLabel.textContent = "Map ID";
@@ -161,6 +178,14 @@ const configPageHTML = `<!DOCTYPE html>
     versionsInput.type = "text";
     versionsInput.className = "map-versions";
     versionsInput.value = (m.versions || []).join(", ");
+
+    var intervalLabel = document.createElement("label");
+    intervalLabel.textContent = "Interval (Go duration, e.g. \"5m\"; empty = sync once, no automatic repeat)";
+    var intervalInput = document.createElement("input");
+    intervalInput.type = "text";
+    intervalInput.className = "map-interval";
+    intervalInput.placeholder = "5m";
+    intervalInput.value = m.interval || "";
 
     var colsLabel = document.createElement("label");
     colsLabel.textContent = "Static columns (one key=value per line)";
@@ -177,21 +202,40 @@ const configPageHTML = `<!DOCTYPE html>
     removeBtn.type = "button";
     removeBtn.className = "danger";
     removeBtn.textContent = "Remove map";
-    removeBtn.addEventListener("click", function () { row.remove(); });
+    removeBtn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      details.remove();
+    });
 
-    row.appendChild(idLabel);
-    row.appendChild(idInput);
-    row.appendChild(versionsLabel);
-    row.appendChild(versionsInput);
-    row.appendChild(colsLabel);
-    row.appendChild(colsArea);
-    row.appendChild(removeBtn);
+    body.appendChild(idLabel);
+    body.appendChild(idInput);
+    body.appendChild(versionsLabel);
+    body.appendChild(versionsInput);
+    body.appendChild(intervalLabel);
+    body.appendChild(intervalInput);
+    body.appendChild(colsLabel);
+    body.appendChild(colsArea);
+    var removeWrap = document.createElement("div");
+    removeWrap.className = "actions-row";
+    removeWrap.appendChild(removeBtn);
+    body.appendChild(removeWrap);
 
-    return row;
+    details.appendChild(body);
+
+    function refreshSummary() { summarizeMap(idInput, versionsInput, intervalInput, idSpan, metaSpan); }
+    idInput.addEventListener("input", refreshSummary);
+    versionsInput.addEventListener("input", refreshSummary);
+    intervalInput.addEventListener("input", refreshSummary);
+    refreshSummary();
+
+    return details;
   }
 
   document.getElementById("add-map").addEventListener("click", function () {
-    mapsContainer.appendChild(buildMapRow(null));
+    var row = buildMapRow(null, true);
+    mapsContainer.appendChild(row);
+    row.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    row.querySelector(".map-id").focus();
   });
 
   function parseStaticColumns(text) {
@@ -208,12 +252,13 @@ const configPageHTML = `<!DOCTYPE html>
 
   function collectMaps() {
     var maps = [];
-    mapsContainer.querySelectorAll(".map-row").forEach(function (row) {
+    mapsContainer.querySelectorAll(".map-card").forEach(function (row) {
       var id = row.querySelector(".map-id").value.trim();
       var versions = row.querySelector(".map-versions").value
         .split(",").map(function (v) { return v.trim(); }).filter(Boolean);
+      var interval = row.querySelector(".map-interval").value.trim();
       var staticColumns = parseStaticColumns(row.querySelector(".map-static-columns").value);
-      maps.push({ id: id, versions: versions, staticColumns: staticColumns });
+      maps.push({ id: id, versions: versions, interval: interval, staticColumns: staticColumns });
     });
     return maps;
   }
@@ -223,9 +268,6 @@ const configPageHTML = `<!DOCTYPE html>
     document.getElementById("api-username").value = cfg.api.username || "";
     document.getElementById("api-password").value = cfg.api.password || "";
     document.getElementById("api-token").value = cfg.api.token || "";
-    document.getElementById("interval").value = cfg.interval || "";
-    document.getElementById("ws-enabled").checked = !!cfg.webServer.enabled;
-    document.getElementById("ws-address").value = cfg.webServer.address || "";
     document.getElementById("db-dsn").value = cfg.database.dsn || "";
     document.getElementById("db-table").value = cfg.database.table || "";
     document.getElementById("db-prune").checked = !!cfg.database.pruneMissing;
@@ -237,7 +279,7 @@ const configPageHTML = `<!DOCTYPE html>
     });
 
     mapsContainer.innerHTML = "";
-    (cfg.maps || []).forEach(function (m) { mapsContainer.appendChild(buildMapRow(m)); });
+    (cfg.maps || []).forEach(function (m) { mapsContainer.appendChild(buildMapRow(m, false)); });
   }
 
   function collectForm() {
@@ -253,7 +295,6 @@ const configPageHTML = `<!DOCTYPE html>
         password: document.getElementById("api-password").value,
         token: document.getElementById("api-token").value.trim()
       },
-      interval: document.getElementById("interval").value.trim(),
       // webServer is intentionally omitted: it's fixed by the bootstrap
       // file and the server ignores/overwrites it on save regardless.
       database: {
@@ -268,7 +309,7 @@ const configPageHTML = `<!DOCTYPE html>
 
   var msg = document.getElementById("msg");
   function showMessage(ok, text) {
-    msg.className = ok ? "ok" : "err";
+    msg.className = "banner " + (ok ? "ok" : "err");
     msg.textContent = text;
   }
 
@@ -276,7 +317,7 @@ const configPageHTML = `<!DOCTYPE html>
     fetch("/api/config").then(function (r) { return r.json(); }).then(function (resp) {
       if (resp.config) {
         populateForm(resp.config);
-        msg.className = "";
+        msg.className = "banner";
         msg.textContent = "";
       } else {
         showMessage(false, "Failed to load config.\n" + (resp.error || ""));
@@ -292,44 +333,15 @@ const configPageHTML = `<!DOCTYPE html>
     }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) {
         if (res.ok) {
-          showMessage(true, "Saved. Click \"Apply saved config now\" to use it without restarting.");
+          if (res.body.applied) {
+            showMessage(true, "Saved and applied to the running process.");
+          } else {
+            showMessage(false, "Saved, but failed to apply to the running process: " + res.body.applyError);
+          }
         } else {
           showMessage(false, "Not saved: " + res.body.error);
         }
       }).catch(function (e) { showMessage(false, "Failed to save config: " + e); });
-  });
-
-  document.getElementById("reload-running").addEventListener("click", function () {
-    fetch("/api/reload", { method: "POST" })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        if (res.ok) {
-          showMessage(true, "Running process now using the saved config (webServer settings still need a restart).");
-        } else {
-          showMessage(false, "Reload failed: " + res.body.error);
-        }
-      }).catch(function (e) { showMessage(false, "Failed to trigger reload: " + e); });
-  });
-
-  document.getElementById("sync-now").addEventListener("click", function () {
-    var btn = document.getElementById("sync-now");
-    btn.disabled = true;
-    btn.textContent = "Syncing…";
-    showMessage(true, "Sync in progress…");
-
-    fetch("/api/sync", { method: "POST" })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        if (res.ok) {
-          showMessage(true, "Synced " + res.body.synced + " object(s).");
-        } else {
-          showMessage(false, "Sync failed: " + res.body.error);
-        }
-      }).catch(function (e) { showMessage(false, "Failed to trigger sync: " + e); })
-      .then(function () {
-        btn.disabled = false;
-        btn.textContent = "Sync now";
-      });
   });
 
   document.getElementById("reload").addEventListener("click", load);

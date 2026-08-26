@@ -14,8 +14,9 @@ const defaultConfigDBName = "config.db"
 
 // Bootstrap is the minimal file/CLI-driven config: just enough to find the
 // SQLite database holding everything else (API credentials, database
-// target, maps, interval) and to configure the optional status/config web
-// server. WebServer lives here rather than in that database because
+// target, maps — each with its own optional sync interval) and to configure
+// the optional status/config web server. WebServer lives here rather than in
+// that database because
 // changing it already requires a process restart (the HTTP server can't
 // restart itself mid-request), so there's nothing to gain by making it
 // reloadable.

@@ -12,30 +12,30 @@ import (
 	"time"
 )
 
-// New builds an *http.Server serving the status page at "/" and a config
-// editor at "/config" (backed by a JSON API at "/api/config") that reads and
-// writes cfgDB, plus two action endpoints: "/api/reload" calls reload to
-// make the running process pick up cfgDB's current contents immediately,
-// without a restart, and "/api/sync" calls syncNow to run a sync immediately
-// instead of waiting for the next scheduled interval tick. It does not start
-// listening; call ListenAndServe (typically in a goroutine).
+// New builds an *http.Server serving the status page at "/" (with a
+// per-map "Sync" button hitting "/api/sync/{mapID}") and a config editor at
+// "/config" (backed by a JSON API at "/api/config") that reads and writes
+// cfgDB. It does not start listening; call ListenAndServe (typically in a
+// goroutine).
 //
-// None of the config editor, reload, or sync endpoints have authentication
-// of their own, matching the status page they sit alongside — only expose
-// addr on a trusted network. webServer is the fixed, bootstrap-file-sourced
-// WebServer value: the config editor always displays it for context but can
-// never change it, since applying a changed webServer.enabled/address needs
-// a process restart the server itself can't safely trigger mid-request.
+// A successful POST /api/config save also calls reload itself, so the
+// running process picks up the change immediately without a separate
+// action — see saveConfig. None of the config editor or sync endpoints have
+// authentication of their own, matching the status page they sit alongside —
+// only expose addr on a trusted network. webServer is the fixed,
+// bootstrap-file-sourced WebServer value: the config editor always displays
+// it for context but can never change it, since applying a changed
+// webServer.enabled/address needs a process restart the server itself can't
+// safely trigger mid-request.
 func New(
 	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
-	reload func(context.Context) error, syncNow func(context.Context) (int, error),
+	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
 ) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", statusHandler(rec))
 	mux.HandleFunc("/config", configPageHandler)
-	mux.HandleFunc("/api/config", configAPIHandler(cfgDB, webServer))
-	mux.HandleFunc("/api/reload", reloadAPIHandler(reload))
-	mux.HandleFunc("/api/sync", syncAPIHandler(syncNow))
+	mux.HandleFunc("/api/config", configAPIHandler(cfgDB, webServer, reload))
+	mux.HandleFunc("/api/sync/", syncMapAPIHandler(syncMap))
 
 	return &http.Server{
 		Addr:              addr,
@@ -59,61 +59,127 @@ func statusHandler(rec *status.Recorder) http.HandlerFunc {
 	}
 }
 
-var pageTemplate = template.Must(template.New("status").Parse(`<!DOCTYPE html>
+const statusPageHTML = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <title>go-sync-objects status</title>
 <meta http-equiv="refresh" content="10">
-<style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
-  h1 { font-size: 1.3rem; }
-  table { border-collapse: collapse; margin: 1rem 0; }
-  th, td { border: 1px solid #ccc; padding: 0.3rem 0.6rem; text-align: left; font-size: 0.9rem; }
-  th { background: #f0f0f0; }
-  .ok { color: #1a7f37; }
-  .err { color: #c0392b; }
-  pre { background: #111; color: #ddd; padding: 1rem; overflow-x: auto; max-height: 50vh; font-size: 0.85rem; }
-</style>
+<style>` + baseCSS + `</style>
 </head>
 <body>
-<h1>go-sync-objects</h1>
+<div class="topbar">
+  <span class="brand">go-sync-objects</span>
+  <nav>
+    <a href="/" class="active">Status</a>
+    <a href="/config">Config</a>
+  </nav>
+</div>
 
-<p><a href="/config">Edit config &rarr;</a></p>
+<main>
 
-<p>
-  Started: {{.StartedAt.Format "2006-01-02 15:04:05"}}<br>
-  Runs: {{.Runs}}<br>
-  {{if .LastRunAt.IsZero}}
-    Last run: never
+<div id="msg" class="banner"></div>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="label">Started</div>
+    <div class="value" style="font-size:1.1rem">{{.StartedAt.Format "2006-01-02 15:04:05"}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Runs</div>
+    <div class="value">{{.Runs}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Last run</div>
+    {{if .LastRunAt.IsZero}}
+      <div class="value" style="font-size:1.1rem">never</div>
+    {{else}}
+      <div class="value" style="font-size:1.1rem">{{.LastRunAt.Format "2006-01-02 15:04:05"}}</div>
+      <div class="sub">{{if .LastRunErr}}<span class="badge err">error</span>{{else}}<span class="badge ok">ok</span>{{end}}</div>
+    {{end}}
+  </div>
+  <div class="stat-card">
+    <div class="label">Total objects synced</div>
+    <div class="value">{{.TotalSynced}}</div>
+  </div>
+</div>
+
+{{if .LastRunErr}}
+<div class="card" style="border-color:var(--danger); background:var(--danger-bg);">
+  <strong style="color:var(--danger)">Last run error:</strong> {{.LastRunErr}}
+</div>
+{{end}}
+
+<div class="card">
+  <h2>Last result per map/version</h2>
+  {{if not .Results}}
+  <p class="hint">No syncs yet.</p>
   {{else}}
-    Last run: {{.LastRunAt.Format "2006-01-02 15:04:05"}}
-    {{if .LastRunErr}}<span class="err">(error: {{.LastRunErr}})</span>{{else}}<span class="ok">(ok)</span>{{end}}
-  {{end}}<br>
-  Total objects synced: {{.TotalSynced}}
-</p>
+  <table>
+  <tr><th>Map</th><th>Version</th><th>Synced</th><th>At</th><th>Status</th><th></th></tr>
+  {{range .Results}}
+  <tr>
+    <td>{{.MapID}}</td>
+    <td>{{.Version}}</td>
+    <td>{{.Synced}}</td>
+    <td>{{.At.Format "2006-01-02 15:04:05"}}</td>
+    <td>{{if .Err}}<span class="badge err" title="{{.Err}}">error</span>{{else}}<span class="badge ok">ok</span>{{end}}</td>
+    <td><button type="button" class="sync-map-btn" data-map-id="{{.MapID}}">Sync</button></td>
+  </tr>
+  {{end}}
+  </table>
+  {{end}}
+</div>
 
-<h2>Last result per map/version</h2>
-{{if not .Results}}
-<p>No syncs yet.</p>
-{{else}}
-<table>
-<tr><th>Map</th><th>Version</th><th>Synced</th><th>At</th><th>Status</th></tr>
-{{range .Results}}
-<tr>
-  <td>{{.MapID}}</td>
-  <td>{{.Version}}</td>
-  <td>{{.Synced}}</td>
-  <td>{{.At.Format "2006-01-02 15:04:05"}}</td>
-  <td>{{if .Err}}<span class="err">{{.Err}}</span>{{else}}<span class="ok">ok</span>{{end}}</td>
-</tr>
-{{end}}
-</table>
-{{end}}
+<div class="card">
+  <details class="log-card" open>
+    <summary>Recent log output</summary>
+    <pre class="log">{{range .Logs}}{{.}}{{end}}</pre>
+  </details>
+</div>
 
-<h2>Recent log output</h2>
-<pre>{{range .Logs}}{{.}}{{end}}</pre>
+</main>
 
+<script>
+(function () {
+  "use strict";
+
+  var msg = document.getElementById("msg");
+  function showMessage(ok, text) {
+    msg.className = "banner " + (ok ? "ok" : "err");
+    msg.textContent = text;
+  }
+
+  document.querySelectorAll(".sync-map-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var id = btn.dataset.mapId;
+      var original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Syncing…";
+      showMessage(true, "Syncing " + id + "…");
+
+      fetch("/api/sync/" + encodeURIComponent(id), { method: "POST" })
+        .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          if (res.ok) {
+            location.reload();
+          } else {
+            showMessage(false, "Sync failed for " + id + ": " + (res.body.error || "unknown error"));
+            btn.disabled = false;
+            btn.textContent = original;
+          }
+        })
+        .catch(function (e) {
+          showMessage(false, "Sync failed for " + id + ": " + e);
+          btn.disabled = false;
+          btn.textContent = original;
+        });
+    });
+  });
+})();
+</script>
 </body>
 </html>
-`))
+`
+
+var pageTemplate = template.Must(template.New("status").Parse(statusPageHTML))

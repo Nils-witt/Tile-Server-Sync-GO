@@ -34,8 +34,7 @@ var schemaStatements = []string{
 		api_token        TEXT NOT NULL DEFAULT '',
 		db_dsn           TEXT NOT NULL DEFAULT '',
 		db_table         TEXT NOT NULL DEFAULT '',
-		db_prune_missing INTEGER NOT NULL DEFAULT 0,
-		interval         TEXT NOT NULL DEFAULT ''
+		db_prune_missing INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS database_columns (
 		field  TEXT PRIMARY KEY,
@@ -44,7 +43,8 @@ var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS maps (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		map_id     TEXT NOT NULL,
-		sort_order INTEGER NOT NULL
+		sort_order INTEGER NOT NULL,
+		interval   TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE TABLE IF NOT EXISTS map_versions (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +112,62 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		}
 	}
 
+	return s.migrateMapsInterval(ctx)
+}
+
+// migrateMapsInterval adds the maps.interval column to a database created by
+// an older version of this schema (back when the sync interval was a single
+// global config_scalar column instead of per-map), where the maps CREATE
+// TABLE statement above — guarded by IF NOT EXISTS — never ran again to add
+// it. A freshly created database already has the column from that
+// statement, so this checks first via PRAGMA table_info to stay idempotent.
+func (s *Store) migrateMapsInterval(ctx context.Context) error {
+	hasInterval, err := s.mapsTableHasColumn(ctx, "interval")
+	if err != nil {
+		return err
+	}
+
+	if hasInterval {
+		return nil
+	}
+
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE maps ADD COLUMN interval TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add maps.interval column: %w", err)
+	}
+
 	return nil
+}
+
+// mapsTableHasColumn reports whether the maps table already has a column
+// named col, via PRAGMA table_info.
+func (s *Store) mapsTableHasColumn(ctx context.Context, col string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(maps)`)
+	if err != nil {
+		return false, fmt.Errorf("inspect maps table: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			cid, notNull, pk int
+			name, colType    string
+			defaultValue     sql.NullString
+		)
+
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
+			return false, fmt.Errorf("inspect maps table: %w", err)
+		}
+
+		if name == col {
+			return true, nil
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("inspect maps table: %w", err)
+	}
+
+	return false, nil
 }
 
 // Load assembles a *config.Config from the stored rows. WebServer is left
@@ -127,12 +182,12 @@ func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 	var pruneMissing int64
 
 	row := s.db.QueryRowContext(ctx,
-		`SELECT api_base_url, api_username, api_password, api_token, db_dsn, db_table, db_prune_missing, interval
+		`SELECT api_base_url, api_username, api_password, api_token, db_dsn, db_table, db_prune_missing
 		 FROM config_scalar WHERE id = 1`)
 
 	switch err := row.Scan(
 		&cfg.API.BaseURL, &cfg.API.Username, &cfg.API.Password, &cfg.API.Token,
-		&cfg.Database.DSN, &cfg.Database.Table, &pruneMissing, &cfg.Interval,
+		&cfg.Database.DSN, &cfg.Database.Table, &pruneMissing,
 	); {
 	case errors.Is(err, sql.ErrNoRows):
 		// No row yet: leave cfg's scalars zero-valued.
@@ -229,7 +284,7 @@ func (s *Store) loadMaps(ctx context.Context) ([]config.MapTarget, error) {
 // queryMapRows reads the maps table's id/map_id columns, in configured
 // order, without yet loading each map's versions/staticColumns.
 func (s *Store) queryMapRows(ctx context.Context) ([]mapRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, map_id FROM maps ORDER BY sort_order ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, map_id, interval FROM maps ORDER BY sort_order ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("load maps: %w", err)
 	}
@@ -239,7 +294,7 @@ func (s *Store) queryMapRows(ctx context.Context) ([]mapRow, error) {
 
 	for rows.Next() {
 		var mr mapRow
-		if err := rows.Scan(&mr.rowID, &mr.target.ID); err != nil {
+		if err := rows.Scan(&mr.rowID, &mr.target.ID, &mr.target.Interval); err != nil {
 			return nil, fmt.Errorf("scan map: %w", err)
 		}
 
@@ -329,8 +384,8 @@ func (s *Store) Save(ctx context.Context, cfg *config.Config) error {
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO config_scalar
-			(id, api_base_url, api_username, api_password, api_token, db_dsn, db_table, db_prune_missing, interval)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+			(id, api_base_url, api_username, api_password, api_token, db_dsn, db_table, db_prune_missing)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			api_base_url = excluded.api_base_url,
 			api_username = excluded.api_username,
@@ -338,10 +393,9 @@ func (s *Store) Save(ctx context.Context, cfg *config.Config) error {
 			api_token = excluded.api_token,
 			db_dsn = excluded.db_dsn,
 			db_table = excluded.db_table,
-			db_prune_missing = excluded.db_prune_missing,
-			interval = excluded.interval`,
+			db_prune_missing = excluded.db_prune_missing`,
 		cfg.API.BaseURL, cfg.API.Username, cfg.API.Password, cfg.API.Token,
-		cfg.Database.DSN, cfg.Database.Table, pruneMissing, cfg.Interval)
+		cfg.Database.DSN, cfg.Database.Table, pruneMissing)
 	if err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
@@ -382,7 +436,8 @@ func saveMaps(ctx context.Context, tx *sql.Tx, maps []config.MapTarget) error {
 	}
 
 	for i, m := range maps {
-		res, err := tx.ExecContext(ctx, `INSERT INTO maps (map_id, sort_order) VALUES (?, ?)`, m.ID, i)
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO maps (map_id, sort_order, interval) VALUES (?, ?, ?)`, m.ID, i, m.Interval)
 		if err != nil {
 			return fmt.Errorf("save map %q: %w", m.ID, err)
 		}

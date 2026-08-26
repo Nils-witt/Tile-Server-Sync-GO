@@ -59,8 +59,8 @@ go build -o go-sync-objects .
 ## Running as a Windows service
 
 On Windows, go-sync-objects can install itself as a service instead of
-running in a console window (most useful together with `interval` in
-`config.yaml`, so it keeps syncing in the background across reboots):
+running in a console window (most useful together with each map's own
+`interval`, so it keeps syncing in the background across reboots):
 
 ```
 go-sync-objects -service install -config C:\path\to\config.yaml

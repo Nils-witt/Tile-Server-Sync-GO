@@ -137,8 +137,7 @@ func run(ctx context.Context, configPath string) error {
 			return fmt.Errorf("initial config: %w", initialErr)
 		}
 
-		log.Printf("starting with no valid configuration yet (%v); use /config to enter it, then POST /api/reload",
-			initialErr)
+		log.Printf("starting with no valid configuration yet (%v); use /config to enter and save it", initialErr)
 	}
 
 	defer func() {
@@ -150,9 +149,11 @@ func run(ctx context.Context, configPath string) error {
 
 	if boot.WebServer.Enabled {
 		reload := func(reloadCtx context.Context) error { return rt.reload(reloadCtx) }
-		syncNow := func(syncCtx context.Context) (int, error) { return rt.runSync(syncCtx, rec) }
+		syncMap := func(syncCtx context.Context, mapID string) (int, error) {
+			return rt.runSyncMaps(syncCtx, rec, map[string]struct{}{mapID: {}})
+		}
 
-		stopWebServer := startWebServer(boot.WebServer.Address, rec, cfgDB, boot.WebServer, reload, syncNow)
+		stopWebServer := startWebServer(boot.WebServer.Address, rec, cfgDB, boot.WebServer, reload, syncMap)
 		defer stopWebServer()
 
 		// Since config may start out empty/invalid and only become valid
@@ -167,7 +168,7 @@ func run(ctx context.Context, configPath string) error {
 	// Config is guaranteed valid here (initialErr == nil, or we'd have
 	// returned above), so this preserves today's exact behavior.
 	cfg, _, _ := rt.current()
-	if cfg.SyncInterval() <= 0 {
+	if !cfg.HasRecurringMaps() {
 		_, err := rt.runSync(ctx, rec)
 		return err
 	}
@@ -215,9 +216,9 @@ func openLogFile(configPath string) (*os.File, error) {
 // shouldn't stop the sync itself.
 func startWebServer(
 	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
-	reload func(context.Context) error, syncNow func(context.Context) (int, error),
+	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
 ) (stop func()) {
-	srv := webserver.New(addr, rec, cfgDB, webServer, reload, syncNow)
+	srv := webserver.New(addr, rec, cfgDB, webServer, reload, syncMap)
 
 	go func() {
 		log.Printf("status web server listening on %s", addr)
@@ -236,48 +237,56 @@ func startWebServer(
 }
 
 // pollInterval is how often runLoop checks back in while the runtime isn't
-// configured yet (fresh install, empty SQLite-backed config) or is
-// configured but has no interval set, waiting for a live edit via the web
-// UI (or its interval) to make an automatic sync possible.
+// configured yet (fresh install, empty SQLite-backed config), or is
+// configured but none of its maps have a positive Interval yet due, waiting
+// for a live edit via the web UI to make an automatic sync possible.
 const pollInterval = 5 * time.Second
 
-// runLoop runs syncAll immediately (once the runtime is configured), then
-// repeats it every interval until ctx is cancelled (e.g. by SIGINT/SIGTERM).
-// Errors from an individual sync are logged rather than aborting the loop,
-// so a transient failure (e.g. a network blip) doesn't take down an
+// runLoop syncs each configured map on its own schedule — determined by that
+// map's own Interval (see config.MapTarget) — until ctx is cancelled (e.g. by
+// SIGINT/SIGTERM). Every map is synced once immediately the first time it's
+// seen (covering both startup and a map added later via a live config
+// reload); a map with a positive Interval then keeps re-syncing every
+// Interval after that, while a map with no Interval is not automatically
+// repeated. Errors from an individual sync are logged rather than aborting
+// the loop, so a transient failure (e.g. a network blip) doesn't take down an
 // otherwise long-running process.
 //
-// rt.runSync re-fetches rt.current() at the top of every call (rather than
-// this loop capturing it once), so a config reload triggered via the web
-// UI — new maps, API credentials, database settings, or interval — takes
-// effect on the very next sync without a process restart. runSync also
+// Each tick re-fetches rt.current() (rather than this loop capturing it
+// once), so a config reload triggered via the web UI — new/removed maps,
+// changed intervals, API credentials, database settings — takes effect on
+// the very next tick without a process restart. rt.runSyncMaps also
 // serializes against a manual "sync now" request from the web UI, so the two
-// can't run concurrently. If a reload leaves no interval configured, the
-// loop keeps using the last positive interval it saw rather than
-// busy-looping; if the runtime isn't configured at all yet (or has never
-// had a positive interval), it polls every pollInterval instead, so a fresh
-// install's web UI can go from "no config" to "syncing" without a restart.
+// can't run concurrently. lastSync (map ID -> last sync start time) is purely
+// in-memory scheduling state for this run of the loop; it doesn't survive a
+// restart, so every map syncs once immediately whenever the process starts.
 func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
-	var lastInterval time.Duration
+	lastSync := make(map[string]time.Time)
 
 	log.Print("running (press Ctrl+C to stop)")
 
 	for {
+		wait := pollInterval
+
 		if rt.configured() {
-			if _, err := rt.runSync(ctx, rec); err != nil {
-				log.Printf("sync error: %v", err)
+			cfg, _, _ := rt.current()
+
+			due := dueMaps(cfg.Maps, lastSync, time.Now())
+			if len(due) > 0 {
+				syncStart := time.Now()
+
+				if _, err := rt.runSyncMaps(ctx, rec, due); err != nil {
+					log.Printf("sync error: %v", err)
+				}
+
+				for id := range due {
+					lastSync[id] = syncStart
+				}
 			}
 
-			if cfg, _, _ := rt.current(); cfg.SyncInterval() > 0 {
-				lastInterval = cfg.SyncInterval()
-			}
+			wait = nextWake(cfg.Maps, lastSync, time.Now())
 		} else {
-			log.Print("waiting for configuration via /config, then POST /api/reload")
-		}
-
-		wait := lastInterval
-		if wait <= 0 {
-			wait = pollInterval
+			log.Print("waiting for configuration via /config")
 		}
 
 		select {
@@ -289,10 +298,70 @@ func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
 	}
 }
 
-// syncAll fetches and upserts geo objects for every configured map/version
-// pair once, recording each pair's outcome and the run as a whole in rec for
-// the status web server to display, and returns the total number of objects
-// synced across every pair that succeeded.
+// dueMaps returns the set of map IDs (from maps) that are due to sync right
+// now: a map with no lastSync entry yet is always due, once; after that, a
+// map with a positive Interval is due again once that much time has passed
+// since its last sync, while a map with no Interval is never due again
+// automatically.
+func dueMaps(maps []config.MapTarget, lastSync map[string]time.Time, now time.Time) map[string]struct{} {
+	due := make(map[string]struct{})
+
+	for _, m := range maps {
+		last, seen := lastSync[m.ID]
+
+		switch {
+		case !seen:
+			due[m.ID] = struct{}{}
+		case m.SyncInterval() > 0 && now.Sub(last) >= m.SyncInterval():
+			due[m.ID] = struct{}{}
+		}
+	}
+
+	return due
+}
+
+// nextWake returns how long runLoop should sleep before its next tick: the
+// shortest remaining time until any already-synced map with a positive
+// Interval next comes due, or pollInterval if there's no such map (nothing
+// configured yet, every configured map is one-shot, or none has synced yet).
+func nextWake(maps []config.MapTarget, lastSync map[string]time.Time, now time.Time) time.Duration {
+	var wait time.Duration
+
+	found := false
+
+	for _, m := range maps {
+		interval := m.SyncInterval()
+		if interval <= 0 {
+			continue
+		}
+
+		last, seen := lastSync[m.ID]
+		if !seen {
+			continue
+		}
+
+		remaining := max(interval-now.Sub(last), 0)
+
+		if !found || remaining < wait {
+			wait = remaining
+			found = true
+		}
+	}
+
+	if !found {
+		return pollInterval
+	}
+
+	return wait
+}
+
+// syncAll fetches and upserts geo objects for every map/version pair in maps
+// once, recording each pair's outcome and the run as a whole in rec for the
+// status web server to display, and returns the total number of objects
+// synced across every pair that succeeded. maps is not necessarily every map
+// in the current config — runLoop passes only the maps currently due for a
+// sync, per their own Interval, while the run-once path and the web UI's
+// "sync now" pass every configured map.
 //
 // A failure on one map/version (a fetch error or a store error) is logged
 // and recorded against that pair, but does not stop the others from being
@@ -302,13 +371,13 @@ func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
 // attempted, so callers (runLoop's logging, the run-once path, the web UI's
 // "sync now") can tell the run as a whole was not fully successful.
 func syncAll(
-	ctx context.Context, cfg *config.Config, client *tileserve.Client, db *store.Store, rec *status.Recorder,
+	ctx context.Context, maps []config.MapTarget, client *tileserve.Client, db *store.Store, rec *status.Recorder,
 ) (totalSynced int, err error) {
 	defer func() { rec.RecordRun(totalSynced, err) }()
 
 	var errs []error
 
-	for _, m := range cfg.Maps {
+	for _, m := range maps {
 		for _, version := range m.Versions {
 			log.Printf("fetching geo objects for map %s version %s", m.ID, version)
 

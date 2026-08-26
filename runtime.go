@@ -15,8 +15,9 @@ import (
 
 // runtime holds the reloadable pieces of a sync run — the parsed config, the
 // tileserve client built from it, and the database connection built from
-// it — behind a mutex, so the config web UI's reload button can swap in a
-// freshly loaded config without restarting the process. current() is called
+// it — behind a mutex, so saving a config change through the config web UI
+// can swap in a freshly loaded config without restarting the process.
+// current() is called
 // once per sync (by runSync, right before calling syncAll) rather than held
 // for a run's whole lifetime, so a reload between syncs takes effect on the
 // very next one. cfg/client/db start nil and stay nil until the first
@@ -67,14 +68,14 @@ func (rt *runtime) configured() bool {
 	return rt.db != nil
 }
 
-// errNotConfigured is returned by runSync when no successful reload has
-// happened yet.
-var errNotConfigured = errors.New("not configured yet: use /config to enter configuration, then POST /api/reload")
+// errNotConfigured is returned by runSync/runSyncMaps when no successful
+// reload has happened yet.
+var errNotConfigured = errors.New("not configured yet: use /config to enter and save configuration")
 
-// runSync runs syncAll once against the runtime's current config, client,
-// and database, serialized against any other call to runSync via syncMu. It
-// is what both runLoop's scheduled ticks and the web UI's manual "sync now"
-// request go through, so they can't run concurrently.
+// runSync runs syncAll once against every map in the runtime's current
+// config, serialized against any other call to runSync/runSyncMaps via
+// syncMu. It is what both the run-once path (no interval configured on any
+// map) and the web UI's manual "sync now" request go through.
 func (rt *runtime) runSync(ctx context.Context, rec *status.Recorder) (int, error) {
 	rt.syncMu.Lock()
 	defer rt.syncMu.Unlock()
@@ -85,7 +86,39 @@ func (rt *runtime) runSync(ctx context.Context, rec *status.Recorder) (int, erro
 		return 0, errNotConfigured
 	}
 
-	return syncAll(ctx, cfg, client, db, rec)
+	return syncAll(ctx, cfg.Maps, client, db, rec)
+}
+
+// runSyncMaps runs syncAll against just the maps in the runtime's current
+// config whose ID is in ids, serialized the same way runSync is. It's what
+// runLoop's per-map interval scheduler calls with the set of currently-due
+// map IDs, re-reading rt.current() itself (rather than trusting maps handed
+// to it earlier) so it always syncs each map's latest configured versions/
+// staticColumns, even if a reload landed between runLoop computing ids and
+// this call acquiring syncMu.
+func (rt *runtime) runSyncMaps(ctx context.Context, rec *status.Recorder, ids map[string]struct{}) (int, error) {
+	rt.syncMu.Lock()
+	defer rt.syncMu.Unlock()
+
+	cfg, client, db := rt.current()
+	if db == nil {
+		rec.RecordRun(0, errNotConfigured)
+		return 0, errNotConfigured
+	}
+
+	due := make([]config.MapTarget, 0, len(ids))
+
+	for _, m := range cfg.Maps {
+		if _, ok := ids[m.ID]; ok {
+			due = append(due, m)
+		}
+	}
+
+	if len(due) == 0 {
+		return 0, nil
+	}
+
+	return syncAll(ctx, due, client, db, rec)
 }
 
 // reload loads the current configdb-backed config, overlays the fixed

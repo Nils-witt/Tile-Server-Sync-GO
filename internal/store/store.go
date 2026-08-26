@@ -10,6 +10,7 @@ import (
 	"go-sync-objects/internal/tileserve"
 	"log"
 	"strings"
+	"time"
 
 	// Registers the "mysql" driver with database/sql; never referenced
 	// directly, only through sql.Open.
@@ -50,6 +51,17 @@ func Open(ctx context.Context, dbCfg config.Database, staticColumns []string) (*
 		_ = db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
+
+	// Sync runs are effectively single-writer (UpsertGeoObjects's caller
+	// serializes scheduled and manual "sync now" runs via runtime.syncMu), so
+	// a handful of connections is plenty; the lifetime/idle-time limits exist
+	// so a connection sitting idle across a long `interval` gets recycled
+	// instead of going stale and erroring on the next sync (e.g. a firewall
+	// or MariaDB's wait_timeout closing it from the server side first).
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(1 * time.Minute)
 
 	return &Store{
 		db:            db,
@@ -142,13 +154,10 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
-// upsertSQL builds the INSERT ... ON DUPLICATE KEY UPDATE statement for the
-// currently configured table/columns, along with the accessors its
-// placeholders expect values from, in order. Fields mapped to "" are left
-// out of the statement entirely.
-func (s *Store) upsertSQL() (stmt string, accessors []func(tileserve.GeoObject) any) {
-	var cols []string
-
+// upsertColumns returns the ordered column list (syncable GeoObject fields
+// plus static columns) and the accessors that read each field's value, in
+// the same order upsertSQL emits placeholders.
+func (s *Store) upsertColumns() (cols []string, accessors []func(tileserve.GeoObject) any) {
 	for _, fc := range geoObjectColumns {
 		if col := s.col(fc.field); col != "" {
 			cols = append(cols, col)
@@ -158,7 +167,15 @@ func (s *Store) upsertSQL() (stmt string, accessors []func(tileserve.GeoObject) 
 
 	cols = append(cols, s.staticColumns...)
 
-	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(cols)), ", ")
+	return cols, accessors
+}
+
+// upsertSQL builds an INSERT ... ON DUPLICATE KEY UPDATE statement for cols
+// with rows value-tuples, so upsertObjects can write a whole batch of geo
+// objects in a single round trip instead of one per row.
+func (s *Store) upsertSQL(cols []string, rows int) string {
+	rowPlaceholder := "(" + strings.TrimSuffix(strings.Repeat("?, ", len(cols)), ", ") + ")"
+	values := strings.TrimSuffix(strings.Repeat(rowPlaceholder+", ", rows), ", ")
 
 	uuidCol := s.col(config.FieldUUID)
 
@@ -176,10 +193,8 @@ func (s *Store) upsertSQL() (stmt string, accessors []func(tileserve.GeoObject) 
 		sets = append(sets, syncedAt+" = CURRENT_TIMESTAMP")
 	}
 
-	stmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s;",
-		s.table, strings.Join(cols, ", "), placeholders, strings.Join(sets, ", "))
-
-	return stmt, accessors
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON DUPLICATE KEY UPDATE %s;",
+		s.table, strings.Join(cols, ", "), values, strings.Join(sets, ", "))
 }
 
 // UpsertGeoObjects writes each geo object to the configured table, inserting
@@ -228,33 +243,43 @@ func (s *Store) UpsertGeoObjects(
 	return nil
 }
 
-// upsertObjects runs the INSERT ... ON DUPLICATE KEY UPDATE statement for
-// each of objects within tx. Split out of UpsertGeoObjects to keep it small
-// now that UpsertGeoObjects also has to handle an empty objects list.
+// upsertBatchRows caps how many geo objects go into a single INSERT
+// statement: large enough to cut round trips dramatically for a big sync,
+// small enough to stay well under MariaDB's default max_allowed_packet and
+// the driver's placeholder limits.
+const upsertBatchRows = 500
+
+// upsertObjects writes objects to the configured table in batches of up to
+// upsertBatchRows, each as one multi-row INSERT ... ON DUPLICATE KEY UPDATE
+// within tx, rather than one round trip per row.
 func (s *Store) upsertObjects(
 	ctx context.Context, tx *sql.Tx, objects []tileserve.GeoObject, staticValues map[string]string,
 ) error {
-	stmt, accessors := s.upsertSQL()
+	cols, accessors := s.upsertColumns()
 
-	prepared, err := tx.PrepareContext(ctx, stmt)
-	if err != nil {
-		return fmt.Errorf("prepare upsert statement: %w", err)
-	}
-	defer func() { _ = prepared.Close() }()
-
-	args := make([]any, len(accessors)+len(s.staticColumns))
-
+	staticArgs := make([]any, len(s.staticColumns))
 	for i, col := range s.staticColumns {
-		args[len(accessors)+i] = staticValues[col]
+		staticArgs[i] = staticValues[col]
 	}
 
-	for _, o := range objects {
-		for i, accessor := range accessors {
-			args[i] = accessor(o)
+	rowWidth := len(accessors) + len(staticArgs)
+
+	for start := 0; start < len(objects); start += upsertBatchRows {
+		end := min(start+upsertBatchRows, len(objects))
+		batch := objects[start:end]
+
+		args := make([]any, 0, rowWidth*len(batch))
+
+		for _, o := range batch {
+			for _, accessor := range accessors {
+				args = append(args, accessor(o))
+			}
+
+			args = append(args, staticArgs...)
 		}
 
-		if _, err := prepared.ExecContext(ctx, args...); err != nil {
-			return fmt.Errorf("upsert geo object %s: %w", o.UUID, err)
+		if _, err := tx.ExecContext(ctx, s.upsertSQL(cols, len(batch)), args...); err != nil {
+			return fmt.Errorf("upsert geo objects %d-%d: %w", start, end-1, err)
 		}
 	}
 
