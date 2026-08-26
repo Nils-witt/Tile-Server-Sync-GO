@@ -49,7 +49,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     <label for="api-username">Username</label>
     <input type="text" id="api-username">
     <label for="api-password">Password</label>
-    <input type="text" id="api-password">
+    <input type="text" id="api-password" placeholder="unchanged &mdash; leave blank to keep the current password">
     <label for="api-token">Token (used instead of username/password if set)</label>
     <input type="text" id="api-token">
   </section>
@@ -58,7 +58,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     <h2>Database</h2>
     <p class="hint">Where synced geo objects are written.</p>
     <label for="db-dsn">DSN</label>
-    <input type="text" id="db-dsn" placeholder="user:password@tcp(127.0.0.1:3306)/tileserve?parseTime=true">
+    <input type="text" id="db-dsn" placeholder="unchanged &mdash; leave blank to keep the current DSN">
     <label for="db-table">Table</label>
     <input type="text" id="db-table" placeholder="geo_objects">
     <div class="checkbox-row"><input type="checkbox" id="db-prune"><label for="db-prune">Prune missing rows after each map/version sync</label></div>
@@ -266,9 +266,12 @@ instead of waiting for a map's interval, use the per-map Sync button on the
   function populateForm(cfg) {
     document.getElementById("api-baseurl").value = cfg.api.baseUrl || "";
     document.getElementById("api-username").value = cfg.api.username || "";
-    document.getElementById("api-password").value = cfg.api.password || "";
+    // api.password and database.dsn are never sent back by the server (see
+    // redactSecrets in internal/webserver/config.go) — both fields stay
+    // blank, meaning "unchanged" on save; see collectForm.
+    document.getElementById("api-password").value = "";
     document.getElementById("api-token").value = cfg.api.token || "";
-    document.getElementById("db-dsn").value = cfg.database.dsn || "";
+    document.getElementById("db-dsn").value = "";
     document.getElementById("db-table").value = cfg.database.table || "";
     document.getElementById("db-prune").checked = !!cfg.database.pruneMissing;
 

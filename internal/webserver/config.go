@@ -20,12 +20,16 @@ import (
 // display) — always set on success, even when it's all zero values (e.g. a
 // brand new install with nothing saved yet), so the structured editor always
 // has something to render; Raw is the same config marshaled as YAML, offered
-// as a raw-text editing mode. Error/no Cfg only happens on a genuine load
-// failure (a database problem), not on an unconfigured-but-loadable state.
-// Applied reports whether a POST's save was also successfully applied to the
-// running process (see saveConfig); ApplyError carries why not, if the save
-// itself succeeded but applying it live failed (e.g. an unreachable API or
-// database) — the save is not rolled back in that case, only the live apply.
+// as a raw-text editing mode. In both Cfg and Raw, API.Password and
+// Database.DSN (which typically embeds the MariaDB credentials) are
+// redacted (never sent back to the browser once saved — see redactSecrets)
+// so stored secrets never round-trip into the config page's form fields.
+// Error/no Cfg only happens on a genuine load failure (a database problem),
+// not on an unconfigured-but-loadable state. Applied reports whether a
+// POST's save was also successfully applied to the running process (see
+// saveConfig); ApplyError carries why not, if the save itself succeeded but
+// applying it live failed (e.g. an unreachable API or database) — the save
+// is not rolled back in that case, only the live apply.
 type configGetResponse struct {
 	Cfg        *config.Config `json:"config,omitempty"`
 	Raw        string         `json:"raw"`
@@ -73,6 +77,7 @@ func getConfig(ctx context.Context, w http.ResponseWriter, cfgDB *configdb.Store
 
 	// Overlay for display/context only — never persisted (see saveConfig).
 	cfg.WebServer = webServer
+	redactSecrets(cfg)
 
 	resp := configGetResponse{Cfg: cfg}
 
@@ -110,6 +115,17 @@ func saveConfig(
 	// surface as a validation error — it's fixed by the bootstrap file.
 	cfg.WebServer = webServer
 
+	// The config page never shows stored secrets back to the browser (see
+	// getConfig/redactSecrets), so a blank password/DSN field means
+	// "unchanged", not "clear it" — fill them back in from what's already
+	// stored before validating/saving.
+	if cfg.API.Password == "" || cfg.Database.DSN == "" {
+		if err := fillStoredSecrets(r.Context(), cfgDB, cfg); err != nil {
+			writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
+			return
+		}
+	}
+
 	if err := cfg.Validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
 		return
@@ -119,6 +135,8 @@ func saveConfig(
 		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
 		return
 	}
+
+	redactSecrets(cfg)
 
 	raw, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -155,6 +173,41 @@ func configSaveConfig(req configSaveRequest) (*config.Config, error) {
 	}
 
 	return req.Cfg, nil
+}
+
+// redactSecrets clears cfg.API.Password and cfg.Database.DSN in place before
+// a *config.Config is sent to the browser (in either JSON or the Raw YAML
+// alongside it), so stored secrets are never echoed back into the config
+// page — see configGetResponse and fillStoredSecrets. DSN is included
+// because it typically embeds the MariaDB username/password (e.g.
+// "user:pass@tcp(...)"), not just a host/database name.
+func redactSecrets(cfg *config.Config) {
+	cfg.API.Password = ""
+	cfg.Database.DSN = ""
+}
+
+// fillStoredSecrets fills cfg.API.Password and/or cfg.Database.DSN in from
+// the currently stored config when a save request submits either blank,
+// since the config page never shows the real values back to the browser, so
+// leaving a field blank means "unchanged" (see saveConfig). A brand
+// new/unconfigured install has no stored values to fall back to, which is
+// fine: the field just stays empty, exactly as if the user had typed
+// nothing.
+func fillStoredSecrets(ctx context.Context, cfgDB *configdb.Store, cfg *config.Config) error {
+	stored, err := cfgDB.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load stored config: %w", err)
+	}
+
+	if cfg.API.Password == "" {
+		cfg.API.Password = stored.API.Password
+	}
+
+	if cfg.Database.DSN == "" {
+		cfg.Database.DSN = stored.Database.DSN
+	}
+
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
