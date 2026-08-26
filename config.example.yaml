@@ -1,91 +1,32 @@
-# Copy this file to config.yaml and fill in your own values.
-# config.yaml is git-ignored so real credentials never get committed.
+# Copy this file to config.yaml.
+#
+# This is now just a small bootstrap file: it points at the SQLite database
+# holding the rest of the configuration (API credentials, database target,
+# maps, interval) and configures the optional status/config web server.
+# Everything that used to live directly in this file (api, database, maps,
+# interval) is entered instead through that web server's "/config" page
+# after startup — there's no other way to set it on a fresh install, so
+# webServer.enabled needs to be true at least once to configure anything.
+#
+# config.yaml is git-ignored so nothing sensitive lands in it — the SQLite
+# database itself (default "config.db", next to this file) does hold
+# credentials, so treat its file permissions the same way you would this
+# file's.
 
-api:
-  baseUrl: "http://localhost:8085"
-  # Either username/password (a login JWT is requested at startup)...
-  username: "admin"
-  password: "changeme"
-  # ...or a pre-issued token (login or API key JWT), which skips POST /login.
-  # token: ""
-
-# If set, a Go duration string (e.g. "5m", "1h") for how often to repeat the
-# full sync. If omitted, the sync runs once and exits (the previous
-# behavior). Login happens once at startup, not on every interval tick.
-# interval: "5m"
+# Path to the SQLite database file holding api/database/maps/interval
+# config. Relative paths resolve against this file's own directory.
+# Defaults to "config.db" if omitted.
+# configDb: "config.db"
 
 # Optional HTTP server exposing a status page (last sync results per
 # map/version and recent log output) at "/", plus a config editor at
-# "/config" that can view and rewrite this file (every option below is
-# adjustable there). The editor's "Apply saved config now" button makes a
-# saved change take effect immediately, without a restart (except for
-# webServer settings themselves, which still need one), and its "Sync now"
-# button runs a sync immediately instead of waiting for the next interval
-# tick. Most useful together with interval for a long-running sync. None of
-# this has authentication, so only enable it on a trusted network.
-# webServer:
-#   enabled: true
-#   address: ":8080"
-
-database:
-  # Go MySQL driver DSN. MariaDB is wire-compatible with the mysql driver.
-  dsn: "user:password@tcp(127.0.0.1:3306)/tileserve?parseTime=true"
-
-  # Target table. Defaults to "geo_objects" if omitted; created automatically
-  # (see internal/store) if it doesn't already exist.
-  # table: "geo_objects"
-
-  # Maps GeoObject fields onto target table column names. Any field left out
-  # here uses its default column name (shown below). Set a field to "" to
-  # skip it entirely, e.g. when syncing into an existing table that doesn't
-  # have a matching column. "uuid" may not be skipped: it's the key upserts
-  # match existing rows on.
-  # columns:
-  #   uuid: "uuid"
-  #   mapUuid: "map_uuid"
-  #   version: "version"
-  #   name: "name"
-  #   externalId: "external_id"
-  #   latitude: "latitude"
-  #   longitude: "longitude"
-  #   street: "street"
-  #   housenumber: "housenumber"
-  #   postcode: "postcode"
-  #   city: "city"
-  #   cityDistrict: "city_district"
-  #   createdAt: "created_at"
-  #   updatedAt: "updated_at"
-  #   createdBy: "created_by"
-  #   updatedBy: "updated_by"
-  #   syncedAt: "synced_at"    # not a GeoObject field; bookkeeping timestamp
-
-  # If true, after each map/version sync, rows previously stored for that
-  # same map_uuid+version are deleted if their uuid was not present in this
-  # sync's fetch response, i.e. objects removed from tileserve-go since the
-  # last sync. Scoped per map_uuid+version using the configured version
-  # string below (e.g. "current"), which is what's stored in the version
-  # column, not whatever concrete version the API resolves it to. A fetch
-  # that returns zero objects prunes every row in that map/version's scope.
-  # Requires columns.mapUuid and columns.version to both be set (not skipped
-  # above). Defaults to false.
-  # pruneMissing: false
-
-# One entry per map to sync; each map may list multiple versions. A version
-# may be a real numeric version, the literal "current", or a user-defined
-# alias (see PUT /maps/{id}/aliases/{alias} in the tileserve-go API).
-maps:
-  - id: "00000000-0000-0000-0000-000000000000"
-    versions:
-      - "current"
-    # Extra target table columns, written with a fixed value on every row
-    # synced from this map. Column names must not collide with any name
-    # used by database.columns and are created automatically (as
-    # VARCHAR(255) NOT NULL DEFAULT '') by EnsureSchema.
-    # staticColumns:
-    #   source: "hq"
-    #   region: "north"
-  - id: "11111111-1111-1111-1111-111111111111"
-    versions:
-      - "3"
-      - "4"
-      - "current"
+# "/config" backed by a JSON API at "/api/config". The editor's "Apply saved
+# config now" button makes a saved change take effect immediately, without a
+# restart, and its "Sync now" button runs a sync immediately instead of
+# waiting for the next interval tick. Changing webServer.enabled/address
+# itself always needs a process restart — the editor shows these two values
+# read-only for that reason. None of this has authentication, so only
+# enable it on a trusted network.
+webServer:
+  enabled: true
+  address: ":8080"

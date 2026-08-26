@@ -4,6 +4,8 @@ package webserver
 
 import (
 	"context"
+	"go-sync-objects/internal/config"
+	"go-sync-objects/internal/configdb"
 	"go-sync-objects/internal/status"
 	"html/template"
 	"net/http"
@@ -12,27 +14,26 @@ import (
 
 // New builds an *http.Server serving the status page at "/" and a config
 // editor at "/config" (backed by a JSON API at "/api/config") that reads and
-// rewrites the YAML file at configPath, plus two action endpoints:
-// "/api/reload" calls reload to make the running process pick up the file's
-// current contents immediately, without a restart, and "/api/sync" calls
-// syncNow to run a sync immediately instead of waiting for the next
-// scheduled interval tick. It does not start listening; call ListenAndServe
-// (typically in a goroutine).
+// writes cfgDB, plus two action endpoints: "/api/reload" calls reload to
+// make the running process pick up cfgDB's current contents immediately,
+// without a restart, and "/api/sync" calls syncNow to run a sync immediately
+// instead of waiting for the next scheduled interval tick. It does not start
+// listening; call ListenAndServe (typically in a goroutine).
 //
 // None of the config editor, reload, or sync endpoints have authentication
 // of their own, matching the status page they sit alongside — only expose
-// addr on a trusted network. Saving rewrites configPath in full (losing any
-// comments); some settings (currently just webServer itself) can't be
-// applied by reload and still need a process restart — see reload's doc
-// comment at its call site in main.go.
+// addr on a trusted network. webServer is the fixed, bootstrap-file-sourced
+// WebServer value: the config editor always displays it for context but can
+// never change it, since applying a changed webServer.enabled/address needs
+// a process restart the server itself can't safely trigger mid-request.
 func New(
-	addr string, rec *status.Recorder, configPath string,
+	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
 	reload func(context.Context) error, syncNow func(context.Context) (int, error),
 ) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", statusHandler(rec))
 	mux.HandleFunc("/config", configPageHandler)
-	mux.HandleFunc("/api/config", configAPIHandler(configPath))
+	mux.HandleFunc("/api/config", configAPIHandler(cfgDB, webServer))
 	mux.HandleFunc("/api/reload", reloadAPIHandler(reload))
 	mux.HandleFunc("/api/sync", syncAPIHandler(syncNow))
 

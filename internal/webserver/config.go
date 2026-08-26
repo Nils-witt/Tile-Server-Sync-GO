@@ -6,41 +6,46 @@ import (
 	"errors"
 	"fmt"
 	"go-sync-objects/internal/config"
+	"go-sync-objects/internal/configdb"
 	"net/http"
-	"os"
 
 	"gopkg.in/yaml.v3"
 )
 
-// configGetResponse is what GET /api/config returns. Cfg is the parsed,
-// fully-defaulted config for the structured editor; Raw is always the exact
-// file content, used as a fallback the config page falls back to editing
-// directly (as YAML text) when the file doesn't currently parse (e.g. it was
-// hand-edited into an invalid state since the process started).
+// configGetResponse is what GET /api/config returns. Cfg is the loaded
+// config (WebServer overlaid from the fixed bootstrap value for display) —
+// always set on success, even when it's all zero values (e.g. a brand new
+// install with nothing saved yet), so the structured editor always has
+// something to render; Raw is the same config marshaled as YAML, offered as
+// a raw-text editing mode. Error/no Cfg only happens on a genuine load
+// failure (a database problem), not on an unconfigured-but-loadable state.
 type configGetResponse struct {
 	Cfg   *config.Config `json:"config,omitempty"`
 	Raw   string         `json:"raw"`
 	Error string         `json:"error,omitempty"`
 }
 
-// configSaveRequest is what POST /api/config accepts: either Raw (YAML text,
-// written to the file verbatim after validating it parses) or Cfg (a
-// structured config, marshaled to YAML before writing). Raw takes priority
-// if both are somehow set.
+// configSaveRequest is what POST /api/config accepts: either Raw (YAML
+// text, unmarshaled) or Cfg (a structured config) — Raw takes priority if
+// both are somehow set. Either way, the WebServer field of whatever's
+// submitted is discarded server-side (see saveConfig): it's fixed by the
+// bootstrap file and can't be changed through this API.
 type configSaveRequest struct {
 	Cfg *config.Config `json:"config,omitempty"`
 	Raw *string        `json:"raw,omitempty"`
 }
 
 // configAPIHandler serves the JSON API the config page's script uses to load
-// and save configPath.
-func configAPIHandler(configPath string) http.HandlerFunc {
+// and save the SQLite-backed config in cfgDB. webServer is the fixed,
+// bootstrap-sourced value overlaid onto every response and enforced (never
+// read from the request) on every save.
+func configAPIHandler(cfgDB *configdb.Store, webServer config.WebServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			getConfig(w, configPath)
+			getConfig(r.Context(), w, cfgDB, webServer)
 		case http.MethodPost:
-			saveConfig(w, r, configPath)
+			saveConfig(w, r, cfgDB, webServer)
 		default:
 			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -48,28 +53,31 @@ func configAPIHandler(configPath string) http.HandlerFunc {
 	}
 }
 
-func getConfig(w http.ResponseWriter, configPath string) {
-	data, err := os.ReadFile(configPath) //nolint:gosec // configPath is a trusted, user-supplied CLI flag
+func getConfig(ctx context.Context, w http.ResponseWriter, cfgDB *configdb.Store, webServer config.WebServer) {
+	cfg, err := cfgDB.Load(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
 		return
 	}
 
-	resp := configGetResponse{Raw: string(data)}
+	// Overlay for display/context only — never persisted (see saveConfig).
+	cfg.WebServer = webServer
 
-	cfg, err := config.Parse(data)
+	resp := configGetResponse{Cfg: cfg}
+
+	raw, err := yaml.Marshal(cfg)
 	if err != nil {
 		resp.Error = err.Error()
 	} else {
-		resp.Cfg = cfg
+		resp.Raw = string(raw)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
 
-const maxConfigBodyBytes = 1 << 20 // 1 MiB; config.yaml is never remotely this large
+const maxConfigBodyBytes = 1 << 20 // 1 MiB; config is never remotely this large
 
-func saveConfig(w http.ResponseWriter, r *http.Request, configPath string) {
+func saveConfig(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer) {
 	var req configSaveRequest
 
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBodyBytes)).Decode(&req); err != nil {
@@ -77,42 +85,54 @@ func saveConfig(w http.ResponseWriter, r *http.Request, configPath string) {
 		return
 	}
 
-	data, err := configSaveBytes(req)
+	cfg, err := configSaveConfig(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
 		return
 	}
 
-	if _, err := config.Parse(data); err != nil {
-		writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error(), Raw: string(data)})
+	// Discard whatever WebServer the client submitted before validating, so
+	// a bad/irrelevant webServer value in the request can never even
+	// surface as a validation error — it's fixed by the bootstrap file.
+	cfg.WebServer = webServer
+
+	if err := cfg.Validate(); err != nil {
+		writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
 		return
 	}
 
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+	if err := cfgDB.Save(r.Context(), cfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, configGetResponse{Raw: string(data)})
+	raw, err := yaml.Marshal(cfg)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, configGetResponse{Cfg: cfg, Raw: string(raw)})
 }
 
-// configSaveBytes turns a configSaveRequest into the YAML bytes to validate
-// and write: req.Raw verbatim if set, otherwise req.Cfg marshaled to YAML.
-func configSaveBytes(req configSaveRequest) ([]byte, error) {
+// configSaveConfig turns a configSaveRequest into a *config.Config: req.Raw
+// (YAML-unmarshaled, unvalidated) if set, else req.Cfg directly. Validation
+// happens once, uniformly, in saveConfig after the WebServer overlay.
+func configSaveConfig(req configSaveRequest) (*config.Config, error) {
 	if req.Raw != nil {
-		return []byte(*req.Raw), nil
+		var cfg config.Config
+		if err := yaml.Unmarshal([]byte(*req.Raw), &cfg); err != nil {
+			return nil, fmt.Errorf("parse raw YAML: %w", err)
+		}
+
+		return &cfg, nil
 	}
 
 	if req.Cfg == nil {
 		return nil, errors.New("request has neither raw nor config")
 	}
 
-	data, err := yaml.Marshal(req.Cfg)
-	if err != nil {
-		return nil, fmt.Errorf("encode config as YAML: %w", err)
-	}
-
-	return data, nil
+	return req.Cfg, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

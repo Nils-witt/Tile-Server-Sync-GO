@@ -120,6 +120,16 @@ type WebServer struct {
 	Address string `yaml:"address" json:"address"`
 }
 
+// applyDefault fills Address with defaultWebServerAddress if Enabled and
+// Address is empty. Shared by Config.Validate and LoadBootstrap, since
+// WebServer is now validated/defaulted in two different places (a full
+// Config, and the standalone bootstrap file).
+func (w *WebServer) applyDefault() {
+	if w.Enabled && w.Address == "" {
+		w.Address = defaultWebServerAddress
+	}
+}
+
 // Config is the root configuration document.
 type Config struct {
 	API       API         `yaml:"api"       json:"api"`
@@ -168,14 +178,19 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	return &cfg, nil
 }
 
-func (c *Config) validate() error {
+// Validate checks c for consistency, filling in defaults (Database.Table,
+// Database.Columns, WebServer.Address) as it goes. Callers that assemble a
+// *Config from a source other than Parse (configdb, plus the WebServer
+// overlay applied by runtime.reload) must call this themselves before using
+// the result.
+func (c *Config) Validate() error {
 	if c.API.BaseURL == "" {
 		return errors.New("api.baseUrl is required")
 	}
@@ -200,9 +215,7 @@ func (c *Config) validate() error {
 		return err
 	}
 
-	if c.WebServer.Enabled && c.WebServer.Address == "" {
-		c.WebServer.Address = defaultWebServerAddress
-	}
+	c.WebServer.applyDefault()
 
 	return c.validateMaps()
 }

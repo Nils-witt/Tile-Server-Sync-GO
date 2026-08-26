@@ -42,7 +42,7 @@ const configPageHTML = `<!DOCTYPE html>
 <body>
 <h1>go-sync-objects config</h1>
 <p><a href="/">&larr; Back to status</a> &middot; <a href="#" id="toggle-raw">Edit as raw YAML</a></p>
-<p class="hint">Saving rewrites the config file (comments are not preserved).</p>
+<p class="hint">Saving writes to the config database (comments are not preserved in the raw-YAML view).</p>
 
 <div id="msg"></div>
 
@@ -82,9 +82,11 @@ const configPageHTML = `<!DOCTYPE html>
 
   <fieldset>
     <legend>Status web server</legend>
-    <div class="checkbox-row"><input type="checkbox" id="ws-enabled"><label for="ws-enabled">Enabled</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="ws-enabled" disabled><label for="ws-enabled">Enabled</label></div>
     <label for="ws-address">Address</label>
-    <input type="text" id="ws-address" placeholder=":8080">
+    <input type="text" id="ws-address" placeholder=":8080" disabled>
+    <p class="hint">Set via the bootstrap config file's webServer.enabled/address and requires a
+    process restart to change &mdash; edits here are not saved.</p>
   </fieldset>
 
   <fieldset>
@@ -113,6 +115,7 @@ const configPageHTML = `<!DOCTYPE html>
 
 <div id="raw-editor" hidden>
   <label for="raw-yaml">Raw YAML</label>
+  <p class="hint">webServer is shown here for reference only &mdash; edits to it are discarded on save.</p>
   <textarea id="raw-yaml" rows="30" spellcheck="false"></textarea>
   <div class="actions">
     <button type="button" class="primary" id="save-raw">Save</button>
@@ -261,10 +264,8 @@ const configPageHTML = `<!DOCTYPE html>
         token: document.getElementById("api-token").value.trim()
       },
       interval: document.getElementById("interval").value.trim(),
-      webServer: {
-        enabled: document.getElementById("ws-enabled").checked,
-        address: document.getElementById("ws-address").value.trim()
-      },
+      // webServer is intentionally omitted: it's fixed by the bootstrap
+      // file and the server ignores/overwrites it on save regardless.
       database: {
         dsn: document.getElementById("db-dsn").value.trim(),
         table: document.getElementById("db-table").value.trim(),
@@ -289,7 +290,7 @@ const configPageHTML = `<!DOCTYPE html>
         msg.className = "";
         msg.textContent = "";
       } else {
-        showMessage(false, "Current config file does not parse; showing raw YAML instead.\n" + (resp.error || ""));
+        showMessage(false, "Failed to load config; showing raw YAML instead.\n" + (resp.error || ""));
         setRawMode(true);
       }
     }).catch(function (e) { showMessage(false, "Failed to load config: " + e); });

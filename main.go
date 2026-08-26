@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"go-sync-objects/internal/config"
+	"go-sync-objects/internal/configdb"
 	"go-sync-objects/internal/status"
 	"go-sync-objects/internal/store"
 	"go-sync-objects/internal/tileserve"
@@ -34,7 +35,8 @@ var (
 )
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to the YAML config file")
+	configPath := flag.String("config", "config.yaml",
+		"path to the bootstrap YAML file (webServer + configDb; everything else is edited via the /config web UI)")
 	showVersion := flag.Bool("version", false, "print version information and exit")
 	serviceCmd := flag.String("service", "",
 		"Windows service control: install, uninstall, start, stop, or run (Windows only)")
@@ -97,7 +99,7 @@ func handleServiceCommand(cmd, configPath string) error {
 }
 
 func run(ctx context.Context, configPath string) error {
-	cfg, err := config.Load(configPath)
+	boot, err := config.LoadBootstrap(configPath)
 	if err != nil {
 		return err
 	}
@@ -119,31 +121,52 @@ func run(ctx context.Context, configPath string) error {
 
 	log.SetOutput(fanoutWriter(writers))
 
-	client, err := newClient(ctx, cfg)
+	cfgDB, err := configdb.Open(ctx, boot.ConfigDB)
 	if err != nil {
-		return fmt.Errorf("login: %w", err)
+		return fmt.Errorf("open config database: %w", err)
 	}
+	defer func() { _ = cfgDB.Close() }()
 
-	db, err := openStore(ctx, cfg)
-	if err != nil {
-		return err
+	rt := newRuntime(cfgDB, boot.WebServer)
+
+	initialErr := rt.reload(ctx)
+	if initialErr != nil {
+		if !boot.WebServer.Enabled {
+			// No web UI to fix it through — fail hard, same as today's
+			// behavior for an invalid/missing config file.
+			return fmt.Errorf("initial config: %w", initialErr)
+		}
+
+		log.Printf("starting with no valid configuration yet (%v); use /config to enter it, then POST /api/reload",
+			initialErr)
 	}
-
-	rt := newRuntime(cfg, client, db)
 
 	defer func() {
-		_, _, latestDB := rt.current()
-		_ = latestDB.Close()
+		_, _, db := rt.current()
+		if db != nil {
+			_ = db.Close()
+		}
 	}()
 
-	if cfg.WebServer.Enabled {
-		reload := func(reloadCtx context.Context) error { return rt.reload(reloadCtx, configPath) }
+	if boot.WebServer.Enabled {
+		reload := func(reloadCtx context.Context) error { return rt.reload(reloadCtx) }
 		syncNow := func(syncCtx context.Context) (int, error) { return rt.runSync(syncCtx, rec) }
 
-		stopWebServer := startWebServer(cfg.WebServer.Address, rec, configPath, reload, syncNow)
+		stopWebServer := startWebServer(boot.WebServer.Address, rec, cfgDB, boot.WebServer, reload, syncNow)
 		defer stopWebServer()
+
+		// Since config may start out empty/invalid and only become valid
+		// (with or without an interval) via a later live edit, the process
+		// stays alive and polling as long as the web server is enabled,
+		// rather than choosing once at startup between "run once and exit"
+		// and "loop forever" the way the no-web-server branch below still
+		// does.
+		return runLoop(ctx, rt, rec)
 	}
 
+	// Config is guaranteed valid here (initialErr == nil, or we'd have
+	// returned above), so this preserves today's exact behavior.
+	cfg, _, _ := rt.current()
 	if cfg.SyncInterval() <= 0 {
 		_, err := rt.runSync(ctx, rec)
 		return err
@@ -191,10 +214,10 @@ func openLogFile(configPath string) (*os.File, error) {
 // logged rather than returned, since a status page failing to start
 // shouldn't stop the sync itself.
 func startWebServer(
-	addr string, rec *status.Recorder, configPath string,
+	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
 	reload func(context.Context) error, syncNow func(context.Context) (int, error),
 ) (stop func()) {
-	srv := webserver.New(addr, rec, configPath, reload, syncNow)
+	srv := webserver.New(addr, rec, cfgDB, webServer, reload, syncNow)
 
 	go func() {
 		log.Printf("status web server listening on %s", addr)
@@ -212,10 +235,17 @@ func startWebServer(
 	}
 }
 
-// runLoop runs syncAll immediately, then repeats it every interval until ctx
-// is cancelled (e.g. by SIGINT/SIGTERM). Errors from an individual sync are
-// logged rather than aborting the loop, so a transient failure (e.g. a
-// network blip) doesn't take down an otherwise long-running process.
+// pollInterval is how often runLoop checks back in while the runtime isn't
+// configured yet (fresh install, empty SQLite-backed config) or is
+// configured but has no interval set, waiting for a live edit via the web
+// UI (or its interval) to make an automatic sync possible.
+const pollInterval = 5 * time.Second
+
+// runLoop runs syncAll immediately (once the runtime is configured), then
+// repeats it every interval until ctx is cancelled (e.g. by SIGINT/SIGTERM).
+// Errors from an individual sync are logged rather than aborting the loop,
+// so a transient failure (e.g. a network blip) doesn't take down an
+// otherwise long-running process.
 //
 // rt.runSync re-fetches rt.current() at the top of every call (rather than
 // this loop capturing it once), so a config reload triggered via the web
@@ -224,29 +254,37 @@ func startWebServer(
 // serializes against a manual "sync now" request from the web UI, so the two
 // can't run concurrently. If a reload leaves no interval configured, the
 // loop keeps using the last positive interval it saw rather than
-// busy-looping, since runLoop is only entered when the initial config had
-// one.
+// busy-looping; if the runtime isn't configured at all yet (or has never
+// had a positive interval), it polls every pollInterval instead, so a fresh
+// install's web UI can go from "no config" to "syncing" without a restart.
 func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
-	cfg, _, _ := rt.current()
-	lastInterval := cfg.SyncInterval()
+	var lastInterval time.Duration
 
-	log.Printf("running sync every %s (press Ctrl+C to stop)", lastInterval)
+	log.Print("running (press Ctrl+C to stop)")
 
 	for {
-		if _, err := rt.runSync(ctx, rec); err != nil {
-			log.Printf("sync error: %v", err)
+		if rt.configured() {
+			if _, err := rt.runSync(ctx, rec); err != nil {
+				log.Printf("sync error: %v", err)
+			}
+
+			if cfg, _, _ := rt.current(); cfg.SyncInterval() > 0 {
+				lastInterval = cfg.SyncInterval()
+			}
+		} else {
+			log.Print("waiting for configuration via /config, then POST /api/reload")
 		}
 
-		cfg, _, _ := rt.current()
-		if d := cfg.SyncInterval(); d > 0 {
-			lastInterval = d
+		wait := lastInterval
+		if wait <= 0 {
+			wait = pollInterval
 		}
 
 		select {
 		case <-ctx.Done():
 			log.Print("shutting down")
 			return nil
-		case <-time.After(lastInterval):
+		case <-time.After(wait):
 		}
 	}
 }

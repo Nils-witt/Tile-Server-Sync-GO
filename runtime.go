@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go-sync-objects/internal/config"
+	"go-sync-objects/internal/configdb"
 	"go-sync-objects/internal/status"
 	"go-sync-objects/internal/store"
 	"go-sync-objects/internal/tileserve"
@@ -17,10 +19,13 @@ import (
 // freshly loaded config without restarting the process. current() is called
 // once per sync (by runSync, right before calling syncAll) rather than held
 // for a run's whole lifetime, so a reload between syncs takes effect on the
-// very next one. webServer settings are deliberately not part of this: the
-// server a reload request arrives on can't safely restart itself mid
+// very next one. cfg/client/db start nil and stay nil until the first
+// successful reload — see configured() — since the SQLite-backed config may
+// start out empty on a fresh install. cfgDB and webServer are fixed for the
+// process's lifetime: webServer settings are deliberately not reloadable
+// (the server a reload request arrives on can't safely restart itself mid
 // request, so applying a changed webServer.enabled/address still requires a
-// process restart.
+// process restart), and cfgDB's path is bootstrap-fixed too.
 type runtime struct {
 	mu     sync.RWMutex
 	cfg    *config.Config
@@ -33,19 +38,38 @@ type runtime struct {
 	// syncs of the same map/version could race on pruneMissing deleting rows
 	// the other's insert just wrote.
 	syncMu sync.Mutex
+
+	cfgDB     *configdb.Store
+	webServer config.WebServer
 }
 
-func newRuntime(cfg *config.Config, client *tileserve.Client, db *store.Store) *runtime {
-	return &runtime{cfg: cfg, client: client, db: db}
+func newRuntime(cfgDB *configdb.Store, webServer config.WebServer) *runtime {
+	return &runtime{cfgDB: cfgDB, webServer: webServer}
 }
 
-// current returns the runtime's current config, client, and database.
+// current returns the runtime's current config, client, and database. Any
+// of the three may be nil if the runtime has never had a successful reload.
 func (rt *runtime) current() (*config.Config, *tileserve.Client, *store.Store) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
 	return rt.cfg, rt.client, rt.db
 }
+
+// configured reports whether the runtime has a working {cfg, client, db}
+// triple yet. False only until the first successful reload() call against a
+// valid config — normal, not an error, right after a fresh install with an
+// empty SQLite-backed config.
+func (rt *runtime) configured() bool {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+
+	return rt.db != nil
+}
+
+// errNotConfigured is returned by runSync when no successful reload has
+// happened yet.
+var errNotConfigured = errors.New("not configured yet: use /config to enter configuration, then POST /api/reload")
 
 // runSync runs syncAll once against the runtime's current config, client,
 // and database, serialized against any other call to runSync via syncMu. It
@@ -56,28 +80,40 @@ func (rt *runtime) runSync(ctx context.Context, rec *status.Recorder) (int, erro
 	defer rt.syncMu.Unlock()
 
 	cfg, client, db := rt.current()
+	if db == nil {
+		rec.RecordRun(0, errNotConfigured)
+		return 0, errNotConfigured
+	}
 
 	return syncAll(ctx, cfg, client, db, rec)
 }
 
-// reload re-reads configPath and, if it's valid, builds a fresh client
-// (logging in again unless a token is configured) and database connection
-// from it, then swaps them in. On any failure — an invalid config, a login
-// failure, a database connection failure — the previous state is left in
-// place and the error is returned, so a bad edit doesn't take down an
-// otherwise-running sync.
+// reload loads the current configdb-backed config, overlays the fixed
+// bootstrap WebServer, validates it, and — only if that succeeds — builds a
+// fresh client (logging in again unless a token is configured) and database
+// connection, then swaps them in. On any failure — an invalid config, a
+// login failure, a database connection failure — the previous state (which
+// may be the initial nil state) is left in place and the error is returned,
+// so a bad edit doesn't take down an otherwise-running sync.
 //
 // The previous database connection is closed only after the swap, once it's
-// no longer reachable via current(). A sync already in flight at the moment
-// of the swap keeps using the connection it already fetched and may see it
+// no longer reachable via current() (nil on the very first successful
+// reload from an empty state). A sync already in flight at the moment of
+// the swap keeps using the connection it already fetched and may see it
 // close out from under it; that sync just fails and logs an error,
 // self-correcting on the next iteration with the new state. That's an
 // acceptable tradeoff for a manually triggered, infrequent action, rather
 // than adding reference counting around every database use.
-func (rt *runtime) reload(ctx context.Context, configPath string) error {
-	cfg, err := config.Load(configPath)
+func (rt *runtime) reload(ctx context.Context) error {
+	cfg, err := rt.cfgDB.Load(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	cfg.WebServer = rt.webServer
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
 	}
 
 	client, err := newClient(ctx, cfg)
@@ -95,11 +131,13 @@ func (rt *runtime) reload(ctx context.Context, configPath string) error {
 	rt.cfg, rt.client, rt.db = cfg, client, db
 	rt.mu.Unlock()
 
-	if closeErr := oldDB.Close(); closeErr != nil {
-		log.Printf("close previous database connection: %v", closeErr)
+	if oldDB != nil {
+		if closeErr := oldDB.Close(); closeErr != nil {
+			log.Printf("close previous database connection: %v", closeErr)
+		}
 	}
 
-	log.Printf("config reloaded from %s", configPath)
+	log.Print("config reloaded")
 
 	return nil
 }
