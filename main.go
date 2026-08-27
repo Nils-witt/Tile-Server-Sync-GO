@@ -269,28 +269,7 @@ func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
 	log.Print("running (press Ctrl+C to stop)")
 
 	for {
-		wait := pollInterval
-
-		if rt.configured() {
-			cfg, _, _ := rt.current()
-
-			due := dueMaps(cfg.Maps, lastSync, time.Now())
-			if len(due) > 0 {
-				syncStart := time.Now()
-
-				if _, err := rt.runSyncMaps(ctx, rec, due); err != nil {
-					log.Printf("sync error: %v", err)
-				}
-
-				for id := range due {
-					lastSync[id] = syncStart
-				}
-			}
-
-			wait = nextWake(cfg.Maps, lastSync, time.Now())
-		} else {
-			log.Print("waiting for configuration via /config")
-		}
+		wait := tick(ctx, rt, rec, lastSync)
 
 		select {
 		case <-ctx.Done():
@@ -307,61 +286,108 @@ func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
 	}
 }
 
-// dueMaps returns the set of map IDs (from maps) that are due to sync right
-// now: a map with no lastSync entry yet is always due, once; after that, a
-// map with a positive Interval is due again once that much time has passed
-// since its last sync, while a map with no Interval is never due again
-// automatically.
-func dueMaps(maps []config.MapTarget, lastSync map[string]time.Time, now time.Time) map[string]struct{} {
-	due := make(map[string]struct{})
-
-	for _, m := range maps {
-		last, seen := lastSync[m.ID]
-
-		switch {
-		case !seen:
-			due[m.ID] = struct{}{}
-		case m.SyncInterval() > 0 && now.Sub(last) >= m.SyncInterval():
-			due[m.ID] = struct{}{}
-		}
-	}
-
-	return due
-}
-
-// nextWake returns how long runLoop should sleep before its next tick: the
-// shortest remaining time until any already-synced map with a positive
-// Interval next comes due, or pollInterval if there's no such map (nothing
-// configured yet, every configured map is one-shot, or none has synced yet).
-func nextWake(maps []config.MapTarget, lastSync map[string]time.Time, now time.Time) time.Duration {
-	var wait time.Duration
-
-	found := false
-
-	for _, m := range maps {
-		interval := m.SyncInterval()
-		if interval <= 0 {
-			continue
-		}
-
-		last, seen := lastSync[m.ID]
-		if !seen {
-			continue
-		}
-
-		remaining := max(interval-now.Sub(last), 0)
-
-		if !found || remaining < wait {
-			wait = remaining
-			found = true
-		}
-	}
-
-	if !found {
+// tick runs one pass of runLoop's schedule: syncing whatever maps are
+// currently due (if the runtime is configured yet) and returning how long
+// runLoop should sleep before its next tick. lastSync is mutated in place
+// for every map synced this tick.
+func tick(ctx context.Context, rt *runtime, rec *status.Recorder, lastSync map[string]time.Time) time.Duration {
+	cfg, _, db := rt.current()
+	if db == nil {
+		log.Print("waiting for configuration via /config")
 		return pollInterval
 	}
 
+	now := time.Now()
+
+	due, dueIntervals, wait, haveWait := scheduleTick(cfg.Maps, lastSync, now)
+	if !haveWait {
+		wait = pollInterval
+	}
+
+	if len(due) == 0 {
+		return wait
+	}
+
+	syncStart := now
+
+	if _, err := rt.runSyncMaps(ctx, rec, due); err != nil {
+		log.Printf("sync error: %v", err)
+	}
+
+	// Fold each just-synced map's own next-due time (syncStart + its
+	// Interval) into wait, rather than re-scanning every configured map a
+	// second time the way separate due/wait passes used to: this is the
+	// only part of the schedule that actually changed by syncing, so it's
+	// the only part recomputed here. completed (rather than syncStart) is
+	// what remaining is measured against, so a slow sync doesn't shorten
+	// the map's next interval — its next due time stays pinned to
+	// syncStart+Interval either way.
+	completed := time.Now()
+
+	for id := range due {
+		lastSync[id] = syncStart
+
+		interval, ok := dueIntervals[id]
+		if !ok {
+			continue
+		}
+
+		remaining := max(interval-completed.Sub(syncStart), 0)
+		if !haveWait || remaining < wait {
+			wait, haveWait = remaining, true
+		}
+	}
+
 	return wait
+}
+
+// scheduleTick computes, in one pass over maps, which map IDs are due to
+// sync right now (a map with no lastSync entry yet is always due, once;
+// after that, a map with a positive Interval is due again once that much
+// time has passed since its last sync, while a map with no Interval is
+// never due again automatically) together with otherWait/haveWait: the
+// shortest remaining time until any *not-due* map with a positive Interval
+// next comes due (haveWait is false if there's no such map — nothing
+// configured yet, every configured map is one-shot or already due, or none
+// has synced yet).
+//
+// dueIntervals carries the positive Interval of every due map, so runLoop
+// can fold each just-synced map's fresh next-due time into otherWait after
+// syncing without a second pass over every configured map — mirroring what
+// the former separate dueMaps/nextWake functions computed in two full
+// passes (nextWake's, run after sync, always re-scanned every map — due and
+// not — a second time).
+func scheduleTick(maps []config.MapTarget, lastSync map[string]time.Time, now time.Time) (
+	due map[string]struct{}, dueIntervals map[string]time.Duration, otherWait time.Duration, haveWait bool,
+) {
+	for _, m := range maps {
+		last, seen := lastSync[m.ID]
+		interval := m.SyncInterval()
+
+		switch {
+		case !seen, interval > 0 && now.Sub(last) >= interval:
+			if due == nil {
+				due = make(map[string]struct{}, len(maps))
+			}
+
+			due[m.ID] = struct{}{}
+
+			if interval > 0 {
+				if dueIntervals == nil {
+					dueIntervals = make(map[string]time.Duration, len(maps))
+				}
+
+				dueIntervals[m.ID] = interval
+			}
+		case interval > 0:
+			remaining := interval - now.Sub(last)
+			if !haveWait || remaining < otherWait {
+				otherWait, haveWait = remaining, true
+			}
+		}
+	}
+
+	return due, dueIntervals, otherWait, haveWait
 }
 
 // syncAll fetches and upserts geo objects for every map/version pair in maps

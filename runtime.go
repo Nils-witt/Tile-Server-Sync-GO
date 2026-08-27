@@ -21,7 +21,7 @@ import (
 // once per sync (by runSync, right before calling syncAll) rather than held
 // for a run's whole lifetime, so a reload between syncs takes effect on the
 // very next one. cfg/client/db start nil and stay nil until the first
-// successful reload — see configured() — since the SQLite-backed config may
+// successful reload — see current() — since the SQLite-backed config may
 // start out empty on a fresh install. cfgDB and webServer are fixed for the
 // process's lifetime: webServer settings are deliberately not reloadable
 // (the server a reload request arrives on can't safely restart itself mid
@@ -44,8 +44,8 @@ type runtime struct {
 	webServer config.WebServer
 
 	// wake is pinged by reload() after a successful config swap, so runLoop
-	// (which otherwise sleeps for up to nextWake's computed duration) can
-	// react immediately — e.g. syncing a newly added map right away instead
+	// (which otherwise sleeps for up to scheduleTick's computed duration)
+	// can react immediately — e.g. syncing a newly added map right away instead
 	// of waiting out whatever sleep duration was already in flight. Buffered
 	// size 1 and sent to non-blockingly: at most one pending wake needs to be
 	// coalesced, since runLoop just re-reads rt.current() from scratch on
@@ -58,23 +58,17 @@ func newRuntime(cfgDB *configdb.Store, webServer config.WebServer) *runtime {
 }
 
 // current returns the runtime's current config, client, and database. Any
-// of the three may be nil if the runtime has never had a successful reload.
+// of the three may be nil if the runtime has never had a successful reload
+// — check db specifically (as runLoop does) to tell whether the runtime is
+// configured yet, rather than adding a second locked call for that: false
+// only until the first successful reload() call against a valid config,
+// normal (not an error) right after a fresh install with an empty
+// SQLite-backed config.
 func (rt *runtime) current() (*config.Config, *tileserve.Client, *store.Store) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
 	return rt.cfg, rt.client, rt.db
-}
-
-// configured reports whether the runtime has a working {cfg, client, db}
-// triple yet. False only until the first successful reload() call against a
-// valid config — normal, not an error, right after a fresh install with an
-// empty SQLite-backed config.
-func (rt *runtime) configured() bool {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
-
-	return rt.db != nil
 }
 
 // errNotConfigured is returned by runSync/runSyncMaps when no successful
