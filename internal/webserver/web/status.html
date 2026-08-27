@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script>{{THEME_INIT_JS}}</script>
+<title>go-sync-objects status</title>
+<meta http-equiv="refresh" content="10">
+<style>{{BASE_CSS}}</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="brand">go-sync-objects</span>
+  <nav>
+    <a href="/" class="active">Status</a>
+    <a href="/config" id="nav-config">Config</a>
+    <a href="/users" id="nav-users">Users</a>
+    <a href="/security-log" id="nav-security-log">Security log</a>
+  </nav>
+  <nav id="account-nav"></nav>
+  <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode"></button>
+</div>
+
+<main>
+
+<div id="msg" class="banner"></div>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="label">Started</div>
+    <div class="value" style="font-size:1.1rem">{{.StartedAt.Format "2006-01-02 15:04:05"}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Runs</div>
+    <div class="value">{{.Runs}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Last run</div>
+    {{if .LastRunAt.IsZero}}
+      <div class="value" style="font-size:1.1rem">never</div>
+    {{else}}
+      <div class="value" style="font-size:1.1rem">{{.LastRunAt.Format "2006-01-02 15:04:05"}}</div>
+      <div class="sub">{{if .LastRunErr}}<span class="badge err">error</span>{{else}}<span class="badge ok">ok</span>{{end}}</div>
+    {{end}}
+  </div>
+  <div class="stat-card">
+    <div class="label">Total objects synced</div>
+    <div class="value">{{.TotalSynced}}</div>
+  </div>
+</div>
+
+{{if .LastRunErr}}
+<div class="card" style="border-color:var(--danger); background:var(--danger-bg);">
+  <strong style="color:var(--danger)">Last run error:</strong> {{.LastRunErr}}
+</div>
+{{end}}
+
+<div class="card">
+  <h2>Last result per map/version</h2>
+  {{if not .Results}}
+  <p class="hint">No syncs yet.</p>
+  {{else}}
+  <table>
+  <tr><th>Map</th><th>Version</th><th>Synced</th><th>At</th><th>Status</th><th></th></tr>
+  {{range .Results}}
+  <tr>
+    <td>{{.MapID}}</td>
+    <td>{{.Version}}</td>
+    <td>{{.Synced}}</td>
+    <td>{{.At.Format "2006-01-02 15:04:05"}}</td>
+    <td>{{if .Err}}<span class="badge err" title="{{.Err}}">error</span>{{else}}<span class="badge ok">ok</span>{{end}}</td>
+    <td><button type="button" class="sync-map-btn" data-map-id="{{.MapID}}">Sync</button></td>
+  </tr>
+  {{end}}
+  </table>
+  {{end}}
+</div>
+
+<div class="card">
+  <details class="log-card" open>
+    <summary>Recent log output</summary>
+    <pre class="log">{{range .Logs}}{{.}}{{end}}</pre>
+  </details>
+</div>
+
+</main>
+
+<script>{{ACCOUNT_NAV_JS}}{{THEME_TOGGLE_JS}}</script>
+<script>
+(function () {
+  "use strict";
+
+  initThemeToggle();
+
+  initAccountNav(function (me) {
+    if (!me.permissions.triggerSync) {
+      document.querySelectorAll(".sync-map-btn").forEach(function (btn) { btn.style.display = "none"; });
+    }
+  });
+
+  var msg = document.getElementById("msg");
+  function showMessage(ok, text) {
+    msg.className = "banner " + (ok ? "ok" : "err");
+    msg.textContent = text;
+  }
+
+  document.querySelectorAll(".sync-map-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var id = btn.dataset.mapId;
+      var original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Syncing…";
+      showMessage(true, "Syncing " + id + "…");
+
+      fetch("/api/maps/" + encodeURIComponent(id) + "/sync", { method: "POST" })
+        .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          if (res.ok) {
+            location.reload();
+          } else {
+            showMessage(false, "Sync failed for " + id + ": " + (res.body.error || "unknown error"));
+            btn.disabled = false;
+            btn.textContent = original;
+          }
+        })
+        .catch(function (e) {
+          showMessage(false, "Sync failed for " + id + ": " + e);
+          btn.disabled = false;
+          btn.textContent = original;
+        });
+    });
+  });
+})();
+</script>
+</body>
+</html>

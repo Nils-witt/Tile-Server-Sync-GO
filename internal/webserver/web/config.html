@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script>{{THEME_INIT_JS}}</script>
+<title>go-sync-objects config</title>
+<style>{{BASE_CSS}}</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="brand">go-sync-objects</span>
+  <nav>
+    <a href="/">Status</a>
+    <a href="/config" class="active" id="nav-config">Config</a>
+    <a href="/users" id="nav-users">Users</a>
+    <a href="/security-log" id="nav-security-log">Security log</a>
+  </nav>
+  <nav id="account-nav"></nav>
+  <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode"></button>
+</div>
+
+<main>
+
+<div id="msg" class="banner"></div>
+
+<p class="hint" style="margin-bottom:1.1rem;">Saving writes to the config database and applies it
+to the running process immediately &mdash; API credentials, database settings, and maps (including
+each map's own interval) all take effect right away, no restart needed. To run a sync immediately
+instead of waiting for a map's interval, use the per-map Sync button on the
+<a href="/">status page</a>.</p>
+
+<div id="structured-editor">
+
+  <div class="tabs" role="tablist">
+    <button type="button" class="tab-btn" data-tab="api" role="tab">API</button>
+    <button type="button" class="tab-btn" data-tab="db" role="tab">Database</button>
+    <button type="button" class="tab-btn" data-tab="maps" role="tab">Maps</button>
+    <button type="button" class="tab-btn" data-tab="sso" role="tab">SSO</button>
+  </div>
+
+  <section class="card tab-panel" id="section-api" data-tab="api">
+    <h2>API</h2>
+    <p class="hint">Credentials for the tileserve-go instance objects are fetched from.</p>
+    <label for="api-baseurl">Base URL</label>
+    <input type="text" id="api-baseurl" placeholder="http://localhost:8085">
+    <label for="api-username">Username</label>
+    <input type="text" id="api-username">
+    <label for="api-password">Password</label>
+    <input type="text" id="api-password" placeholder="unchanged &mdash; leave blank to keep the current password">
+    <label for="api-token">Token (used instead of username/password if set)</label>
+    <input type="text" id="api-token">
+    <div class="actions-row">
+      <button type="button" class="primary" id="save-api">Save API section</button>
+    </div>
+  </section>
+
+  <section class="card tab-panel" id="section-db" data-tab="db">
+    <h2>Database</h2>
+    <p class="hint">Where synced geo objects are written.</p>
+    <label for="db-dsn">DSN</label>
+    <input type="text" id="db-dsn" placeholder="unchanged &mdash; leave blank to keep the current DSN">
+    <label for="db-table">Table</label>
+    <input type="text" id="db-table" placeholder="geo_objects">
+    <div class="checkbox-row"><input type="checkbox" id="db-prune"><label for="db-prune">Prune missing rows after each map/version sync</label></div>
+
+    <details style="margin-top:0.9rem;">
+      <summary style="cursor:pointer; font-weight:500; font-size:0.85rem;">Column mapping (advanced &mdash; leave blank to use defaults)</summary>
+      <div class="col-grid" id="col-grid"></div>
+    </details>
+    <div class="actions-row">
+      <button type="button" class="primary" id="save-database">Save database section</button>
+    </div>
+  </section>
+
+  <section class="card tab-panel" id="section-maps" data-tab="maps">
+    <h2>Maps</h2>
+    <p class="hint">Each map is fetched independently, on its own optional interval.</p>
+    <div id="maps-container"></div>
+    <div class="actions-row">
+      <button type="button" id="add-map">+ Add map</button>
+    </div>
+  </section>
+
+  <section class="card tab-panel" id="section-sso" data-tab="sso">
+    <h2>SSO</h2>
+    <p class="hint">Optional OpenID Connect single sign-on, in addition to local username/password
+    accounts (which never go away). A first-time SSO login auto-creates a local account with the
+    default permissions below unless a local account with the same username already exists, in
+    which case it's linked instead (keeping that account's own permissions). SSO accounts are never
+    made superusers automatically &mdash; grant that manually on the <a href="/users">Users page</a>
+    if needed.</p>
+    <div class="checkbox-row"><input type="checkbox" id="sso-enabled"><label for="sso-enabled">Enabled</label></div>
+    <label for="sso-issuer">Issuer URL</label>
+    <input type="text" id="sso-issuer" placeholder="https://accounts.example.com">
+    <label for="sso-client-id">Client ID</label>
+    <input type="text" id="sso-client-id">
+    <label for="sso-client-secret">Client secret</label>
+    <input type="text" id="sso-client-secret" placeholder="unchanged &mdash; leave blank to keep the current secret">
+    <label for="sso-scopes">Scopes (space-separated)</label>
+    <input type="text" id="sso-scopes" placeholder="openid profile email">
+    <label for="sso-button-label">Login page button label</label>
+    <input type="text" id="sso-button-label" placeholder="Sign in with SSO">
+    <label for="sso-redirect-base">Redirect base URL (advanced &mdash; leave blank to auto-detect from the incoming request; set this when running behind a reverse proxy)</label>
+    <input type="text" id="sso-redirect-base" placeholder="https://sync.example.com">
+
+    <p class="hint" style="margin-top:0.9rem;">Default permissions for a newly auto-created SSO account:</p>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-view-status"><label for="sso-default-view-status">View status</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-trigger-sync"><label for="sso-default-trigger-sync">Trigger sync</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-view-config"><label for="sso-default-view-config">View config</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-edit-api"><label for="sso-default-edit-api">Edit config: API</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-edit-database"><label for="sso-default-edit-database">Edit config: Database</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-edit-maps"><label for="sso-default-edit-maps">Edit config: Maps</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-edit-sso"><label for="sso-default-edit-sso">Edit config: SSO</label></div>
+
+    <div class="actions-row">
+      <button type="button" class="primary" id="save-sso">Save SSO section</button>
+    </div>
+  </section>
+
+  <div class="actions-row">
+    <button type="button" id="reload">Discard changes (reload form)</button>
+  </div>
+
+</div>
+
+</main>
+
+<script>{{ACCOUNT_NAV_JS}}{{THEME_TOGGLE_JS}}</script>
+<script>
+(function () {
+  "use strict";
+
+  initThemeToggle();
+
+  var COLUMN_FIELDS = [
+    ["uuid", "UUID (upsert key)"], ["mapUuid", "Map UUID"], ["version", "Version"],
+    ["name", "Name"], ["externalId", "External ID"], ["latitude", "Latitude"],
+    ["longitude", "Longitude"], ["street", "Street"], ["housenumber", "House number"],
+    ["postcode", "Postcode"], ["city", "City"], ["cityDistrict", "City district"],
+    ["createdAt", "Created at"], ["updatedAt", "Updated at"],
+    ["createdBy", "Created by"], ["updatedBy", "Updated by"], ["syncedAt", "Synced at (bookkeeping)"]
+  ];
+
+  var colGrid = document.getElementById("col-grid");
+  COLUMN_FIELDS.forEach(function (f) {
+    var wrap = document.createElement("div");
+    var label = document.createElement("label");
+    label.setAttribute("for", "col-" + f[0]);
+    label.textContent = f[1];
+    var input = document.createElement("input");
+    input.type = "text";
+    input.id = "col-" + f[0];
+    wrap.appendChild(label);
+    wrap.appendChild(input);
+    colGrid.appendChild(wrap);
+  });
+
+  var tabButtons = Array.prototype.slice.call(document.querySelectorAll(".tab-btn"));
+  var tabPanels = Array.prototype.slice.call(document.querySelectorAll(".tab-panel"));
+
+  function activateTab(name) {
+    tabButtons.forEach(function (btn) { btn.classList.toggle("active", btn.dataset.tab === name); });
+    tabPanels.forEach(function (panel) { panel.hidden = panel.dataset.tab !== name; });
+  }
+
+  tabButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      activateTab(btn.dataset.tab);
+      history.replaceState(null, "", "#" + btn.dataset.tab);
+    });
+  });
+
+  var initialTab = (location.hash || "").replace("#", "");
+  if (!tabButtons.some(function (btn) { return btn.dataset.tab === initialTab; })) {
+    initialTab = "api";
+  }
+  activateTab(initialTab);
+
+  var mapsContainer = document.getElementById("maps-container");
+
+  function summarizeMap(idInput, versionsInput, intervalInput, idSpan, metaSpan) {
+    idSpan.textContent = idInput.value.trim() || "(new map)";
+    var versions = versionsInput.value.split(",").map(function (v) { return v.trim(); }).filter(Boolean);
+    var parts = [];
+    parts.push(versions.length === 1 ? "1 version" : versions.length + " versions");
+    parts.push(intervalInput.value.trim() ? "every " + intervalInput.value.trim() : "one-shot");
+    metaSpan.textContent = parts.join(" · ");
+  }
+
+  function parseStaticColumns(text) {
+    var out = {};
+    text.split("\n").forEach(function (line) {
+      line = line.trim();
+      if (!line) return;
+      var i = line.indexOf("=");
+      if (i < 0) return;
+      out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    });
+    return out;
+  }
+
+  // buildMapRow builds one map's card. Each card owns its own persistence:
+  // opts.persisted marks a row loaded from GET /api/maps (its "Save" PUTs to
+  // /api/maps/{id}); a freshly added row (opts.persisted unset) POSTs to
+  // /api/maps on first Save, after which it behaves like a persisted row
+  // (its id field is locked — renaming isn't supported, see PUT
+  // /api/maps/{id}'s server-side contract) and "Remove" starts issuing
+  // DELETE requests instead of just removing the card from the DOM.
+  function buildMapRow(m, opts) {
+    opts = opts || {};
+    var persisted = !!opts.persisted;
+    m = m || { id: "", versions: [], interval: "", staticColumns: {} };
+
+    var details = document.createElement("details");
+    details.className = "map-card";
+    details.open = !!opts.openByDefault;
+
+    var summary = document.createElement("summary");
+    var idSpan = document.createElement("span");
+    idSpan.className = "map-summary-id";
+    var metaSpan = document.createElement("span");
+    metaSpan.className = "map-summary-meta";
+    summary.appendChild(idSpan);
+    summary.appendChild(metaSpan);
+    details.appendChild(summary);
+
+    var body = document.createElement("div");
+    body.className = "map-body";
+
+    var idLabel = document.createElement("label");
+    idLabel.textContent = "Map ID";
+    var idInput = document.createElement("input");
+    idInput.type = "text";
+    idInput.className = "map-id";
+    idInput.value = m.id || "";
+    idInput.disabled = persisted;
+
+    var versionsLabel = document.createElement("label");
+    versionsLabel.textContent = "Versions (comma-separated, e.g. current, 3, 4)";
+    var versionsInput = document.createElement("input");
+    versionsInput.type = "text";
+    versionsInput.className = "map-versions";
+    versionsInput.value = (m.versions || []).join(", ");
+
+    var intervalLabel = document.createElement("label");
+    intervalLabel.textContent = "Interval (Go duration, e.g. \"5m\"; empty = sync once, no automatic repeat)";
+    var intervalInput = document.createElement("input");
+    intervalInput.type = "text";
+    intervalInput.className = "map-interval";
+    intervalInput.placeholder = "5m";
+    intervalInput.value = m.interval || "";
+
+    var colsLabel = document.createElement("label");
+    colsLabel.textContent = "Static columns (one key=value per line)";
+    var colsArea = document.createElement("textarea");
+    colsArea.className = "map-static-columns";
+    colsArea.rows = 3;
+    var lines = [];
+    Object.keys(m.staticColumns || {}).forEach(function (k) {
+      lines.push(k + "=" + m.staticColumns[k]);
+    });
+    colsArea.value = lines.join("\n");
+
+    var rowMsg = document.createElement("div");
+    rowMsg.className = "banner";
+    rowMsg.style.marginTop = "0.5rem";
+    function showRowMessage(ok, text) {
+      rowMsg.className = "banner " + (ok ? "ok" : "err");
+      rowMsg.textContent = text;
+    }
+
+    var saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "primary";
+    saveBtn.textContent = "Save";
+    saveBtn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+
+      var id = idInput.value.trim();
+      var payload = {
+        id: id,
+        versions: versionsInput.value.split(",").map(function (v) { return v.trim(); }).filter(Boolean),
+        interval: intervalInput.value.trim(),
+        staticColumns: parseStaticColumns(colsArea.value)
+      };
+
+      var url = persisted ? "/api/maps/" + encodeURIComponent(id) : "/api/maps";
+      var method = persisted ? "PUT" : "POST";
+
+      saveBtn.disabled = true;
+      fetch(url, {
+        method: method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          saveBtn.disabled = false;
+          if (res.ok) {
+            persisted = true;
+            idInput.disabled = true;
+            if (res.body.applied) {
+              showRowMessage(true, "Saved and applied to the running process.");
+            } else {
+              showRowMessage(false, "Saved, but failed to apply to the running process: " + res.body.applyError);
+            }
+          } else {
+            showRowMessage(false, "Not saved: " + res.body.error);
+          }
+        }).catch(function (e) {
+          saveBtn.disabled = false;
+          showRowMessage(false, "Failed to save map: " + e);
+        });
+    });
+
+    var removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "danger";
+    removeBtn.textContent = "Remove map";
+    removeBtn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+
+      if (!persisted) {
+        details.remove();
+        return;
+      }
+
+      removeBtn.disabled = true;
+      fetch("/api/maps/" + encodeURIComponent(idInput.value.trim()), { method: "DELETE" })
+        .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          if (res.ok) {
+            details.remove();
+          } else {
+            removeBtn.disabled = false;
+            showRowMessage(false, "Failed to remove map: " + res.body.error);
+          }
+        }).catch(function (e) {
+          removeBtn.disabled = false;
+          showRowMessage(false, "Failed to remove map: " + e);
+        });
+    });
+
+    body.appendChild(idLabel);
+    body.appendChild(idInput);
+    body.appendChild(versionsLabel);
+    body.appendChild(versionsInput);
+    body.appendChild(intervalLabel);
+    body.appendChild(intervalInput);
+    body.appendChild(colsLabel);
+    body.appendChild(colsArea);
+    var actionsWrap = document.createElement("div");
+    actionsWrap.className = "actions-row";
+    actionsWrap.appendChild(saveBtn);
+    actionsWrap.appendChild(removeBtn);
+    body.appendChild(actionsWrap);
+    body.appendChild(rowMsg);
+
+    details.appendChild(body);
+
+    function refreshSummary() { summarizeMap(idInput, versionsInput, intervalInput, idSpan, metaSpan); }
+    idInput.addEventListener("input", refreshSummary);
+    versionsInput.addEventListener("input", refreshSummary);
+    intervalInput.addEventListener("input", refreshSummary);
+    refreshSummary();
+
+    return details;
+  }
+
+  document.getElementById("add-map").addEventListener("click", function () {
+    var row = buildMapRow(null, { openByDefault: true });
+    mapsContainer.appendChild(row);
+    row.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    row.querySelector(".map-id").focus();
+  });
+
+  function loadMaps() {
+    fetch("/api/maps").then(function (r) { return r.json(); }).then(function (maps) {
+      mapsContainer.innerHTML = "";
+      (maps || []).forEach(function (m) { mapsContainer.appendChild(buildMapRow(m, { persisted: true })); });
+    }).catch(function (e) { showMessage(false, "Failed to load maps: " + e); });
+  }
+
+  function populateForm(cfg) {
+    document.getElementById("api-baseurl").value = cfg.api.baseUrl || "";
+    document.getElementById("api-username").value = cfg.api.username || "";
+    // api.password and database.dsn are never sent back by the server (see
+    // redactSecrets in internal/webserver/config.go) — both fields stay
+    // blank, meaning "unchanged" on save; see collectForm.
+    document.getElementById("api-password").value = "";
+    document.getElementById("api-token").value = cfg.api.token || "";
+    document.getElementById("db-dsn").value = "";
+    document.getElementById("db-table").value = cfg.database.table || "";
+    document.getElementById("db-prune").checked = !!cfg.database.pruneMissing;
+
+    var cols = cfg.database.columns || {};
+    COLUMN_FIELDS.forEach(function (f) {
+      var input = document.getElementById("col-" + f[0]);
+      if (input) input.value = cols[f[0]] || "";
+    });
+  }
+
+  function collectAPI() {
+    return {
+      baseUrl: document.getElementById("api-baseurl").value.trim(),
+      username: document.getElementById("api-username").value,
+      password: document.getElementById("api-password").value,
+      token: document.getElementById("api-token").value.trim()
+    };
+  }
+
+  function collectDatabase() {
+    var cols = {};
+    COLUMN_FIELDS.forEach(function (f) {
+      cols[f[0]] = document.getElementById("col-" + f[0]).value.trim();
+    });
+
+    return {
+      dsn: document.getElementById("db-dsn").value.trim(),
+      table: document.getElementById("db-table").value.trim(),
+      pruneMissing: document.getElementById("db-prune").checked,
+      columns: cols
+    };
+  }
+
+  function populateSSO(cfg) {
+    document.getElementById("sso-enabled").checked = !!cfg.enabled;
+    document.getElementById("sso-issuer").value = cfg.issuerUrl || "";
+    document.getElementById("sso-client-id").value = cfg.clientId || "";
+    // clientSecret is never sent back by the server (see ssoConfigDTO in
+    // internal/webserver/sso.go) — blank means "unchanged" on save.
+    document.getElementById("sso-client-secret").value = "";
+    document.getElementById("sso-scopes").value = cfg.scopes || "";
+    document.getElementById("sso-button-label").value = cfg.buttonLabel || "";
+    document.getElementById("sso-redirect-base").value = cfg.redirectBaseUrl || "";
+
+    var dp = cfg.defaultPermissions || {};
+    document.getElementById("sso-default-view-status").checked = !!dp.viewStatus;
+    document.getElementById("sso-default-trigger-sync").checked = !!dp.triggerSync;
+    document.getElementById("sso-default-view-config").checked = !!dp.viewConfig;
+    document.getElementById("sso-default-edit-api").checked = !!dp.editConfigAPI;
+    document.getElementById("sso-default-edit-database").checked = !!dp.editConfigDatabase;
+    document.getElementById("sso-default-edit-maps").checked = !!dp.editConfigMaps;
+    document.getElementById("sso-default-edit-sso").checked = !!dp.editConfigSSO;
+  }
+
+  function collectSSO() {
+    return {
+      enabled: document.getElementById("sso-enabled").checked,
+      issuerUrl: document.getElementById("sso-issuer").value.trim(),
+      clientId: document.getElementById("sso-client-id").value.trim(),
+      clientSecret: document.getElementById("sso-client-secret").value,
+      scopes: document.getElementById("sso-scopes").value.trim(),
+      buttonLabel: document.getElementById("sso-button-label").value.trim(),
+      redirectBaseUrl: document.getElementById("sso-redirect-base").value.trim(),
+      defaultPermissions: {
+        viewStatus: document.getElementById("sso-default-view-status").checked,
+        triggerSync: document.getElementById("sso-default-trigger-sync").checked,
+        viewConfig: document.getElementById("sso-default-view-config").checked,
+        editConfigAPI: document.getElementById("sso-default-edit-api").checked,
+        editConfigDatabase: document.getElementById("sso-default-edit-database").checked,
+        editConfigMaps: document.getElementById("sso-default-edit-maps").checked,
+        editConfigSSO: document.getElementById("sso-default-edit-sso").checked
+      }
+    };
+  }
+
+  function loadSSO() {
+    fetch("/api/config/sso").then(function (r) { return r.json(); }).then(function (cfg) {
+      populateSSO(cfg);
+    }).catch(function (e) { showMessage(false, "Failed to load SSO config: " + e); });
+  }
+
+  var msg = document.getElementById("msg");
+  function showMessage(ok, text) {
+    msg.className = "banner " + (ok ? "ok" : "err");
+    msg.textContent = text;
+  }
+
+  function load() {
+    fetch("/api/config").then(function (r) { return r.json(); }).then(function (resp) {
+      if (resp.config) {
+        populateForm(resp.config);
+        msg.className = "banner";
+        msg.textContent = "";
+      } else {
+        showMessage(false, "Failed to load config.\n" + (resp.error || ""));
+      }
+    }).catch(function (e) { showMessage(false, "Failed to load config: " + e); });
+  }
+
+  function saveSection(endpoint, body) {
+    fetch(endpoint, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (res.ok) {
+          if (res.body.applied) {
+            showMessage(true, "Saved and applied to the running process.");
+          } else {
+            showMessage(false, "Saved, but failed to apply to the running process: " + res.body.applyError);
+          }
+          if (res.body.config) populateForm(res.body.config);
+        } else {
+          showMessage(false, "Not saved: " + res.body.error);
+        }
+      }).catch(function (e) { showMessage(false, "Failed to save config: " + e); });
+  }
+
+  document.getElementById("save-api").addEventListener("click", function () {
+    saveSection("/api/config/api", { api: collectAPI() });
+  });
+  document.getElementById("save-database").addEventListener("click", function () {
+    saveSection("/api/config/database", { database: collectDatabase() });
+  });
+  document.getElementById("save-sso").addEventListener("click", function () {
+    fetch("/api/config/sso", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectSSO())
+    }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (res.ok) {
+          showMessage(true, "SSO settings saved.");
+          populateSSO(res.body);
+        } else {
+          showMessage(false, "Not saved: " + res.body.error);
+        }
+      }).catch(function (e) { showMessage(false, "Failed to save SSO settings: " + e); });
+  });
+
+  document.getElementById("reload").addEventListener("click", function () { load(); loadSSO(); loadMaps(); });
+
+  // Disable each tab's save button (and its input fields) when the
+  // logged-in user lacks that tab's edit permission. The server enforces
+  // this regardless (see requirePermission in webserver.go) — this is
+  // purely so the UI doesn't invite an edit that will just be rejected.
+  function disableSection(sectionID, disabled) {
+    var section = document.getElementById(sectionID);
+    if (!section) return;
+    section.querySelectorAll("input, textarea, button").forEach(function (el) { el.disabled = disabled; });
+  }
+
+  initAccountNav(function (me) {
+    var perms = me.permissions || {};
+    disableSection("section-api", !perms.editConfigAPI);
+    disableSection("section-db", !perms.editConfigDatabase);
+    disableSection("section-maps", !perms.editConfigMaps);
+    disableSection("section-sso", !perms.editConfigSSO);
+  });
+
+  load();
+  loadSSO();
+  loadMaps();
+})();
+</script>
+</body>
+</html>

@@ -1,12 +1,4 @@
-package webserver
 
-// baseCSS is the shared stylesheet for the status page ("/") and the config
-// editor ("/config"), kept in one place so the two pages read as one
-// application rather than two independently styled fragments. It's a plain
-// Go string constant (not a template) so both the html/template-rendered
-// status page and the static configPageHTML const can concatenate it in at
-// compile time.
-const baseCSS = `
 :root {
   --bg: #f6f7f8; --card: #ffffff; --border: #e1e3e6; --border-strong: #c7cad0;
   --text: #1a1a1a; --text-muted: #666; --accent: #1a7f37; --accent-dark: #146029;
@@ -19,7 +11,7 @@ const baseCSS = `
 /* Dark palette: applied when the OS prefers dark and the user hasn't
    explicitly picked light, or when the user has explicitly picked dark
    (data-theme, set by the topbar toggle and persisted in localStorage —
-   see themeInitScript/themeToggleJS in shared_script.go). */
+   see theme_init.js/theme_toggle.js). */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #14161a; --card: #1c1f24; --border: #2c3038; --border-strong: #3a3f47;
@@ -147,4 +139,3 @@ details.map-card .map-body { padding: 0.2rem 0.9rem 0.9rem; }
   main { padding: 1rem; }
   .topbar { padding: 0.6rem 1rem; }
 }
-`
