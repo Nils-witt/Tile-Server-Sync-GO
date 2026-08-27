@@ -81,7 +81,12 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   `UserCount`) rather than a single whole-graph `Load`/`Save`, since accounts are managed one at a
   time through a real form, not a bulk editor like `maps`. Passwords are hashed with
   `golang.org/x/crypto/bcrypt`; a session's random token is only ever stored as its SHA-256 hash
-  (`sessions.token_hash`) — the raw token lives solely in the browser's session cookie.
+  (`sessions.token_hash`) — the raw token lives solely in the browser's session cookie. The same
+  database also holds `sso_config` (a singleton settings row, `internal/configdb/sso.go`) and
+  `sso_identities` (linking a verified OIDC `(issuer, subject)` pair to a `users` row) backing
+  optional SSO login — see "Authentication & permissions" below. Finally it holds `security_log`
+  (`internal/configdb/securitylog.go`), an append-only audit trail — see the security log bullet
+  under "Authentication & permissions" below.
 - **`internal/tileserve`** — minimal synchronous HTTP client for tileserve-go. `Login()`
   exchanges username/password for a bearer token; `SetToken()` bypasses login when a token is
   already known. `GeoObjects(mapID, version)` fetches and JSON-decodes one map/version's objects
@@ -110,8 +115,10 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   to each map/version row in the results table posts to `POST /api/sync/{mapID}`
   (`syncMapAPIHandler`, with the ID taken from the URL path), wired to `runtime.runSyncMaps` with a
   single-ID set, to run that one map's sync immediately rather than waiting for its next `interval`
-  tick. A `/users` page (superuser-only) manages accounts. See "Authentication & permissions"
-  below for how every route in this package is now gated.
+  tick. A `/users` page (superuser-only) manages accounts, and a `/security-log` page
+  (superuser-only, backed by `GET /api/security-log`) shows the audit trail — see "Authentication &
+  permissions" below for how every route in this package is now gated, and for the security log
+  itself.
 - **`internal/store`** — owns the MariaDB schema (`EnsureSchema`, idempotent
   `CREATE TABLE IF NOT EXISTS`) and writes (`UpsertGeoObjects`, one transaction per call, batched
   `INSERT ... ON DUPLICATE KEY UPDATE` keyed on `uuid`). Depends on `internal/tileserve` for the
@@ -127,14 +134,51 @@ Every route the web server serves requires a logged-in account — there is no p
 anymore, including the status page. Accounts live in `configdb`'s `users`/`sessions` tables (see
 above) and are managed at `/users` (superuser-only, backed by `/api/users`, `/api/users/{id}`).
 
-Each account has six independent boolean permissions (`configdb.Permissions`): `view_status`,
-`trigger_sync`, `view_config`, and three config-editing permissions — `edit_config_api`,
-`edit_config_database`, `edit_config_maps` — one per `/config` tab, enforced independently at each
-tab's own save endpoint (see the `internal/webserver` bullet above). There is deliberately no
-umbrella "edit config" flag. A separate `is_superuser` flag (not one of the six) gates `/users`
-only — it's orthogonal to the six feature permissions, not a superset of them, so a superuser
-account with none of the six still can't see the status page or `/config`, and a fully-permissioned
-non-superuser still can't reach `/users`.
+Each account has seven independent boolean permissions (`configdb.Permissions`): `view_status`,
+`trigger_sync`, `view_config`, and four config-editing permissions — `edit_config_api`,
+`edit_config_database`, `edit_config_maps`, `edit_config_sso` — one per `/config` tab, enforced
+independently at each tab's own save endpoint (see the `internal/webserver` bullet above). There
+is deliberately no umbrella "edit config" flag. A separate `is_superuser` flag (not one of the
+seven) gates `/users` only — it's orthogonal to the seven feature permissions, not a superset of
+them, so a superuser account with none of them still can't see the status page or `/config`, and a
+fully-permissioned non-superuser still can't reach `/users`.
+
+Every security-relevant action also appends a row to `configdb`'s append-only `security_log` table
+(`internal/configdb/securitylog.go`, `Store.LogSecurityEvent`/`Store.ListSecurityLog`) — local and
+SSO logins (success and failure), logouts, account creation/update/deletion, and every config save
+(per-section and raw, including the SSO tab), each with a timestamp, event type, the acting
+username (or attempted username, for a failed login), the request's `RemoteAddr`, and a short
+free-form detail string (e.g. `section=api`, `target=<username>`). Writing a log entry is
+best-effort — `internal/webserver/security_log.go`'s `logSecurityEvent` helper only logs a write
+failure to stderr, never blocks or fails the action that triggered it. `GET /security-log`
+(superuser-only, like `/users`) renders it via `GET /api/security-log?limit=N` (default 200, capped
+at 1000, newest first) — there's no separate permission bit for it since the log can contain
+account-management detail and remote addresses not meant for every logged-in user.
+
+### SSO (OpenID Connect)
+
+Optional, in addition to local username/password accounts (which are never disabled and remain
+how the very first account is created at `/setup`). Configured on `/config`'s SSO tab
+(`internal/webserver/sso.go`, `GET`/`POST /api/config/sso` gated by `view_config`/
+`edit_config_sso` respectively) and stored in `configdb`'s `sso_config` row — nothing about it is
+cached in the running process: `internal/webserver/sso_login.go` re-resolves the provider's OIDC
+discovery document (`github.com/coreos/go-oidc/v3/oidc`) and rebuilds the `oauth2.Config`
+(`golang.org/x/oauth2`) fresh on every `/login/sso` and `/login/sso/callback` request, unlike
+`runtime.reload`'s cached `{cfg, client, db}` — SSO logins are infrequent enough (interactive,
+human-driven) that the extra discovery round-trip per attempt is cheap, and this avoids a second
+live-reload path to maintain. The login page's unauthenticated `GET /api/sso/status` tells its
+script whether to render an SSO button and with what label, without exposing provider details.
+
+`GET /login/sso` starts the authorization-code-with-PKCE flow (state/nonce/verifier held in a
+short-lived `gso_sso_flow` cookie, mirroring the session cookie's `HttpOnly`/`SameSite=Lax`/
+conditional-`Secure` shape); `GET /login/sso/callback` verifies the ID token (audience, nonce) and
+resolves the verified `(issuer, subject)` to a local user via
+`configdb.Store.FindOrCreateSSOUser`: an existing link logs straight in; failing that, a local
+account already named the claimed username (email, else `preferred_username`, else the subject
+identifier) is linked to instead of duplicated; failing that, a new account is auto-provisioned
+with the permission set configured on the SSO tab (`sso_config`'s `default_*` columns) and a
+random, never-revealed password. An SSO-provisioned account is never a superuser automatically —
+that stays a manual grant via `/users`, exactly like every other account-creation path.
 
 `internal/webserver/auth.go` implements this: `requireUser`/`requirePermission`/`requireSuperuser`
 are `http.HandlerFunc` wrappers, parameterized by `page bool` — `true` redirects an unauthenticated/

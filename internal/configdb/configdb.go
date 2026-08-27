@@ -118,7 +118,23 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		}
 	}
 
-	return s.migrateMapsInterval(ctx)
+	for _, stmt := range ssoSchemaStatements {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("create sso schema: %w", err)
+		}
+	}
+
+	for _, stmt := range securityLogSchemaStatements {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("create security log schema: %w", err)
+		}
+	}
+
+	if err := s.migrateMapsInterval(ctx); err != nil {
+		return err
+	}
+
+	return s.migrateUsersEditConfigSSO(ctx)
 }
 
 // migrateMapsInterval adds the maps.interval column to a database created by
@@ -128,7 +144,7 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 // it. A freshly created database already has the column from that
 // statement, so this checks first via PRAGMA table_info to stay idempotent.
 func (s *Store) migrateMapsInterval(ctx context.Context) error {
-	hasInterval, err := s.mapsTableHasColumn(ctx, "interval")
+	hasInterval, err := s.tableHasColumn(ctx, `PRAGMA table_info(maps)`, "interval")
 	if err != nil {
 		return err
 	}
@@ -144,12 +160,34 @@ func (s *Store) migrateMapsInterval(ctx context.Context) error {
 	return nil
 }
 
-// mapsTableHasColumn reports whether the maps table already has a column
-// named col, via PRAGMA table_info.
-func (s *Store) mapsTableHasColumn(ctx context.Context, col string) (bool, error) {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(maps)`)
+// migrateUsersEditConfigSSO adds the users.perm_edit_config_sso column to a
+// database created before the SSO feature existed, the same way
+// migrateMapsInterval backfills maps.interval on an older schema.
+func (s *Store) migrateUsersEditConfigSSO(ctx context.Context) error {
+	hasColumn, err := s.tableHasColumn(ctx, `PRAGMA table_info(users)`, "perm_edit_config_sso")
 	if err != nil {
-		return false, fmt.Errorf("inspect maps table: %w", err)
+		return err
+	}
+
+	if hasColumn {
+		return nil
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`ALTER TABLE users ADD COLUMN perm_edit_config_sso INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add users.perm_edit_config_sso column: %w", err)
+	}
+
+	return nil
+}
+
+// tableHasColumn reports whether the table targeted by the literal
+// "PRAGMA table_info(...)" statement pragmaQuery already has a column named
+// col.
+func (s *Store) tableHasColumn(ctx context.Context, pragmaQuery, col string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, pragmaQuery)
+	if err != nil {
+		return false, fmt.Errorf("inspect table (%s): %w", pragmaQuery, err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -161,7 +199,7 @@ func (s *Store) mapsTableHasColumn(ctx context.Context, col string) (bool, error
 		)
 
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
-			return false, fmt.Errorf("inspect maps table: %w", err)
+			return false, fmt.Errorf("inspect table (%s): %w", pragmaQuery, err)
 		}
 
 		if name == col {
@@ -170,7 +208,7 @@ func (s *Store) mapsTableHasColumn(ctx context.Context, col string) (bool, error
 	}
 
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("inspect maps table: %w", err)
+		return false, fmt.Errorf("inspect table (%s): %w", pragmaQuery, err)
 	}
 
 	return false, nil

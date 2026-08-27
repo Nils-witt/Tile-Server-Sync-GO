@@ -27,6 +27,8 @@ const loginPageHTML = `<!DOCTYPE html>
       <button type="submit" class="primary">Sign in</button>
     </div>
   </form>
+  <div id="sso-divider" class="hint" style="margin:0.9rem 0; text-align:center; display:none;">or</div>
+  <button type="button" id="sso-login-btn" class="primary" style="display:none; width:100%;">Sign in with SSO</button>
 </div>
 </main>
 <script>` + themeToggleJS + `</script>
@@ -37,13 +39,29 @@ const loginPageHTML = `<!DOCTYPE html>
   initThemeToggle();
 
   var params = new URLSearchParams(location.search);
-  document.getElementById("next").value = params.get("next") || "";
+  var nextValue = params.get("next") || "";
+  document.getElementById("next").value = nextValue;
 
   var msg = document.getElementById("msg");
   function showMessage(text) {
     msg.className = "banner err";
     msg.textContent = text;
   }
+
+  if (params.get("ssoerror")) {
+    showMessage("SSO sign-in failed.");
+  }
+
+  fetch("/api/sso/status").then(function (r) { return r.json(); }).then(function (status) {
+    if (!status.enabled) return;
+    var btn = document.getElementById("sso-login-btn");
+    btn.textContent = status.buttonLabel || "Sign in with SSO";
+    btn.style.display = "";
+    document.getElementById("sso-divider").style.display = "";
+    btn.addEventListener("click", function () {
+      location.href = "/login/sso?next=" + encodeURIComponent(nextValue);
+    });
+  }).catch(function () { /* SSO status unavailable: leave the button hidden. */ });
 
   document.getElementById("login-form").addEventListener("submit", function (ev) {
     ev.preventDefault();

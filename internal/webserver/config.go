@@ -101,9 +101,11 @@ type mapsSectionRequest struct {
 // sectionSaveHandler is the shared shape behind saveAPISectionHandler/
 // saveDatabaseSectionHandler/saveMapsSectionHandler: 405 on anything but
 // POST, decode the request body via decode, then merge just that section
-// into the stored config via saveConfigSection.
+// into the stored config via saveConfigSection. section is a short label
+// ("api", "database", "maps") recorded in the security log by
+// finishConfigSave.
 func sectionSaveHandler(
-	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error, section string,
 	decode func(w http.ResponseWriter, r *http.Request) (merge func(cfg *config.Config), err error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +122,7 @@ func sectionSaveHandler(
 			return
 		}
 
-		saveConfigSection(w, r, cfgDB, webServer, reload, merge)
+		saveConfigSection(w, r, cfgDB, webServer, reload, section, merge)
 	}
 }
 
@@ -128,10 +130,10 @@ func sectionSaveHandler(
 // body as a T and hands it to merge, factoring out the otherwise-identical
 // decode-then-merge shape shared by every section save endpoint below.
 func decodeSectionHandler[T any](
-	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error, section string,
 	merge func(cfg *config.Config, req T),
 ) http.HandlerFunc {
-	return sectionSaveHandler(cfgDB, webServer, reload, func(w http.ResponseWriter, r *http.Request) (func(*config.Config), error) {
+	return sectionSaveHandler(cfgDB, webServer, reload, section, func(w http.ResponseWriter, r *http.Request) (func(*config.Config), error) {
 		var req T
 		if err := decodeConfigBody(w, r, &req); err != nil {
 			return nil, err
@@ -147,7 +149,7 @@ func decodeSectionHandler[T any](
 func saveAPISectionHandler(
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
 ) http.HandlerFunc {
-	return decodeSectionHandler(cfgDB, webServer, reload,
+	return decodeSectionHandler(cfgDB, webServer, reload, "api",
 		func(cfg *config.Config, req apiSectionRequest) { cfg.API = req.API })
 }
 
@@ -156,7 +158,7 @@ func saveAPISectionHandler(
 func saveDatabaseSectionHandler(
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
 ) http.HandlerFunc {
-	return decodeSectionHandler(cfgDB, webServer, reload,
+	return decodeSectionHandler(cfgDB, webServer, reload, "database",
 		func(cfg *config.Config, req databaseSectionRequest) { cfg.Database = req.Database })
 }
 
@@ -165,7 +167,7 @@ func saveDatabaseSectionHandler(
 func saveMapsSectionHandler(
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
 ) http.HandlerFunc {
-	return decodeSectionHandler(cfgDB, webServer, reload,
+	return decodeSectionHandler(cfgDB, webServer, reload, "maps",
 		func(cfg *config.Config, req mapsSectionRequest) { cfg.Maps = req.Maps })
 }
 
@@ -216,7 +218,7 @@ func saveRawConfigHandler(
 			return
 		}
 
-		finishConfigSave(w, r, cfgDB, webServer, reload, &cfg)
+		finishConfigSave(w, r, cfgDB, webServer, reload, "raw", &cfg)
 	}
 }
 
@@ -234,7 +236,7 @@ func decodeConfigBody(w http.ResponseWriter, r *http.Request, v any) error {
 // value, matching each tab's "save just this tab" semantics.
 func saveConfigSection(
 	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
-	reload func(context.Context) error, merge func(cfg *config.Config),
+	reload func(context.Context) error, section string, merge func(cfg *config.Config),
 ) {
 	cfg, err := cfgDB.Load(r.Context())
 	if err != nil {
@@ -243,7 +245,7 @@ func saveConfigSection(
 	}
 
 	merge(cfg)
-	finishConfigSave(w, r, cfgDB, webServer, reload, cfg)
+	finishConfigSave(w, r, cfgDB, webServer, reload, section, cfg)
 }
 
 // finishConfigSave is the common tail shared by every save path (per-section
@@ -265,7 +267,7 @@ func saveConfigSection(
 // the one exception — see its own comment.
 func finishConfigSave(
 	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
-	reload func(context.Context) error, cfg *config.Config,
+	reload func(context.Context) error, section string, cfg *config.Config,
 ) {
 	// Discard whatever WebServer was submitted (or, for a raw save,
 	// unmarshaled) before saving, so a bad/irrelevant webServer value can
@@ -286,6 +288,10 @@ func finishConfigSave(
 	if err := cfgDB.Save(r.Context(), cfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
 		return
+	}
+
+	if actor, ok := currentUser(r.Context()); ok {
+		logSecurityEvent(r, cfgDB, "config_saved", actor.Username, "section="+section)
 	}
 
 	redactSecrets(cfg)

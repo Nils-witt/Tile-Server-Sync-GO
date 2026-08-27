@@ -31,6 +31,7 @@ var userSchemaStatements = []string{
 		perm_edit_config_api      INTEGER NOT NULL DEFAULT 0,
 		perm_edit_config_database INTEGER NOT NULL DEFAULT 0,
 		perm_edit_config_maps     INTEGER NOT NULL DEFAULT 0,
+		perm_edit_config_sso      INTEGER NOT NULL DEFAULT 0,
 		created_at                TEXT NOT NULL
 	)`,
 	`CREATE TABLE IF NOT EXISTS sessions (
@@ -62,6 +63,7 @@ type Permissions struct {
 	EditConfigAPI      bool `json:"editConfigAPI"`
 	EditConfigDatabase bool `json:"editConfigDatabase"`
 	EditConfigMaps     bool `json:"editConfigMaps"`
+	EditConfigSSO      bool `json:"editConfigSSO"`
 }
 
 // User is a stored account, without its password hash — never let that
@@ -105,12 +107,13 @@ func (s *Store) CreateUser(
 		INSERT INTO users (
 			username, password_hash, is_superuser,
 			perm_view_status, perm_trigger_sync, perm_view_config,
-			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps,
+			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, perm_edit_config_sso,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		username, string(hash), boolToInt(isSuperuser),
 		boolToInt(perms.ViewStatus), boolToInt(perms.TriggerSync), boolToInt(perms.ViewConfig),
 		boolToInt(perms.EditConfigAPI), boolToInt(perms.EditConfigDatabase), boolToInt(perms.EditConfigMaps),
+		boolToInt(perms.EditConfigSSO),
 		createdAt.Format(timeFormat))
 	if err != nil {
 		if isUniqueConstraintErr(err) {
@@ -151,7 +154,7 @@ func (s *Store) VerifyPassword(ctx context.Context, username, password string) (
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, username, password_hash, is_superuser,
 			perm_view_status, perm_trigger_sync, perm_view_config,
-			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps,
+			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, perm_edit_config_sso,
 			created_at
 		FROM users WHERE username = ?`, username)
 
@@ -179,15 +182,15 @@ type rowScanner interface {
 
 func scanUser(row rowScanner, u *User, hash *string) error {
 	var (
-		isSuperuser, viewStatus, triggerSync, viewConfig  int
-		editConfigAPI, editConfigDatabase, editConfigMaps int
-		createdAt                                         string
+		isSuperuser, viewStatus, triggerSync, viewConfig                 int
+		editConfigAPI, editConfigDatabase, editConfigMaps, editConfigSSO int
+		createdAt                                                        string
 	)
 
 	if err := row.Scan(
 		&u.ID, &u.Username, hash, &isSuperuser,
 		&viewStatus, &triggerSync, &viewConfig,
-		&editConfigAPI, &editConfigDatabase, &editConfigMaps,
+		&editConfigAPI, &editConfigDatabase, &editConfigMaps, &editConfigSSO,
 		&createdAt,
 	); err != nil {
 		return err
@@ -200,6 +203,7 @@ func scanUser(row rowScanner, u *User, hash *string) error {
 	u.EditConfigAPI = editConfigAPI != 0
 	u.EditConfigDatabase = editConfigDatabase != 0
 	u.EditConfigMaps = editConfigMaps != 0
+	u.EditConfigSSO = editConfigSSO != 0
 
 	if parsed, err := time.Parse(timeFormat, createdAt); err == nil {
 		u.CreatedAt = parsed
@@ -213,7 +217,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, username, password_hash, is_superuser,
 			perm_view_status, perm_trigger_sync, perm_view_config,
-			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps,
+			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, perm_edit_config_sso,
 			created_at
 		FROM users ORDER BY id ASC`)
 	if err != nil {
@@ -253,7 +257,7 @@ func (s *Store) GetUser(ctx context.Context, id int64) (*User, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, username, password_hash, is_superuser,
 			perm_view_status, perm_trigger_sync, perm_view_config,
-			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps,
+			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, perm_edit_config_sso,
 			created_at
 		FROM users WHERE id = ?`, id)
 
@@ -277,10 +281,11 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, perms Permissions, isS
 		res, err := s.db.ExecContext(ctx, `
 			UPDATE users SET
 				is_superuser = ?, perm_view_status = ?, perm_trigger_sync = ?, perm_view_config = ?,
-				perm_edit_config_api = ?, perm_edit_config_database = ?, perm_edit_config_maps = ?
+				perm_edit_config_api = ?, perm_edit_config_database = ?, perm_edit_config_maps = ?, perm_edit_config_sso = ?
 			WHERE id = ?`,
 			boolToInt(isSuperuser), boolToInt(perms.ViewStatus), boolToInt(perms.TriggerSync), boolToInt(perms.ViewConfig),
 			boolToInt(perms.EditConfigAPI), boolToInt(perms.EditConfigDatabase), boolToInt(perms.EditConfigMaps),
+			boolToInt(perms.EditConfigSSO),
 			id)
 		if err != nil {
 			return fmt.Errorf("update user %d: %w", id, err)
@@ -297,11 +302,12 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, perms Permissions, isS
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE users SET
 			password_hash = ?, is_superuser = ?, perm_view_status = ?, perm_trigger_sync = ?, perm_view_config = ?,
-			perm_edit_config_api = ?, perm_edit_config_database = ?, perm_edit_config_maps = ?
+			perm_edit_config_api = ?, perm_edit_config_database = ?, perm_edit_config_maps = ?, perm_edit_config_sso = ?
 		WHERE id = ?`,
 		string(hash),
 		boolToInt(isSuperuser), boolToInt(perms.ViewStatus), boolToInt(perms.TriggerSync), boolToInt(perms.ViewConfig),
 		boolToInt(perms.EditConfigAPI), boolToInt(perms.EditConfigDatabase), boolToInt(perms.EditConfigMaps),
+		boolToInt(perms.EditConfigSSO),
 		id)
 	if err != nil {
 		return fmt.Errorf("update user %d: %w", id, err)

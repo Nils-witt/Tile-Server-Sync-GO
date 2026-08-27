@@ -15,9 +15,12 @@ import (
 // New builds an *http.Server serving the status page at "/" (with a
 // per-map "Sync" button hitting "/api/sync/{mapID}"), a config editor at
 // "/config" (backed by a JSON API at "/api/config" and its per-section save
-// endpoints), and a user management page at "/users" — all gated behind a
-// session-cookie login (see auth.go) and the logged-in user's permissions
-// (see configdb.Permissions). While no account exists yet, every request is
+// endpoints), a user management page at "/users", and a superuser-only
+// audit trail at "/security-log" (backed by "/api/security-log", see
+// security_log.go) recording logins, logouts, user-account changes, and
+// config saves — all gated behind a session-cookie login (see auth.go) and
+// the logged-in user's permissions (see configdb.Permissions). While no
+// account exists yet, every request is
 // redirected to a one-time "/setup" page (setupGate) that creates the first,
 // fully-permissioned superuser account. It does not start listening; call
 // ListenAndServe (typically in a goroutine).
@@ -40,9 +43,19 @@ func New(
 	mux.HandleFunc("/logout", logoutHandler(cfgDB))
 	mux.HandleFunc("/api/me", requireUser(cfgDB, false)(meAPIHandler))
 
+	// SSO routes are deliberately unauthenticated (like /login itself, and
+	// /api/config/sso applies its own per-method permission check — see
+	// ssoConfigAPIHandler): a session doesn't exist yet at the point these
+	// are reached.
+	mux.HandleFunc("/api/sso/status", ssoStatusAPIHandler(cfgDB))
+	mux.HandleFunc("/login/sso", loginSSOStartHandler(cfgDB))
+	mux.HandleFunc("/login/sso/callback", loginSSOCallbackHandler(cfgDB))
+	mux.HandleFunc("/api/config/sso", ssoConfigAPIHandler(cfgDB))
+
 	mux.HandleFunc("/", requirePermission(cfgDB, true, permViewStatus)(statusHandler(rec)))
 	mux.HandleFunc("/config", requirePermission(cfgDB, true, permViewConfig)(configPageHandler))
 	mux.HandleFunc("/users", requireSuperuser(cfgDB, true)(usersPageHandler))
+	mux.HandleFunc("/security-log", requireSuperuser(cfgDB, true)(securityLogPageHandler))
 
 	mux.HandleFunc("/api/config", requirePermission(cfgDB, false, permViewConfig)(configAPIHandler(cfgDB, webServer)))
 	mux.HandleFunc("/api/config/api",
@@ -57,6 +70,7 @@ func New(
 
 	mux.HandleFunc("/api/users", requireSuperuser(cfgDB, false)(usersAPIHandler(cfgDB)))
 	mux.HandleFunc("/api/users/", requireSuperuser(cfgDB, false)(userAPIHandler(cfgDB)))
+	mux.HandleFunc("/api/security-log", requireSuperuser(cfgDB, false)(securityLogAPIHandler(cfgDB)))
 
 	return &http.Server{
 		Addr:              addr,
@@ -74,6 +88,7 @@ func permEditConfigAPI(p configdb.Permissions) bool { return p.EditConfigAPI }
 
 func permEditConfigDatabase(p configdb.Permissions) bool { return p.EditConfigDatabase }
 func permEditConfigMaps(p configdb.Permissions) bool     { return p.EditConfigMaps }
+func permEditConfigSSO(p configdb.Permissions) bool      { return p.EditConfigSSO }
 
 // permAllEditConfig gates the whole-config raw YAML save mode, which can
 // touch any section, behind holding all three edit_config_* permissions
@@ -113,6 +128,7 @@ const statusPageHTML = `<!DOCTYPE html>
     <a href="/" class="active">Status</a>
     <a href="/config" id="nav-config">Config</a>
     <a href="/users" id="nav-users">Users</a>
+    <a href="/security-log" id="nav-security-log">Security log</a>
   </nav>
   <nav id="account-nav"></nav>
   <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode"></button>

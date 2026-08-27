@@ -22,6 +22,7 @@ const configPageHTML = `<!DOCTYPE html>
     <a href="/">Status</a>
     <a href="/config" class="active" id="nav-config">Config</a>
     <a href="/users" id="nav-users">Users</a>
+    <a href="/security-log" id="nav-security-log">Security log</a>
   </nav>
   <nav id="account-nav"></nav>
   <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode"></button>
@@ -43,6 +44,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     <button type="button" class="tab-btn" data-tab="api" role="tab">API</button>
     <button type="button" class="tab-btn" data-tab="db" role="tab">Database</button>
     <button type="button" class="tab-btn" data-tab="maps" role="tab">Maps</button>
+    <button type="button" class="tab-btn" data-tab="sso" role="tab">SSO</button>
   </div>
 
   <section class="card tab-panel" id="section-api" data-tab="api">
@@ -86,6 +88,42 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     <div class="actions-row">
       <button type="button" id="add-map">+ Add map</button>
       <button type="button" class="primary" id="save-maps">Save maps section</button>
+    </div>
+  </section>
+
+  <section class="card tab-panel" id="section-sso" data-tab="sso">
+    <h2>SSO</h2>
+    <p class="hint">Optional OpenID Connect single sign-on, in addition to local username/password
+    accounts (which never go away). A first-time SSO login auto-creates a local account with the
+    default permissions below unless a local account with the same username already exists, in
+    which case it's linked instead (keeping that account's own permissions). SSO accounts are never
+    made superusers automatically &mdash; grant that manually on the <a href="/users">Users page</a>
+    if needed.</p>
+    <div class="checkbox-row"><input type="checkbox" id="sso-enabled"><label for="sso-enabled">Enabled</label></div>
+    <label for="sso-issuer">Issuer URL</label>
+    <input type="text" id="sso-issuer" placeholder="https://accounts.example.com">
+    <label for="sso-client-id">Client ID</label>
+    <input type="text" id="sso-client-id">
+    <label for="sso-client-secret">Client secret</label>
+    <input type="text" id="sso-client-secret" placeholder="unchanged &mdash; leave blank to keep the current secret">
+    <label for="sso-scopes">Scopes (space-separated)</label>
+    <input type="text" id="sso-scopes" placeholder="openid profile email">
+    <label for="sso-button-label">Login page button label</label>
+    <input type="text" id="sso-button-label" placeholder="Sign in with SSO">
+    <label for="sso-redirect-base">Redirect base URL (advanced &mdash; leave blank to auto-detect from the incoming request; set this when running behind a reverse proxy)</label>
+    <input type="text" id="sso-redirect-base" placeholder="https://sync.example.com">
+
+    <p class="hint" style="margin-top:0.9rem;">Default permissions for a newly auto-created SSO account:</p>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-view-status"><label for="sso-default-view-status">View status</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-trigger-sync"><label for="sso-default-trigger-sync">Trigger sync</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-view-config"><label for="sso-default-view-config">View config</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-edit-api"><label for="sso-default-edit-api">Edit config: API</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-edit-database"><label for="sso-default-edit-database">Edit config: Database</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-edit-maps"><label for="sso-default-edit-maps">Edit config: Maps</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="sso-default-edit-sso"><label for="sso-default-edit-sso">Edit config: SSO</label></div>
+
+    <div class="actions-row">
+      <button type="button" class="primary" id="save-sso">Save SSO section</button>
     </div>
   </section>
 
@@ -321,6 +359,54 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     };
   }
 
+  function populateSSO(cfg) {
+    document.getElementById("sso-enabled").checked = !!cfg.enabled;
+    document.getElementById("sso-issuer").value = cfg.issuerUrl || "";
+    document.getElementById("sso-client-id").value = cfg.clientId || "";
+    // clientSecret is never sent back by the server (see ssoConfigDTO in
+    // internal/webserver/sso.go) — blank means "unchanged" on save.
+    document.getElementById("sso-client-secret").value = "";
+    document.getElementById("sso-scopes").value = cfg.scopes || "";
+    document.getElementById("sso-button-label").value = cfg.buttonLabel || "";
+    document.getElementById("sso-redirect-base").value = cfg.redirectBaseUrl || "";
+
+    var dp = cfg.defaultPermissions || {};
+    document.getElementById("sso-default-view-status").checked = !!dp.viewStatus;
+    document.getElementById("sso-default-trigger-sync").checked = !!dp.triggerSync;
+    document.getElementById("sso-default-view-config").checked = !!dp.viewConfig;
+    document.getElementById("sso-default-edit-api").checked = !!dp.editConfigAPI;
+    document.getElementById("sso-default-edit-database").checked = !!dp.editConfigDatabase;
+    document.getElementById("sso-default-edit-maps").checked = !!dp.editConfigMaps;
+    document.getElementById("sso-default-edit-sso").checked = !!dp.editConfigSSO;
+  }
+
+  function collectSSO() {
+    return {
+      enabled: document.getElementById("sso-enabled").checked,
+      issuerUrl: document.getElementById("sso-issuer").value.trim(),
+      clientId: document.getElementById("sso-client-id").value.trim(),
+      clientSecret: document.getElementById("sso-client-secret").value,
+      scopes: document.getElementById("sso-scopes").value.trim(),
+      buttonLabel: document.getElementById("sso-button-label").value.trim(),
+      redirectBaseUrl: document.getElementById("sso-redirect-base").value.trim(),
+      defaultPermissions: {
+        viewStatus: document.getElementById("sso-default-view-status").checked,
+        triggerSync: document.getElementById("sso-default-trigger-sync").checked,
+        viewConfig: document.getElementById("sso-default-view-config").checked,
+        editConfigAPI: document.getElementById("sso-default-edit-api").checked,
+        editConfigDatabase: document.getElementById("sso-default-edit-database").checked,
+        editConfigMaps: document.getElementById("sso-default-edit-maps").checked,
+        editConfigSSO: document.getElementById("sso-default-edit-sso").checked
+      }
+    };
+  }
+
+  function loadSSO() {
+    fetch("/api/config/sso").then(function (r) { return r.json(); }).then(function (cfg) {
+      populateSSO(cfg);
+    }).catch(function (e) { showMessage(false, "Failed to load SSO config: " + e); });
+  }
+
   var msg = document.getElementById("msg");
   function showMessage(ok, text) {
     msg.className = "banner " + (ok ? "ok" : "err");
@@ -368,8 +454,23 @@ instead of waiting for a map's interval, use the per-map Sync button on the
   document.getElementById("save-maps").addEventListener("click", function () {
     saveSection("/api/config/maps", { maps: collectMaps() });
   });
+  document.getElementById("save-sso").addEventListener("click", function () {
+    fetch("/api/config/sso", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectSSO())
+    }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (res.ok) {
+          showMessage(true, "SSO settings saved.");
+          populateSSO(res.body);
+        } else {
+          showMessage(false, "Not saved: " + res.body.error);
+        }
+      }).catch(function (e) { showMessage(false, "Failed to save SSO settings: " + e); });
+  });
 
-  document.getElementById("reload").addEventListener("click", load);
+  document.getElementById("reload").addEventListener("click", function () { load(); loadSSO(); });
 
   // Disable each tab's save button (and its input fields) when the
   // logged-in user lacks that tab's edit permission. The server enforces
@@ -386,9 +487,11 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     disableSection("section-api", !perms.editConfigAPI);
     disableSection("section-db", !perms.editConfigDatabase);
     disableSection("section-maps", !perms.editConfigMaps);
+    disableSection("section-sso", !perms.editConfigSSO);
   });
 
   load();
+  loadSSO();
 })();
 </script>
 </body>

@@ -38,6 +38,7 @@ const usersPageHTML = `<!DOCTYPE html>
     <a href="/">Status</a>
     <a href="/config" id="nav-config">Config</a>
     <a href="/users" class="active" id="nav-users">Users</a>
+    <a href="/security-log" id="nav-security-log">Security log</a>
   </nav>
   <nav id="account-nav"></nav>
   <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode"></button>
@@ -54,7 +55,7 @@ const usersPageHTML = `<!DOCTYPE html>
   <table id="users-table">
     <tr>
       <th>Username</th><th>Superuser</th><th>View status</th><th>Trigger sync</th><th>View config</th>
-      <th>Edit API</th><th>Edit database</th><th>Edit maps</th><th></th>
+      <th>Edit API</th><th>Edit database</th><th>Edit maps</th><th>Edit SSO</th><th></th>
     </tr>
   </table>
 </div>
@@ -72,6 +73,7 @@ const usersPageHTML = `<!DOCTYPE html>
   <div class="checkbox-row"><input type="checkbox" id="new-edit-api"><label for="new-edit-api">Edit config: API</label></div>
   <div class="checkbox-row"><input type="checkbox" id="new-edit-database"><label for="new-edit-database">Edit config: Database</label></div>
   <div class="checkbox-row"><input type="checkbox" id="new-edit-maps"><label for="new-edit-maps">Edit config: Maps</label></div>
+  <div class="checkbox-row"><input type="checkbox" id="new-edit-sso"><label for="new-edit-sso">Edit config: SSO</label></div>
   <div class="actions-row">
     <button type="button" class="primary" id="add-user">Add user</button>
   </div>
@@ -146,6 +148,7 @@ const usersPageHTML = `<!DOCTYPE html>
     tr.appendChild(permCheckbox("editConfigAPI", u.permissions.editConfigAPI, function (v) { saveUser(u.id, patchOf("editConfigAPI", v)); }));
     tr.appendChild(permCheckbox("editConfigDatabase", u.permissions.editConfigDatabase, function (v) { saveUser(u.id, patchOf("editConfigDatabase", v)); }));
     tr.appendChild(permCheckbox("editConfigMaps", u.permissions.editConfigMaps, function (v) { saveUser(u.id, patchOf("editConfigMaps", v)); }));
+    tr.appendChild(permCheckbox("editConfigSSO", u.permissions.editConfigSSO, function (v) { saveUser(u.id, patchOf("editConfigSSO", v)); }));
 
     var actionsTd = document.createElement("td");
     var delBtn = document.createElement("button");
@@ -185,7 +188,8 @@ const usersPageHTML = `<!DOCTYPE html>
         viewConfig: document.getElementById("new-view-config").checked,
         editConfigAPI: document.getElementById("new-edit-api").checked,
         editConfigDatabase: document.getElementById("new-edit-database").checked,
-        editConfigMaps: document.getElementById("new-edit-maps").checked
+        editConfigMaps: document.getElementById("new-edit-maps").checked,
+        editConfigSSO: document.getElementById("new-edit-sso").checked
       }
     };
 

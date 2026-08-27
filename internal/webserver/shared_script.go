@@ -32,6 +32,8 @@ function initAccountNav(onMe) {
     if (navConfig) navConfig.style.display = (me.permissions && me.permissions.viewConfig) ? "" : "none";
     var navUsers = document.getElementById("nav-users");
     if (navUsers) navUsers.style.display = me.isSuperuser ? "" : "none";
+    var navSecurityLog = document.getElementById("nav-security-log");
+    if (navSecurityLog) navSecurityLog.style.display = me.isSuperuser ? "" : "none";
     if (onMe) onMe(me);
   }).catch(function () {});
 }

@@ -174,7 +174,9 @@ func handleLoginPost(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Sto
 
 	user, err := cfgDB.VerifyPassword(r.Context(), username, password)
 	if err != nil {
+		logSecurityEvent(r, cfgDB, "login_failed", username, "")
 		writeJSON(w, http.StatusUnauthorized, loginResponse{Error: "invalid username or password"})
+
 		return
 	}
 
@@ -184,6 +186,7 @@ func handleLoginPost(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Sto
 		return
 	}
 
+	logSecurityEvent(r, cfgDB, "login", user.Username, "")
 	setSessionCookie(w, r, token, expiresAt)
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": safeNext(next)})
 }
@@ -265,6 +268,10 @@ func logoutHandler(cfgDB *configdb.Store) http.HandlerFunc {
 		}
 
 		if cookie, err := r.Cookie(sessionCookieName); err == nil {
+			if user, err := cfgDB.SessionUser(r.Context(), cookie.Value); err == nil {
+				logSecurityEvent(r, cfgDB, "logout", user.Username, "")
+			}
+
 			_ = cfgDB.DeleteSession(r.Context(), cookie.Value)
 		}
 
@@ -285,7 +292,7 @@ func setupHandler(cfgDB *configdb.Store) http.HandlerFunc {
 func allPermissions() configdb.Permissions {
 	return configdb.Permissions{
 		ViewStatus: true, TriggerSync: true, ViewConfig: true,
-		EditConfigAPI: true, EditConfigDatabase: true, EditConfigMaps: true,
+		EditConfigAPI: true, EditConfigDatabase: true, EditConfigMaps: true, EditConfigSSO: true,
 	}
 }
 
@@ -317,12 +324,15 @@ func handleSetupPost(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Sto
 		return
 	}
 
+	logSecurityEvent(r, cfgDB, "user_created", user.Username, "initial setup account, superuser")
+
 	token, expiresAt, err := cfgDB.CreateSession(r.Context(), user.ID, sessionTTL)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, loginResponse{Error: err.Error()})
 		return
 	}
 
+	logSecurityEvent(r, cfgDB, "login", user.Username, "")
 	setSessionCookie(w, r, token, expiresAt)
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": "/"})
 }

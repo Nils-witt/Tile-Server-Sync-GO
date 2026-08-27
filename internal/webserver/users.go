@@ -88,6 +88,10 @@ func createUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store) {
 		return
 	}
 
+	if actor, ok := currentUser(r.Context()); ok {
+		logSecurityEvent(r, cfgDB, "user_created", actor.Username, "target="+user.Username)
+	}
+
 	writeJSON(w, http.StatusOK, toUserDTO(*user))
 }
 
@@ -152,12 +156,28 @@ func updateUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, i
 		return
 	}
 
+	if actor, ok := currentUser(r.Context()); ok {
+		logSecurityEvent(r, cfgDB, "user_updated", actor.Username, "target="+user.Username)
+	}
+
 	writeJSON(w, http.StatusOK, toUserDTO(*user))
 }
 
 func deleteUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, id int64) {
 	if err := ensureNotLastSuperuser(r, cfgDB, id); err != nil {
 		writeJSON(w, http.StatusConflict, errorJSON(err.Error()))
+		return
+	}
+
+	target, err := cfgDB.GetUser(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, configdb.ErrUserNotFound) {
+			status = http.StatusNotFound
+		}
+
+		writeJSON(w, status, errorJSON(err.Error()))
+
 		return
 	}
 
@@ -170,6 +190,10 @@ func deleteUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, i
 		writeJSON(w, status, errorJSON(err.Error()))
 
 		return
+	}
+
+	if actor, ok := currentUser(r.Context()); ok {
+		logSecurityEvent(r, cfgDB, "user_deleted", actor.Username, "target="+target.Username)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
