@@ -187,9 +187,9 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse unmarshals and validates a YAML config document already in memory
-// (e.g. one assembled by the web config editor, or a file already read by
-// the caller), applying the same defaulting and validation Load does. On
-// success, every field left unset in data is filled with its default value.
+// (e.g. one already read by the caller), applying the same defaulting and
+// validation Load does. On success, every field left unset in data is
+// filled with its default value.
 func Parse(data []byte) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {

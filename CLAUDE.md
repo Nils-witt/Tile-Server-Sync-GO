@@ -48,7 +48,10 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
 - **`internal/config`** — defines `Config` (`API`, `Database`, `[]MapTarget`, `WebServer`) and its
   validation/defaulting (`Validate`, exported since callers other than `Parse` now assemble a
   `*Config` themselves — see `configdb.Store.Load`/`runtime.reload`). `Load`/`Parse` (YAML bytes →
-  validated `*Config`) still exist and are used by the web UI's raw-YAML editing mode. `Bootstrap`
+  validated `*Config`) still exist as a general-purpose YAML entry point, but nothing in this
+  repo calls them anymore — the web config editor now reads/writes structured JSON only (its
+  `raw` YAML view was removed; see the `internal/webserver` bullet below) and the bootstrap file
+  goes through the separate `LoadBootstrap`/`Bootstrap` type instead. `Bootstrap`
   (`bootstrap.go`) is the separate, minimal file-backed type — `LoadBootstrap` reads it, applies
   the same `webServer.enabled && address == ""` defaulting as `Validate` (shared via
   `WebServer.applyDefault`), and resolves `ConfigDB` (default `"config.db"`) relative to the
@@ -110,8 +113,9 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   `statusHandler`'s doc comment).
 
   `GET /api/config` (`internal/webserver/config.go`) returns the whole stored config as a bundle
-  (`{config, raw}`, the latter a YAML rendering, both with secrets redacted — see `redactSecrets`)
-  reading/writing a `*configdb.Store` instead of a file path; an empty/unconfigured database is not
+  (`{config}`, secrets redacted — see `redactSecrets`; there is no accompanying raw-YAML
+  representation, removed along with `POST /api/config/raw`), reading/writing a `*configdb.Store`
+  instead of a file path; an empty/unconfigured database is not
   an error, so the structured form always renders (blank on a fresh install). The API and Database
   tabs are each their own sub-resource — `GET`/`PUT /api/config/api` and `GET`/`PUT
   /api/config/database` — as is SSO (`GET`/`PUT /api/config/sso`, `internal/webserver/sso.go`). A
@@ -280,9 +284,9 @@ content, a fresh install's `configdb` is empty, and `run`'s initial `reload` cal
 (missing `api.baseUrl` etc.) — expected, not a bug. If `webServer.enabled` is false at that point,
 `run` fails hard (there'd be no way to fix it otherwise, same as an invalid `config.yaml` always
 failed hard). If `webServer.enabled` is true, `run` logs the error and continues: the web server
-starts regardless, `GET /config` renders an all-blank structured form (not the raw-YAML fallback —
-see the `internal/webserver` bullet above), and the process falls into `runLoop` regardless of
-whether any configured map has a usable `interval` yet.
+starts regardless, `GET /config` renders an all-blank structured form (see the `internal/webserver`
+bullet above), and the process falls into `runLoop` regardless of whether any configured map has a
+usable `interval` yet.
 
 `runLoop` (`main.go`) no longer runs one global interval loop — since `Interval` now lives per-map
 (`config.MapTarget`), each map is scheduled independently. It tracks an in-memory

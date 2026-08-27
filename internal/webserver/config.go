@@ -7,8 +7,6 @@ import (
 	"go-sync-objects/internal/config"
 	"go-sync-objects/internal/configdb"
 	"net/http"
-
-	"gopkg.in/yaml.v3"
 )
 
 // configGetResponse is what GET /api/config returns, and (with Applied/
@@ -16,21 +14,19 @@ import (
 // below returns too. Cfg is the loaded config (WebServer overlaid from the
 // fixed bootstrap value for display) — always set on success, even when
 // it's all zero values (e.g. a brand new install with nothing saved yet), so
-// the structured editor always has something to render; Raw is the same
-// config marshaled as YAML, offered as a raw-text editing mode. In both Cfg
-// and Raw, API.Password and Database.DSN (which typically embeds the
-// MariaDB credentials) are redacted (never sent back to the browser once
-// saved — see redactSecrets) so stored secrets never round-trip into the
-// config page's form fields. Error/no Cfg only happens on a genuine load
-// failure (a database problem), not on an unconfigured-but-loadable state.
-// Applied reports whether a save was also successfully applied to the
-// running process (see finishConfigSave); ApplyError carries why not, if
-// the save itself succeeded but applying it live failed (e.g. an
-// unreachable API or database) — the save is not rolled back in that case,
-// only the live apply.
+// the structured editor always has something to render. API.Password and
+// Database.DSN (which typically embeds the MariaDB credentials) are
+// redacted (never sent back to the browser once saved — see redactSecrets)
+// so stored secrets never round-trip into the config page's form fields.
+// Error/no Cfg only happens on a genuine load failure (a database problem),
+// not on an unconfigured-but-loadable state. Applied reports whether a save
+// was also successfully applied to the running process (see
+// finishConfigSave); ApplyError carries why not, if the save itself
+// succeeded but applying it live failed (e.g. an unreachable API or
+// database) — the save is not rolled back in that case, only the live
+// apply.
 type configGetResponse struct {
 	Cfg        *config.Config `json:"config,omitempty"`
-	Raw        string         `json:"raw"`
 	Error      string         `json:"error,omitempty"`
 	Applied    bool           `json:"applied,omitempty"`
 	ApplyError string         `json:"applyError,omitempty"`
@@ -38,10 +34,10 @@ type configGetResponse struct {
 
 // configAPIHandler serves GET /api/config, the JSON the config page's script
 // uses to populate the API/Database tabs (the Maps tab now sources its data
-// from GET /api/maps instead — see maps.go) plus the raw-YAML bundle. Saving
-// is done per-section instead — see saveAPISectionHandler/
-// saveDatabaseSectionHandler — so each tab's edit permission is enforced
-// independently at the route level (see webserver.go).
+// from GET /api/maps instead — see maps.go). Saving is done per-section
+// instead — see saveAPISectionHandler/saveDatabaseSectionHandler — so each
+// tab's edit permission is enforced independently at the route level (see
+// webserver.go).
 func configAPIHandler(cfgDB *configdb.Store, webServer config.WebServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		getConfig(r.Context(), w, cfgDB, webServer)
@@ -60,16 +56,7 @@ func getConfig(ctx context.Context, w http.ResponseWriter, cfgDB *configdb.Store
 	cfg.WebServer = webServer
 	redactSecrets(cfg)
 
-	resp := configGetResponse{Cfg: cfg}
-
-	raw, err := yaml.Marshal(cfg)
-	if err != nil {
-		resp.Error = err.Error()
-	} else {
-		resp.Raw = string(raw)
-	}
-
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, configGetResponse{Cfg: cfg})
 }
 
 const maxConfigBodyBytes = 1 << 20 // 1 MiB; config is never remotely this large
@@ -214,9 +201,9 @@ func saveConfigSection(
 	finishConfigSave(w, r, cfgDB, webServer, reload, section, changes, cfg)
 }
 
-// finishConfigSave is the common tail shared by every save path (per-section
-// and raw): discard/overwrite WebServer with the fixed bootstrap value, fill
-// back in any secret left blank (meaning "unchanged" — see
+// finishConfigSave is the common tail shared by every section save:
+// discard/overwrite WebServer with the fixed bootstrap value, fill back in
+// any secret left blank (meaning "unchanged" — see
 // fillStoredSecrets), save, and apply the change live via reload.
 //
 // Deliberately not gated on cfg.Validate(): Config.Validate requires the
@@ -234,9 +221,9 @@ func finishConfigSave(
 	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
 	reload func(context.Context) error, section string, changes []string, cfg *config.Config,
 ) {
-	// Discard whatever WebServer was submitted (or, for a raw save,
-	// unmarshaled) before saving, so a bad/irrelevant webServer value can
-	// never take effect — it's fixed by the bootstrap file.
+	// Discard whatever WebServer was submitted before saving, so a bad/
+	// irrelevant webServer value can never take effect — it's fixed by the
+	// bootstrap file.
 	cfg.WebServer = webServer
 
 	// The config page never shows stored secrets back to the browser (see
@@ -261,13 +248,7 @@ func finishConfigSave(
 
 	redactSecrets(cfg)
 
-	raw, err := yaml.Marshal(cfg)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
-		return
-	}
-
-	resp := configGetResponse{Cfg: cfg, Raw: string(raw)}
+	resp := configGetResponse{Cfg: cfg}
 
 	if applyErr := reload(r.Context()); applyErr != nil {
 		resp.ApplyError = applyErr.Error()
@@ -279,9 +260,9 @@ func finishConfigSave(
 }
 
 // redactSecrets clears cfg.API.Password and cfg.Database.DSN in place before
-// a *config.Config is sent to the browser (in either JSON or the Raw YAML
-// alongside it), so stored secrets are never echoed back into the config
-// page — see configGetResponse and fillStoredSecrets. DSN is included
+// a *config.Config is sent to the browser, so stored secrets are never
+// echoed back into the config page — see configGetResponse and
+// fillStoredSecrets. DSN is included
 // because it typically embeds the MariaDB username/password (e.g.
 // "user:pass@tcp(...)"), not just a host/database name.
 func redactSecrets(cfg *config.Config) {
