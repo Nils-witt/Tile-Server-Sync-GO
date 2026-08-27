@@ -124,6 +124,25 @@ func (rt *runtime) runSyncMaps(ctx context.Context, rec *status.Recorder, ids ma
 	return syncAll(ctx, due, client, db, rec)
 }
 
+// deleteMapObjects deletes every previously-synced geo_objects row for
+// mapID's map_uuid scope (across all versions), serialized against
+// runSync/runSyncMaps via syncMu for the same reason those two are
+// serialized against each other: a concurrent sync of that map could
+// otherwise race on inserting rows this delete is in the middle of removing.
+// It's a no-op (0, nil) if the runtime has no successful reload yet — a map
+// deleted before any sync ever ran has nothing to clean up.
+func (rt *runtime) deleteMapObjects(ctx context.Context, mapID string) (int64, error) {
+	rt.syncMu.Lock()
+	defer rt.syncMu.Unlock()
+
+	_, _, db := rt.current()
+	if db == nil {
+		return 0, nil
+	}
+
+	return db.DeleteMapObjects(ctx, mapID)
+}
+
 // reload loads the current configdb-backed config, overlays the fixed
 // bootstrap WebServer, validates it, and — only if that succeeds — builds a
 // fresh client (logging in again unless a token is configured) and database

@@ -152,8 +152,13 @@ func run(ctx context.Context, configPath string) error {
 		syncMap := func(syncCtx context.Context, mapID string) (int, error) {
 			return rt.runSyncMaps(syncCtx, rec, map[string]struct{}{mapID: {}})
 		}
+		deleteMapObjects := func(delCtx context.Context, mapID string) (int64, error) {
+			return rt.deleteMapObjects(delCtx, mapID)
+		}
 
-		stopWebServer := startWebServer(boot.WebServer.Address, rec, cfgDB, boot.WebServer, reload, syncMap)
+		stopWebServer := startWebServer(
+			boot.WebServer.Address, rec, cfgDB, boot.WebServer, reload, syncMap, deleteMapObjects,
+		)
 		defer stopWebServer()
 
 		// Since config may start out empty/invalid and only become valid
@@ -217,8 +222,9 @@ func openLogFile(configPath string) (*os.File, error) {
 func startWebServer(
 	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
 	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
+	deleteMapObjects func(context.Context, string) (int64, error),
 ) (stop func()) {
-	srv := webserver.New(addr, rec, cfgDB, webServer, reload, syncMap)
+	srv := webserver.New(addr, rec, cfgDB, webServer, reload, syncMap, deleteMapObjects)
 
 	go func() {
 		log.Printf("status web server listening on %s", addr)

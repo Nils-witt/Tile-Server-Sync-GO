@@ -55,10 +55,12 @@ type mapSaveResponse struct {
 
 // mapDeleteResponse is what DELETE /api/maps/{id} returns.
 type mapDeleteResponse struct {
-	OK         bool   `json:"ok"`
-	Error      string `json:"error,omitempty"`
-	Applied    bool   `json:"applied,omitempty"`
-	ApplyError string `json:"applyError,omitempty"`
+	OK             bool   `json:"ok"`
+	Error          string `json:"error,omitempty"`
+	Applied        bool   `json:"applied,omitempty"`
+	ApplyError     string `json:"applyError,omitempty"`
+	ObjectsDeleted int64  `json:"objectsDeleted,omitempty"`
+	ObjectsError   string `json:"objectsError,omitempty"`
 }
 
 // mapErrorStatus maps a configdb map-lookup error to the HTTP status it
@@ -193,9 +195,15 @@ func updateMapAPIHandler(cfgDB *configdb.Store, reload func(context.Context) err
 	}
 }
 
-// deleteMapAPIHandler serves DELETE /api/maps/{id}. Requires
-// edit_config_maps.
-func deleteMapAPIHandler(cfgDB *configdb.Store, reload func(context.Context) error) http.HandlerFunc {
+// deleteMapAPIHandler serves DELETE /api/maps/{id}: removes the map from
+// configuration and, via deleteMapObjects, purges every geo_objects row
+// previously synced for it (across all versions) — otherwise those rows
+// would linger in the database forever with nothing left to prune them.
+// Requires edit_config_maps.
+func deleteMapAPIHandler(
+	cfgDB *configdb.Store, reload func(context.Context) error,
+	deleteMapObjects func(context.Context, string) (int64, error),
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 
@@ -204,11 +212,23 @@ func deleteMapAPIHandler(cfgDB *configdb.Store, reload func(context.Context) err
 			return
 		}
 
-		if actor, ok := currentUser(r.Context()); ok {
-			logSecurityEvent(r, cfgDB, "map_deleted", actor.Username, fmt.Sprintf("map %q deleted", id))
+		resp := mapDeleteResponse{OK: true}
+
+		deleted, objErr := deleteMapObjects(r.Context(), id)
+		resp.ObjectsDeleted = deleted
+
+		detail := fmt.Sprintf("map %q deleted", id)
+
+		if objErr != nil {
+			resp.ObjectsError = objErr.Error()
+			detail = fmt.Sprintf("%s (failed to delete synced objects: %v)", detail, objErr)
+		} else if deleted > 0 {
+			detail = fmt.Sprintf("%s (%d synced object(s) deleted)", detail, deleted)
 		}
 
-		resp := mapDeleteResponse{OK: true}
+		if actor, ok := currentUser(r.Context()); ok {
+			logSecurityEvent(r, cfgDB, "map_deleted", actor.Username, detail)
+		}
 
 		if applyErr := reload(r.Context()); applyErr != nil {
 			resp.ApplyError = applyErr.Error()

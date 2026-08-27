@@ -36,6 +36,7 @@ import (
 func New(
 	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
 	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
+	deleteMapObjects func(context.Context, string) (int64, error),
 ) *http.Server {
 	mux := http.NewServeMux()
 
@@ -91,7 +92,7 @@ func New(
 	mux.HandleFunc("PUT /api/maps/{id}",
 		requirePermission(cfgDB, false, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload)))
 	mux.HandleFunc("DELETE /api/maps/{id}",
-		requirePermission(cfgDB, false, permEditConfigMaps)(deleteMapAPIHandler(cfgDB, reload)))
+		requirePermission(cfgDB, false, permEditConfigMaps)(deleteMapAPIHandler(cfgDB, reload, deleteMapObjects)))
 	mux.HandleFunc("POST /api/maps/{id}/sync",
 		requirePermission(cfgDB, false, permTriggerSync)(syncMapAPIHandler(syncMap)))
 

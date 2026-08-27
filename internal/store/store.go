@@ -286,6 +286,34 @@ func (s *Store) upsertObjects(
 	return nil
 }
 
+// DeleteMapObjects deletes every previously-synced row for mapUUID, across
+// all versions — called when a map is removed from configuration entirely
+// (unlike pruneMissingRows, which only trims rows a still-configured map's
+// latest fetch no longer reports). Returns the number of rows deleted. A
+// no-op (0, nil) if FieldMapUUID is skipped in the column mapping, since
+// there'd be nothing to scope the delete by.
+func (s *Store) DeleteMapObjects(ctx context.Context, mapUUID string) (int64, error) {
+	mapUUIDCol := s.col(config.FieldMapUUID)
+	if mapUUIDCol == "" {
+		return 0, nil
+	}
+
+	//nolint:gosec // s.table/mapUUIDCol come from trusted server-side config, not request input; value is bound via '?'
+	stmt := fmt.Sprintf("DELETE FROM %s WHERE %s = ?;", s.table, mapUUIDCol)
+
+	res, err := s.db.ExecContext(ctx, stmt, mapUUID)
+	if err != nil {
+		return 0, fmt.Errorf("delete geo objects for map %s: %w", mapUUID, err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete geo objects for map %s: %w", mapUUID, err)
+	}
+
+	return n, nil
+}
+
 // pruneMissingRows deletes rows previously stored for mapUUID+version whose
 // uuid is not in keepUUIDs, i.e. objects tileserve-go no longer reports for
 // that map/version. An empty keepUUIDs (the map/version's fetch returned no
