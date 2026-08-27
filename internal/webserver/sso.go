@@ -49,7 +49,7 @@ func getSSOConfigHandler(cfgDB *configdb.Store) http.HandlerFunc {
 	}
 }
 
-// saveSSOConfigHandler serves POST /api/config/sso: decodes the tab's fields,
+// saveSSOConfigHandler serves PUT /api/config/sso: decodes the tab's fields,
 // fills a blank ClientSecret back in from the stored value (see
 // ssoConfigDTO), applies defaults for a blank Scopes/ButtonLabel, and saves.
 // Gated by permEditConfigSSO. There's no live "reload"/"applied" concept
@@ -137,26 +137,5 @@ func ssoStatusAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, ssoStatusResponse{Enabled: cfg.Enabled, ButtonLabel: label})
-	}
-}
-
-// ssoConfigAPIHandler serves both GET and POST /api/config/sso, applying a
-// different required permission per method (view vs edit) rather than
-// composing two requirePermission-wrapped handlers on the same path, since
-// net/http's ServeMux keys a plain pattern on path alone.
-func ssoConfigAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
-	get := requirePermission(cfgDB, false, permViewConfig)(getSSOConfigHandler(cfgDB))
-	post := requirePermission(cfgDB, false, permEditConfigSSO)(saveSSOConfigHandler(cfgDB))
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			get(w, r)
-		case http.MethodPost:
-			post(w, r)
-		default:
-			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
 	}
 }

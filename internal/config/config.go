@@ -231,15 +231,19 @@ func (c *Config) Validate() error {
 
 	c.WebServer.applyDefault()
 
-	return c.validateMaps()
+	return c.ValidateMaps()
 }
 
-// validateMaps checks every maps[] entry — including parsing its Interval
-// (storing the result for SyncInterval to return) and checking that its
+// ValidateMaps checks every maps[] entry — including parsing its Interval
+// (storing the result for SyncInterval to return), checking that its
 // staticColumns are valid SQL identifiers that don't collide with a
-// database.columns target — split out from validate to keep its cyclomatic
-// complexity down.
-func (c *Config) validateMaps() error {
+// database.columns target, and that no two entries share an id — split out
+// from Validate to keep its cyclomatic complexity down, and exported so
+// callers that validate just a candidate maps list (e.g. the webserver's
+// per-map create/update handlers, which don't have api/database.dsn filled in
+// to satisfy the rest of Validate) can call it directly against
+// c.Maps/c.Database.Columns alone.
+func (c *Config) ValidateMaps() error {
 	reservedCols := make(map[string]bool, len(c.Database.Columns))
 	for _, col := range c.Database.Columns {
 		if col != "" {
@@ -247,12 +251,20 @@ func (c *Config) validateMaps() error {
 		}
 	}
 
+	seenIDs := make(map[string]bool, len(c.Maps))
+
 	for i := range c.Maps {
 		m := &c.Maps[i]
 
 		if m.ID == "" {
 			return fmt.Errorf("maps[%d].id is required", i)
 		}
+
+		if seenIDs[m.ID] {
+			return fmt.Errorf("maps[%d].id %q is duplicated", i, m.ID)
+		}
+
+		seenIDs[m.ID] = true
 
 		if len(m.Versions) == 0 {
 			return fmt.Errorf("maps[%d].versions must contain at least one version", i)

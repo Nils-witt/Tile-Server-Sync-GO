@@ -42,10 +42,19 @@ type runtime struct {
 
 	cfgDB     *configdb.Store
 	webServer config.WebServer
+
+	// wake is pinged by reload() after a successful config swap, so runLoop
+	// (which otherwise sleeps for up to nextWake's computed duration) can
+	// react immediately — e.g. syncing a newly added map right away instead
+	// of waiting out whatever sleep duration was already in flight. Buffered
+	// size 1 and sent to non-blockingly: at most one pending wake needs to be
+	// coalesced, since runLoop just re-reads rt.current() from scratch on
+	// every tick regardless of why it woke up.
+	wake chan struct{}
 }
 
 func newRuntime(cfgDB *configdb.Store, webServer config.WebServer) *runtime {
-	return &runtime{cfgDB: cfgDB, webServer: webServer}
+	return &runtime{cfgDB: cfgDB, webServer: webServer, wake: make(chan struct{}, 1)}
 }
 
 // current returns the runtime's current config, client, and database. Any
@@ -171,6 +180,11 @@ func (rt *runtime) reload(ctx context.Context) error {
 	}
 
 	log.Print("config reloaded")
+
+	select {
+	case rt.wake <- struct{}{}:
+	default:
+	}
 
 	return nil
 }

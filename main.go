@@ -254,12 +254,15 @@ const pollInterval = 5 * time.Second
 //
 // Each tick re-fetches rt.current() (rather than this loop capturing it
 // once), so a config reload triggered via the web UI — new/removed maps,
-// changed intervals, API credentials, database settings — takes effect on
-// the very next tick without a process restart. rt.runSyncMaps also
-// serializes against a manual "sync now" request from the web UI, so the two
-// can't run concurrently. lastSync (map ID -> last sync start time) is purely
-// in-memory scheduling state for this run of the loop; it doesn't survive a
-// restart, so every map syncs once immediately whenever the process starts.
+// changed intervals, API credentials, database settings — takes effect
+// immediately: rt.reload pings rt.wake on success, which this loop also
+// selects on, so it doesn't wait out whatever wait duration was already in
+// flight (which could otherwise be as long as another map's interval).
+// rt.runSyncMaps also serializes against a manual "sync now" request from the
+// web UI, so the two can't run concurrently. lastSync (map ID -> last sync
+// start time) is purely in-memory scheduling state for this run of the loop;
+// it doesn't survive a restart, so every map syncs once immediately whenever
+// the process starts.
 func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
 	lastSync := make(map[string]time.Time)
 
@@ -294,6 +297,12 @@ func runLoop(ctx context.Context, rt *runtime, rec *status.Recorder) error {
 			log.Print("shutting down")
 			return nil
 		case <-time.After(wait):
+		case <-rt.wake:
+			// A config reload landed (e.g. a map added/edited via /config) —
+			// loop back around immediately instead of finishing out the wait
+			// computed from the config that's now stale, so a newly added
+			// map gets synced right away rather than after whatever sleep
+			// happened to already be in flight.
 		}
 	}
 }

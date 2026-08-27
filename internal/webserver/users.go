@@ -10,6 +10,12 @@ import (
 	"strings"
 )
 
+// userIDFromPath parses the {id} path value native ServeMux routing extracts
+// for every /api/users/{id} registration below.
+func userIDFromPath(r *http.Request) (int64, error) {
+	return strconv.ParseInt(r.PathValue("id"), 10, 64)
+}
+
 const maxUserBodyBytes = 1 << 16
 
 // userDTO is a User as sent to/from the JSON API — never carries a password
@@ -25,22 +31,17 @@ func toUserDTO(u configdb.User) userDTO {
 	return userDTO{ID: u.ID, Username: u.Username, IsSuperuser: u.IsSuperuser, Permissions: u.Permissions}
 }
 
-// usersAPIHandler serves GET/POST /api/users: listing every account, and
-// creating a new one. Both require superuser (enforced by the route-level
-// requireSuperuser wrapper in webserver.go), not any of the six feature
-// permissions.
-func usersAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			listUsers(w, r, cfgDB)
-		case http.MethodPost:
-			createUser(w, r, cfgDB)
-		default:
-			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-	}
+// listUsersAPIHandler serves GET /api/users: listing every account.
+// Requires superuser (enforced by the route-level requireSuperuser wrapper
+// in webserver.go), not any of the seven feature permissions.
+func listUsersAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { listUsers(w, r, cfgDB) }
+}
+
+// createUserAPIHandler serves POST /api/users: creating a new account.
+// Requires superuser.
+func createUserAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { createUser(w, r, cfgDB) }
 }
 
 func listUsers(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store) {
@@ -98,27 +99,63 @@ func createUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store) {
 	writeJSON(w, http.StatusOK, toUserDTO(*user))
 }
 
-// userAPIHandler serves PUT/PATCH/DELETE /api/users/{id}, updating or
-// removing one account. It refuses to let the acting superuser demote or
-// delete themselves if they're the last remaining superuser, so the app can
-// never lock itself out of /users entirely.
-func userAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+// getUserAPIHandler serves GET /api/users/{id}: one account. Requires
+// superuser.
+func getUserAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/users/"), 10, 64)
+		id, err := userIDFromPath(r)
 		if err != nil {
 			http.Error(w, "invalid user id", http.StatusBadRequest)
 			return
 		}
 
-		switch r.Method {
-		case http.MethodPut, http.MethodPatch:
-			updateUser(w, r, cfgDB, id)
-		case http.MethodDelete:
-			deleteUser(w, r, cfgDB, id)
-		default:
-			w.Header().Set("Allow", http.MethodPut+", "+http.MethodPatch+", "+http.MethodDelete)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		getUser(w, r, cfgDB, id)
+	}
+}
+
+func getUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, id int64) {
+	user, err := cfgDB.GetUser(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, configdb.ErrUserNotFound) {
+			status = http.StatusNotFound
 		}
+
+		writeJSON(w, status, errorJSON(err.Error()))
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toUserDTO(*user))
+}
+
+// updateUserAPIHandler serves PUT/PATCH /api/users/{id}, updating one
+// account. It refuses to let the acting superuser demote themselves if
+// they're the last remaining superuser, so the app can never lock itself out
+// of /users entirely.
+func updateUserAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := userIDFromPath(r)
+		if err != nil {
+			http.Error(w, "invalid user id", http.StatusBadRequest)
+			return
+		}
+
+		updateUser(w, r, cfgDB, id)
+	}
+}
+
+// deleteUserAPIHandler serves DELETE /api/users/{id}, removing one account —
+// same last-remaining-superuser guard as updateUserAPIHandler.
+func deleteUserAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := userIDFromPath(r)
+		if err != nil {
+			http.Error(w, "invalid user id", http.StatusBadRequest)
+			return
+		}
+
+		deleteUser(w, r, cfgDB, id)
 	}
 }
 

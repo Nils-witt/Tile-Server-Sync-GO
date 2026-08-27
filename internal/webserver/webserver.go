@@ -13,9 +13,10 @@ import (
 )
 
 // New builds an *http.Server serving the status page at "/" (with a
-// per-map "Sync" button hitting "/api/sync/{mapID}"), a config editor at
-// "/config" (backed by a JSON API at "/api/config" and its per-section save
-// endpoints), a user management page at "/users", and a superuser-only
+// per-map "Sync" button hitting "POST /api/maps/{id}/sync"), a config editor
+// at "/config" (backed by a JSON API at "/api/config" and its per-section
+// GET/PUT endpoints, plus the "/api/maps" CRUD family for the Maps tab — see
+// config.go and maps.go), a user management page at "/users", and a superuser-only
 // audit trail at "/security-log" (backed by "/api/security-log", see
 // security_log.go) recording logins, logouts, user-account changes, and
 // config saves — all gated behind a session-cookie login (see auth.go) and
@@ -41,36 +42,66 @@ func New(
 	mux.HandleFunc("/setup", setupHandler(cfgDB))
 	mux.HandleFunc("/login", loginHandler(cfgDB))
 	mux.HandleFunc("/logout", logoutHandler(cfgDB))
-	mux.HandleFunc("/api/me", requireUser(cfgDB, false)(meAPIHandler))
+	mux.HandleFunc("GET /api/me", requireUser(cfgDB, false)(meAPIHandler))
 
-	// SSO routes are deliberately unauthenticated (like /login itself, and
-	// /api/config/sso applies its own per-method permission check — see
-	// ssoConfigAPIHandler): a session doesn't exist yet at the point these
-	// are reached.
-	mux.HandleFunc("/api/sso/status", ssoStatusAPIHandler(cfgDB))
+	// SSO login-flow routes are deliberately unauthenticated (like /login
+	// itself): a session doesn't exist yet at the point these are reached.
+	mux.HandleFunc("GET /api/sso/status", ssoStatusAPIHandler(cfgDB))
 	mux.HandleFunc("/login/sso", loginSSOStartHandler(cfgDB))
 	mux.HandleFunc("/login/sso/callback", loginSSOCallbackHandler(cfgDB))
-	mux.HandleFunc("/api/config/sso", ssoConfigAPIHandler(cfgDB))
 
-	mux.HandleFunc("/", requirePermission(cfgDB, true, permViewStatus)(statusHandler(rec)))
+	// "GET /{$}" (exact-root-only), not the bare "/" catch-all subtree
+	// pattern: a bare "/" would match every path/method not otherwise
+	// registered, which — combined with the method-specific "/api/..."
+	// patterns below — would silently suppress net/http's automatic 405
+	// Method Not Allowed handling for all of them (a request with the wrong
+	// method on a registered path would fall through to this handler instead
+	// of getting a 405), turning every wrong-verb request that should 405
+	// into a 404/login-redirect from statusHandler instead.
+	mux.HandleFunc("GET /{$}", requirePermission(cfgDB, true, permViewStatus)(statusHandler(rec)))
 	mux.HandleFunc("/config", requirePermission(cfgDB, true, permViewConfig)(configPageHandler))
 	mux.HandleFunc("/users", requireSuperuser(cfgDB, true)(usersPageHandler))
 	mux.HandleFunc("/security-log", requireSuperuser(cfgDB, true)(securityLogPageHandler))
 
-	mux.HandleFunc("/api/config", requirePermission(cfgDB, false, permViewConfig)(configAPIHandler(cfgDB, webServer)))
-	mux.HandleFunc("/api/config/api",
+	// Config: GET /api/config is the whole-config bundle (api/database
+	// sections plus a raw-YAML view — the Maps tab is served by the /api/maps
+	// family below instead). Each section has its own GET (view_config) and
+	// PUT (edit_config_{api,database,sso}) registered separately, so the
+	// permission each method requires is visible right here rather than
+	// buried in a per-handler method switch.
+	mux.HandleFunc("GET /api/config", requirePermission(cfgDB, false, permViewConfig)(configAPIHandler(cfgDB, webServer)))
+	mux.HandleFunc("GET /api/config/api", requirePermission(cfgDB, false, permViewConfig)(getAPISectionHandler(cfgDB)))
+	mux.HandleFunc("PUT /api/config/api",
 		requirePermission(cfgDB, false, permEditConfigAPI)(saveAPISectionHandler(cfgDB, webServer, reload)))
-	mux.HandleFunc("/api/config/database",
+	mux.HandleFunc("GET /api/config/database",
+		requirePermission(cfgDB, false, permViewConfig)(getDatabaseSectionHandler(cfgDB)))
+	mux.HandleFunc("PUT /api/config/database",
 		requirePermission(cfgDB, false, permEditConfigDatabase)(saveDatabaseSectionHandler(cfgDB, webServer, reload)))
-	mux.HandleFunc("/api/config/maps",
-		requirePermission(cfgDB, false, permEditConfigMaps)(saveMapsSectionHandler(cfgDB, webServer, reload)))
-	mux.HandleFunc("/api/config/raw",
-		requirePermission(cfgDB, false, permAllEditConfig)(saveRawConfigHandler(cfgDB, webServer, reload)))
-	mux.HandleFunc("/api/sync/", requirePermission(cfgDB, false, permTriggerSync)(syncMapAPIHandler(syncMap)))
+	mux.HandleFunc("GET /api/config/sso", requirePermission(cfgDB, false, permViewConfig)(getSSOConfigHandler(cfgDB)))
+	mux.HandleFunc("PUT /api/config/sso",
+		requirePermission(cfgDB, false, permEditConfigSSO)(saveSSOConfigHandler(cfgDB)))
 
-	mux.HandleFunc("/api/users", requireSuperuser(cfgDB, false)(usersAPIHandler(cfgDB)))
-	mux.HandleFunc("/api/users/", requireSuperuser(cfgDB, false)(userAPIHandler(cfgDB)))
-	mux.HandleFunc("/api/security-log", requireSuperuser(cfgDB, false)(securityLogAPIHandler(cfgDB)))
+	// Maps: a first-class CRUD resource (see maps.go), not a config section —
+	// each map is independently addressable/mutable, so adding or editing one
+	// map no longer requires resubmitting every other configured map.
+	mux.HandleFunc("GET /api/maps", requirePermission(cfgDB, false, permViewConfig)(listMapsAPIHandler(cfgDB)))
+	mux.HandleFunc("POST /api/maps",
+		requirePermission(cfgDB, false, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload)))
+	mux.HandleFunc("GET /api/maps/{id}", requirePermission(cfgDB, false, permViewConfig)(getMapAPIHandler(cfgDB)))
+	mux.HandleFunc("PUT /api/maps/{id}",
+		requirePermission(cfgDB, false, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload)))
+	mux.HandleFunc("DELETE /api/maps/{id}",
+		requirePermission(cfgDB, false, permEditConfigMaps)(deleteMapAPIHandler(cfgDB, reload)))
+	mux.HandleFunc("POST /api/maps/{id}/sync",
+		requirePermission(cfgDB, false, permTriggerSync)(syncMapAPIHandler(syncMap)))
+
+	mux.HandleFunc("GET /api/users", requireSuperuser(cfgDB, false)(listUsersAPIHandler(cfgDB)))
+	mux.HandleFunc("POST /api/users", requireSuperuser(cfgDB, false)(createUserAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/users/{id}", requireSuperuser(cfgDB, false)(getUserAPIHandler(cfgDB)))
+	mux.HandleFunc("PUT /api/users/{id}", requireSuperuser(cfgDB, false)(updateUserAPIHandler(cfgDB)))
+	mux.HandleFunc("PATCH /api/users/{id}", requireSuperuser(cfgDB, false)(updateUserAPIHandler(cfgDB)))
+	mux.HandleFunc("DELETE /api/users/{id}", requireSuperuser(cfgDB, false)(deleteUserAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/security-log", requireSuperuser(cfgDB, false)(securityLogAPIHandler(cfgDB)))
 
 	return &http.Server{
 		Addr:              addr,
@@ -90,20 +121,8 @@ func permEditConfigDatabase(p configdb.Permissions) bool { return p.EditConfigDa
 func permEditConfigMaps(p configdb.Permissions) bool     { return p.EditConfigMaps }
 func permEditConfigSSO(p configdb.Permissions) bool      { return p.EditConfigSSO }
 
-// permAllEditConfig gates the whole-config raw YAML save mode, which can
-// touch any section, behind holding all three edit_config_* permissions
-// together.
-func permAllEditConfig(p configdb.Permissions) bool {
-	return p.EditConfigAPI && p.EditConfigDatabase && p.EditConfigMaps
-}
-
 func statusHandler(rec *status.Recorder) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-
+	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 		if err := pageTemplate.Execute(w, rec.Snapshot()); err != nil {
@@ -225,7 +244,7 @@ const statusPageHTML = `<!DOCTYPE html>
       btn.textContent = "Syncing…";
       showMessage(true, "Syncing " + id + "…");
 
-      fetch("/api/sync/" + encodeURIComponent(id), { method: "POST" })
+      fetch("/api/maps/" + encodeURIComponent(id) + "/sync", { method: "POST" })
         .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
         .then(function (res) {
           if (res.ok) {

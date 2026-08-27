@@ -87,7 +87,6 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     <div id="maps-container"></div>
     <div class="actions-row">
       <button type="button" id="add-map">+ Add map</button>
-      <button type="button" class="primary" id="save-maps">Save maps section</button>
     </div>
   </section>
 
@@ -197,12 +196,33 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     metaSpan.textContent = parts.join(" · ");
   }
 
-  function buildMapRow(m, openByDefault) {
+  function parseStaticColumns(text) {
+    var out = {};
+    text.split("\n").forEach(function (line) {
+      line = line.trim();
+      if (!line) return;
+      var i = line.indexOf("=");
+      if (i < 0) return;
+      out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    });
+    return out;
+  }
+
+  // buildMapRow builds one map's card. Each card owns its own persistence:
+  // opts.persisted marks a row loaded from GET /api/maps (its "Save" PUTs to
+  // /api/maps/{id}); a freshly added row (opts.persisted unset) POSTs to
+  // /api/maps on first Save, after which it behaves like a persisted row
+  // (its id field is locked — renaming isn't supported, see PUT
+  // /api/maps/{id}'s server-side contract) and "Remove" starts issuing
+  // DELETE requests instead of just removing the card from the DOM.
+  function buildMapRow(m, opts) {
+    opts = opts || {};
+    var persisted = !!opts.persisted;
     m = m || { id: "", versions: [], interval: "", staticColumns: {} };
 
     var details = document.createElement("details");
     details.className = "map-card";
-    details.open = !!openByDefault;
+    details.open = !!opts.openByDefault;
 
     var summary = document.createElement("summary");
     var idSpan = document.createElement("span");
@@ -222,6 +242,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     idInput.type = "text";
     idInput.className = "map-id";
     idInput.value = m.id || "";
+    idInput.disabled = persisted;
 
     var versionsLabel = document.createElement("label");
     versionsLabel.textContent = "Versions (comma-separated, e.g. current, 3, 4)";
@@ -249,13 +270,83 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     });
     colsArea.value = lines.join("\n");
 
+    var rowMsg = document.createElement("div");
+    rowMsg.className = "banner";
+    rowMsg.style.marginTop = "0.5rem";
+    function showRowMessage(ok, text) {
+      rowMsg.className = "banner " + (ok ? "ok" : "err");
+      rowMsg.textContent = text;
+    }
+
+    var saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "primary";
+    saveBtn.textContent = "Save";
+    saveBtn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+
+      var id = idInput.value.trim();
+      var payload = {
+        id: id,
+        versions: versionsInput.value.split(",").map(function (v) { return v.trim(); }).filter(Boolean),
+        interval: intervalInput.value.trim(),
+        staticColumns: parseStaticColumns(colsArea.value)
+      };
+
+      var url = persisted ? "/api/maps/" + encodeURIComponent(id) : "/api/maps";
+      var method = persisted ? "PUT" : "POST";
+
+      saveBtn.disabled = true;
+      fetch(url, {
+        method: method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          saveBtn.disabled = false;
+          if (res.ok) {
+            persisted = true;
+            idInput.disabled = true;
+            if (res.body.applied) {
+              showRowMessage(true, "Saved and applied to the running process.");
+            } else {
+              showRowMessage(false, "Saved, but failed to apply to the running process: " + res.body.applyError);
+            }
+          } else {
+            showRowMessage(false, "Not saved: " + res.body.error);
+          }
+        }).catch(function (e) {
+          saveBtn.disabled = false;
+          showRowMessage(false, "Failed to save map: " + e);
+        });
+    });
+
     var removeBtn = document.createElement("button");
     removeBtn.type = "button";
     removeBtn.className = "danger";
     removeBtn.textContent = "Remove map";
     removeBtn.addEventListener("click", function (ev) {
       ev.preventDefault();
-      details.remove();
+
+      if (!persisted) {
+        details.remove();
+        return;
+      }
+
+      removeBtn.disabled = true;
+      fetch("/api/maps/" + encodeURIComponent(idInput.value.trim()), { method: "DELETE" })
+        .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          if (res.ok) {
+            details.remove();
+          } else {
+            removeBtn.disabled = false;
+            showRowMessage(false, "Failed to remove map: " + res.body.error);
+          }
+        }).catch(function (e) {
+          removeBtn.disabled = false;
+          showRowMessage(false, "Failed to remove map: " + e);
+        });
     });
 
     body.appendChild(idLabel);
@@ -266,10 +357,12 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     body.appendChild(intervalInput);
     body.appendChild(colsLabel);
     body.appendChild(colsArea);
-    var removeWrap = document.createElement("div");
-    removeWrap.className = "actions-row";
-    removeWrap.appendChild(removeBtn);
-    body.appendChild(removeWrap);
+    var actionsWrap = document.createElement("div");
+    actionsWrap.className = "actions-row";
+    actionsWrap.appendChild(saveBtn);
+    actionsWrap.appendChild(removeBtn);
+    body.appendChild(actionsWrap);
+    body.appendChild(rowMsg);
 
     details.appendChild(body);
 
@@ -283,35 +376,17 @@ instead of waiting for a map's interval, use the per-map Sync button on the
   }
 
   document.getElementById("add-map").addEventListener("click", function () {
-    var row = buildMapRow(null, true);
+    var row = buildMapRow(null, { openByDefault: true });
     mapsContainer.appendChild(row);
     row.scrollIntoView({ behavior: "smooth", block: "nearest" });
     row.querySelector(".map-id").focus();
   });
 
-  function parseStaticColumns(text) {
-    var out = {};
-    text.split("\n").forEach(function (line) {
-      line = line.trim();
-      if (!line) return;
-      var i = line.indexOf("=");
-      if (i < 0) return;
-      out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-    });
-    return out;
-  }
-
-  function collectMaps() {
-    var maps = [];
-    mapsContainer.querySelectorAll(".map-card").forEach(function (row) {
-      var id = row.querySelector(".map-id").value.trim();
-      var versions = row.querySelector(".map-versions").value
-        .split(",").map(function (v) { return v.trim(); }).filter(Boolean);
-      var interval = row.querySelector(".map-interval").value.trim();
-      var staticColumns = parseStaticColumns(row.querySelector(".map-static-columns").value);
-      maps.push({ id: id, versions: versions, interval: interval, staticColumns: staticColumns });
-    });
-    return maps;
+  function loadMaps() {
+    fetch("/api/maps").then(function (r) { return r.json(); }).then(function (maps) {
+      mapsContainer.innerHTML = "";
+      (maps || []).forEach(function (m) { mapsContainer.appendChild(buildMapRow(m, { persisted: true })); });
+    }).catch(function (e) { showMessage(false, "Failed to load maps: " + e); });
   }
 
   function populateForm(cfg) {
@@ -331,9 +406,6 @@ instead of waiting for a map's interval, use the per-map Sync button on the
       var input = document.getElementById("col-" + f[0]);
       if (input) input.value = cols[f[0]] || "";
     });
-
-    mapsContainer.innerHTML = "";
-    (cfg.maps || []).forEach(function (m) { mapsContainer.appendChild(buildMapRow(m, false)); });
   }
 
   function collectAPI() {
@@ -427,7 +499,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
 
   function saveSection(endpoint, body) {
     fetch(endpoint, {
-      method: "POST",
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
@@ -451,12 +523,9 @@ instead of waiting for a map's interval, use the per-map Sync button on the
   document.getElementById("save-database").addEventListener("click", function () {
     saveSection("/api/config/database", { database: collectDatabase() });
   });
-  document.getElementById("save-maps").addEventListener("click", function () {
-    saveSection("/api/config/maps", { maps: collectMaps() });
-  });
   document.getElementById("save-sso").addEventListener("click", function () {
     fetch("/api/config/sso", {
-      method: "POST",
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(collectSSO())
     }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
@@ -470,7 +539,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
       }).catch(function (e) { showMessage(false, "Failed to save SSO settings: " + e); });
   });
 
-  document.getElementById("reload").addEventListener("click", function () { load(); loadSSO(); });
+  document.getElementById("reload").addEventListener("click", function () { load(); loadSSO(); loadMaps(); });
 
   // Disable each tab's save button (and its input fields) when the
   // logged-in user lacks that tab's edit permission. The server enforces
@@ -492,6 +561,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
 
   load();
   loadSSO();
+  loadMaps();
 })();
 </script>
 </body>

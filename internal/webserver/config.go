@@ -7,9 +7,6 @@ import (
 	"go-sync-objects/internal/config"
 	"go-sync-objects/internal/configdb"
 	"net/http"
-	"net/url"
-	"slices"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -40,19 +37,13 @@ type configGetResponse struct {
 }
 
 // configAPIHandler serves GET /api/config, the JSON the config page's script
-// uses to populate all three tabs. Saving is done per-section instead — see
-// saveAPISectionHandler/saveDatabaseSectionHandler/saveMapsSectionHandler/
-// saveRawConfigHandler — so each tab's edit permission is enforced
+// uses to populate the API/Database tabs (the Maps tab now sources its data
+// from GET /api/maps instead — see maps.go) plus the raw-YAML bundle. Saving
+// is done per-section instead — see saveAPISectionHandler/
+// saveDatabaseSectionHandler — so each tab's edit permission is enforced
 // independently at the route level (see webserver.go).
 func configAPIHandler(cfgDB *configdb.Store, webServer config.WebServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-
-			return
-		}
-
 		getConfig(r.Context(), w, cfgDB, webServer)
 	}
 }
@@ -83,10 +74,11 @@ func getConfig(ctx context.Context, w http.ResponseWriter, cfgDB *configdb.Store
 
 const maxConfigBodyBytes = 1 << 20 // 1 MiB; config is never remotely this large
 
-// apiSectionRequest/databaseSectionRequest/mapsSectionRequest are the
-// request bodies for the three section-specific save endpoints — each
-// submits only its own tab's fields, unlike the old whole-config POST
-// /api/config.
+// apiSectionRequest/databaseSectionRequest are the request/response bodies
+// for the API/Database section endpoints — each submits or returns only its
+// own tab's fields, unlike the whole-config GET /api/config bundle. GET
+// /api/config/{api,database} return the same shape their PUT counterpart
+// expects (see getAPISectionHandler/getDatabaseSectionHandler below).
 type apiSectionRequest struct {
 	API config.API `json:"api"`
 }
@@ -95,29 +87,48 @@ type databaseSectionRequest struct {
 	Database config.Database `json:"database"`
 }
 
-type mapsSectionRequest struct {
-	Maps []config.MapTarget `json:"maps"`
+// getSectionHandler builds the handler behind GET /api/config/api and GET
+// /api/config/database: load the stored config, redact its secrets the same
+// way the bundle GET does, and return just what extract picks out of it.
+func getSectionHandler(cfgDB *configdb.Store, extract func(cfg *config.Config) any) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cfg, err := cfgDB.Load(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorJSON(err.Error()))
+			return
+		}
+
+		redactSecrets(cfg)
+		writeJSON(w, http.StatusOK, extract(cfg))
+	}
+}
+
+// getAPISectionHandler serves GET /api/config/api. Requires view_config.
+func getAPISectionHandler(cfgDB *configdb.Store) http.HandlerFunc {
+	return getSectionHandler(cfgDB, func(cfg *config.Config) any { return apiSectionRequest{API: cfg.API} })
+}
+
+// getDatabaseSectionHandler serves GET /api/config/database. Requires
+// view_config.
+func getDatabaseSectionHandler(cfgDB *configdb.Store) http.HandlerFunc {
+	return getSectionHandler(cfgDB,
+		func(cfg *config.Config) any { return databaseSectionRequest{Database: cfg.Database} })
 }
 
 // sectionSaveHandler is the shared shape behind saveAPISectionHandler/
-// saveDatabaseSectionHandler/saveMapsSectionHandler: 405 on anything but
-// POST, decode the request body via decode, then merge just that section
-// into the stored config via saveConfigSection. section is a short label
-// ("api", "database", "maps") recorded in the security log by
-// finishConfigSave. merge also returns a human-readable description of what
-// it changed (see the diff* helpers in audit_diff.go), also recorded there.
+// saveDatabaseSectionHandler: decode the request body via decode, then merge
+// just that section into the stored config via saveConfigSection. The
+// method itself is already guaranteed by the "PUT /api/config/{section}" mux
+// pattern registered in webserver.go, so there's no method check here.
+// section is a short label ("api", "database") recorded in the security log
+// by finishConfigSave. merge also returns a human-readable description of
+// what it changed (see the diff* helpers in audit_diff.go), also recorded
+// there.
 func sectionSaveHandler(
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error, section string,
 	decode func(w http.ResponseWriter, r *http.Request) (merge func(cfg *config.Config) []string, err error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-
-			return
-		}
-
 		merge, err := decode(w, r)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
@@ -176,83 +187,6 @@ func saveDatabaseSectionHandler(
 		})
 }
 
-// saveMapsSectionHandler serves POST /api/config/maps, the Maps analogue of
-// saveAPISectionHandler. Requires edit_config_maps.
-func saveMapsSectionHandler(
-	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
-) http.HandlerFunc {
-	return decodeSectionHandler(cfgDB, webServer, reload, "maps",
-		func(cfg *config.Config, req mapsSectionRequest) []string {
-			changes := diffMaps(cfg.Maps, req.Maps)
-			cfg.Maps = req.Maps
-
-			return changes
-		})
-}
-
-// saveRawConfigHandler serves POST /api/config/raw: the whole-config raw
-// YAML save mode, kept for API completeness. Since it can touch any
-// section, it's gated (at the route level, in webserver.go) behind holding
-// all three edit_config_* permissions together.
-func saveRawConfigHandler(
-	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
-) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-
-			return
-		}
-
-		var req struct {
-			Raw string `json:"raw"`
-		}
-		if err := decodeConfigBody(w, r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
-			return
-		}
-
-		var cfg config.Config
-		if err := yaml.Unmarshal([]byte(req.Raw), &cfg); err != nil {
-			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: fmt.Sprintf("parse raw YAML: %v", err)})
-			return
-		}
-
-		// Unlike a section save (see finishConfigSave's doc comment), raw
-		// represents the *entire* config in one shot, just like a YAML file
-		// passed to config.Parse — so, matching Parse's semantics, it's
-		// required to already be complete/valid before persisting.
-		cfg.WebServer = webServer
-
-		// Loaded unconditionally (not just when a secret is blank, unlike
-		// fillStoredSecrets' usual callers) so it also serves as the "before"
-		// side of the diff recorded in the security log below.
-		before, err := cfgDB.Load(r.Context())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
-			return
-		}
-
-		if cfg.API.Password == "" {
-			cfg.API.Password = before.API.Password
-		}
-
-		if cfg.Database.DSN == "" {
-			cfg.Database.DSN = before.Database.DSN
-		}
-
-		if err := cfg.Validate(); err != nil {
-			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
-			return
-		}
-
-		changes := slices.Concat(diffAPI(before.API, cfg.API), diffDatabase(before.Database, cfg.Database), diffMaps(before.Maps, cfg.Maps))
-
-		finishConfigSave(w, r, cfgDB, webServer, reload, "raw", changes, &cfg)
-	}
-}
-
 func decodeConfigBody(w http.ResponseWriter, r *http.Request, v any) error {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBodyBytes)).Decode(v); err != nil {
 		return fmt.Errorf("decode request: %w", err)
@@ -295,8 +229,7 @@ func saveConfigSection(
 // reload() below runs Validate() itself and reports why via ApplyError
 // (the same "saved, but not yet applied" outcome already used for a
 // valid-but-unreachable API/database), so each tab's edit is never lost
-// while the other tabs are still being filled in. saveRawConfigHandler is
-// the one exception — see its own comment.
+// while the other tabs are still being filled in.
 func finishConfigSave(
 	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
 	reload func(context.Context) error, section string, changes []string, cfg *config.Config,
@@ -390,45 +323,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // this package that doesn't use configGetResponse's own Error field.
 func errorJSON(msg string) map[string]string {
 	return map[string]string{"error": msg}
-}
-
-// syncResponse is what POST /api/sync/{mapID} returns.
-type syncResponse struct {
-	OK     bool   `json:"ok"`
-	Synced int    `json:"synced"`
-	Error  string `json:"error,omitempty"`
-}
-
-// syncMapAPIHandler calls syncMap with the map ID taken from the URL path
-// (the "/api/sync/" prefix registered in New) on each POST, running that one
-// map's sync immediately (serialized against any concurrent scheduled sync —
-// see runtime.runSyncMaps in main.go) instead of waiting for its next
-// interval tick, and reports how many objects were synced or why it failed.
-// It blocks for as long as the sync takes. This is what the status page's
-// per-map "Sync" button calls.
-func syncMapAPIHandler(syncMap func(context.Context, string) (int, error)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-
-			return
-		}
-
-		id, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/api/sync/"))
-		if err != nil || id == "" {
-			http.Error(w, "missing map id", http.StatusBadRequest)
-			return
-		}
-
-		synced, err := syncMap(r.Context(), id)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, syncResponse{Synced: synced, Error: err.Error()})
-			return
-		}
-
-		writeJSON(w, http.StatusOK, syncResponse{OK: true, Synced: synced})
-	}
 }
 
 func configPageHandler(w http.ResponseWriter, r *http.Request) {

@@ -75,11 +75,17 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   SQLite pragmas are per-connection, and `database/sql`'s pool would otherwise silently hand out a
   fresh, pragma-less one. Unrelated to `internal/store` (MariaDB geo-object storage); no shared
   code. The same database also holds `users` and `sessions` tables (`internal/configdb/users.go`),
-  backing the web server's authentication — see the `internal/webserver` bullet below. Unlike the
-  config tables, these get real per-row CRUD methods (`CreateUser`, `VerifyPassword`, `ListUsers`,
+  backing the web server's authentication — see the `internal/webserver` bullet below. Unlike
+  `api`/`database`, `users` and (`internal/configdb/maps.go`) `maps` get real per-row CRUD methods
+  instead of only going through the whole-graph `Load`/`Save` above: `ListMaps`/`GetMap`/
+  `CreateMap`/`UpdateMap`/`DeleteMap` (returning `ErrMapNotFound`/`ErrMapIDTaken`, mirroring
+  `users`' `ErrUserNotFound`/`ErrUsernameTaken`) back the `/api/maps` REST family in
+  `internal/webserver/maps.go` — each map is edited independently rather than resubmitting the
+  whole `maps` array. `map_id` has a `CREATE UNIQUE INDEX IF NOT EXISTS` (added in `ensureSchema`,
+  since nothing enforced this before it became a per-map resource key) so `{id}`-addressed
+  lookups are unambiguous; `CreateUser`, `VerifyPassword`, `ListUsers`,
   `GetUser`, `UpdateUser`, `DeleteUser`, `CreateSession`, `SessionUser`, `DeleteSession`,
-  `UserCount`) rather than a single whole-graph `Load`/`Save`, since accounts are managed one at a
-  time through a real form, not a bulk editor like `maps`. Passwords are hashed with
+  `UserCount` are `users`' equivalents. Passwords are hashed with
   `golang.org/x/crypto/bcrypt`; a session's random token is only ever stored as its SHA-256 hash
   (`sessions.token_hash`) — the raw token lives solely in the browser's session cookie. The same
   database also holds `sso_config` (a singleton settings row, `internal/configdb/sso.go`) and
@@ -92,33 +98,52 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   already known. `GeoObjects(mapID, version)` fetches and JSON-decodes one map/version's objects
   (`GeoObject` struct mirrors the API's schema exactly — field-for-field, including JSON tags).
 - **`internal/webserver`** — besides the status page (`/`), serves a config editor at `/config`
-  (HTML+vanilla JS, no build step, sections split into tabs — API / Database / Maps) backed by a
-  JSON API at `/api/config` (`internal/webserver/config.go`), now reading/writing a
-  `*configdb.Store` instead of a file path. GET calls `cfgDB.Load` and overlays the fixed bootstrap
-  `WebServer` value onto the returned `Config` (still present in the JSON response) — an
-  empty/unconfigured database is not an error, so the structured form always renders (blank on a
-  fresh install) rather than falling back to raw-YAML mode, which is now reserved for genuine load
-  failures. Saving is per-section rather than one whole-config POST: each tab posts to its own
-  endpoint (`POST /api/config/api`, `/api/config/database`, `/api/config/maps`), which loads the
-  currently stored config, replaces just that one section, and saves — deliberately *not* gated on
-  `Config.Validate()` passing for the whole merged config (see `finishConfigSave`'s doc comment in
-  `config.go`), since that would make it impossible to ever save a single tab during initial setup
-  (each tab alone is always "incomplete"). Instead every save calls `reload` (see below)
-  immediately afterward and reports whether the *whole* config was valid enough to apply live via
-  the response's `applied`/`applyError` fields — the same mechanism already used for a valid-but-
-  unreachable API/database. `POST /api/config/raw` is the one exception: it's a whole-config raw
-  YAML save (kept for API completeness, no longer exposed in the tabbed UI) and, like a YAML file
-  passed to `config.Parse`, *is* required to already be complete/valid before it's persisted.
-  `webServer.enabled`/`address` have no inputs in the config page at all (removed entirely, not
-  just disabled) since changing them isn't possible through this API and always needs a process
-  restart — see below. The status page carries one action per configured map: a "Sync" button next
-  to each map/version row in the results table posts to `POST /api/sync/{mapID}`
-  (`syncMapAPIHandler`, with the ID taken from the URL path), wired to `runtime.runSyncMaps` with a
-  single-ID set, to run that one map's sync immediately rather than waiting for its next `interval`
-  tick. A `/users` page (superuser-only) manages accounts, and a `/security-log` page
-  (superuser-only, backed by `GET /api/security-log`) shows the audit trail — see "Authentication &
-  permissions" below for how every route in this package is now gated, and for the security log
-  itself.
+  (HTML+vanilla JS, no build step, sections split into tabs — API / Database / Maps / SSO) backed
+  by a REST-shaped JSON API, all registered in `webserver.go` using Go 1.22+ `http.ServeMux`'s
+  native `"METHOD /path/{param}"` patterns (a wrong method on a registered path gets an automatic
+  405 with an `Allow` header from the mux itself, not a per-handler check) — every route's required
+  permission is declared right at its `mux.HandleFunc` call, not hidden in a handler. The one route
+  needing care around this: the status page is registered as `"GET /{$}"` (exact-root-only), not a
+  bare `"/"` — a bare `"/"` is a catch-all subtree pattern that would match *every* unmatched
+  method on *every other* path too, silently suppressing the mux's automatic 405 for the whole
+  `/api/...` family (a bug caught and fixed during the REST restructuring below — see
+  `statusHandler`'s doc comment).
+
+  `GET /api/config` (`internal/webserver/config.go`) returns the whole stored config as a bundle
+  (`{config, raw}`, the latter a YAML rendering, both with secrets redacted — see `redactSecrets`)
+  reading/writing a `*configdb.Store` instead of a file path; an empty/unconfigured database is not
+  an error, so the structured form always renders (blank on a fresh install). The API and Database
+  tabs are each their own sub-resource — `GET`/`PUT /api/config/api` and `GET`/`PUT
+  /api/config/database` — as is SSO (`GET`/`PUT /api/config/sso`, `internal/webserver/sso.go`). A
+  `PUT` loads the currently stored config, replaces just that one section, and saves — deliberately
+  *not* gated on `Config.Validate()` passing for the whole merged config (see `finishConfigSave`'s
+  doc comment in `config.go`), since that would make it impossible to ever save a single tab during
+  initial setup (each tab alone is always "incomplete"). Instead every save calls `reload` (see
+  below) immediately afterward and reports whether the *whole* config was valid enough to apply
+  live via the response's `applied`/`applyError` fields — the same mechanism already used for a
+  valid-but-unreachable API/database. `webServer.enabled`/`address` have no inputs in the config
+  page at all (removed entirely, not just disabled) since changing them isn't possible through this
+  API and always needs a process restart — see below.
+
+  The Maps tab is not a config section at all but a first-class CRUD resource
+  (`internal/webserver/maps.go`): `GET`/`POST /api/maps` (collection) and `GET`/`PUT`/`DELETE
+  /api/maps/{id}` (one map), each independently addressable/mutable — adding, editing, or removing
+  one map no longer means resubmitting every other configured map. `POST`/`PUT` validate the
+  candidate map against the *rest* of the currently stored maps via the exported
+  `config.Config.ValidateMaps()` (checking id/versions/interval/staticColumns, plus that no two
+  maps share an `id` — nothing enforced that before `id` became a REST resource key) before
+  persisting via `configdb.Store`'s per-map methods, then call `reload` the same way a config
+  section save does. The status page's per-map "Sync" button posts to `POST
+  /api/maps/{id}/sync` (`syncMapAPIHandler`, `id` from the native path value), wired to
+  `runtime.runSyncMaps` with a single-ID set, to run that one map's sync immediately rather than
+  waiting for its next `interval` tick — combined with `runtime.reload`'s `rt.wake` ping (see
+  below), a map added via `POST /api/maps` starts syncing almost immediately rather than waiting
+  out `runLoop`'s current sleep.
+
+  A `/users` page (superuser-only) manages accounts via `GET`/`POST /api/users` and
+  `GET`/`PUT`/`PATCH`/`DELETE /api/users/{id}`, and a `/security-log` page (superuser-only, backed
+  by `GET /api/security-log`) shows the audit trail — see "Authentication & permissions" below for
+  how every route in this package is now gated, and for the security log itself.
 - **`internal/store`** — owns the MariaDB schema (`EnsureSchema`, idempotent
   `CREATE TABLE IF NOT EXISTS`) and writes (`UpsertGeoObjects`, one transaction per call, batched
   `INSERT ... ON DUPLICATE KEY UPDATE` keyed on `uuid`). Depends on `internal/tileserve` for the
@@ -145,14 +170,17 @@ fully-permissioned non-superuser still can't reach `/users`.
 
 Every security-relevant action also appends a row to `configdb`'s append-only `security_log` table
 (`internal/configdb/securitylog.go`, `Store.LogSecurityEvent`/`Store.ListSecurityLog`) — local and
-SSO logins (success and failure), logouts, account creation/update/deletion, and every config save
-(per-section and raw, including the SSO tab), each with a timestamp, event type, the acting
+SSO logins (success and failure), logouts, account creation/update/deletion, every config section
+save (`config_saved`, `section=api|database|sso`), and every map create/update/delete
+(`map_created`/`map_updated`/`map_deleted`, distinct event types since maps are their own resource
+— see the `internal/webserver` bullet above), each with a timestamp, event type, the acting
 username (or attempted username, for a failed login), the request's `RemoteAddr`, and a short
-free-form detail string (e.g. `section=api`, `target=<username>`). For every change event (a
-config save or a user create/update/delete), that detail also records what actually changed —
+free-form detail string (e.g. `section=api`, `target=<username>`, `map "town-centre" created`).
+For every change event (a config save, a map create/update/delete, or a user create/update/delete),
+that detail also records what actually changed —
 built by the `diff*`/`changesDetail`/`grantedPermissions` helpers in
 `internal/webserver/audit_diff.go`, which compare the before/after `config.Config`/
-`configdb.SSOConfig`/`configdb.Permissions` field by field (e.g. `changed: baseUrl
+`config.MapTarget`/`configdb.SSOConfig`/`configdb.Permissions` field by field (e.g. `changed: baseUrl
 "a"->"b", table changed`) — never in plaintext for a secret field (`API.Password`,
 `Database.DSN`, SSO `ClientSecret`, account passwords), which are only ever reported as changed.
 Writing a log entry is
@@ -166,7 +194,7 @@ account-management detail and remote addresses not meant for every logged-in use
 
 Optional, in addition to local username/password accounts (which are never disabled and remain
 how the very first account is created at `/setup`). Configured on `/config`'s SSO tab
-(`internal/webserver/sso.go`, `GET`/`POST /api/config/sso` gated by `view_config`/
+(`internal/webserver/sso.go`, `GET`/`PUT /api/config/sso` gated by `view_config`/
 `edit_config_sso` respectively) and stored in `configdb`'s `sso_config` row — nothing about it is
 cached in the running process: `internal/webserver/sso_login.go` re-resolves the provider's OIDC
 discovery document (`github.com/coreos/go-oidc/v3/oidc`) and rebuilds the `oauth2.Config`
@@ -221,23 +249,26 @@ loaded `Config` before it's validated or used). `runtime.runSync(ctx, rec)` sync
 map and is what the run-once path in `run` (no map has an `interval`, `webServer.enabled` is
 false) calls at startup; `runtime.runSyncMaps(ctx, rec, ids)` syncs just the maps whose ID is in
 `ids` and is what both `runLoop`'s per-map scheduler (see below) and the status page's per-map
-"Sync" button (`POST /api/sync/{mapID}`, called with a single-ID set) call. Both lock `syncMu`,
+"Sync" button (`POST /api/maps/{id}/sync`, called with a single-ID set) call. Both lock `syncMu`,
 read the current `{cfg, client, db}` via `runtime.current()` — returning `errNotConfigured`
 instead of calling `syncAll` if `db` is still nil — and call `syncAll`; the `syncMu` lock is what
 stops a manual per-map sync from running concurrently with a scheduled tick against the same
 database, which could otherwise race on `pruneMissing` deleting rows the other's insert just
 wrote.
 
-`runtime.reload(ctx)` is what a successful `POST /api/config` save calls (wired in as a `reload`
-closure passed to `startWebServer`/`webserver.New` — see above), and is also what `run` calls once
-at startup to do the initial configure: it
+`runtime.reload(ctx)` is what every successful config/map save calls (wired in as a `reload`
+closure passed to `startWebServer`/`webserver.New` — see above, and called directly by
+`finishConfigSave` and `maps.go`'s create/update/delete handlers), and is also what `run` calls
+once at startup to do the initial configure: it
 loads via `rt.cfgDB.Load`, overlays `rt.webServer`, calls `Config.Validate`, and — only if that
 succeeds — builds a fresh client (re-logging in, unless a token is configured) and database
 connection (`newClient`/`openStore`, factored out of `run` so both it and `reload` share them),
 swapping them into the runtime (closing the old database connection afterwards, nil-guarded for
 the first successful reload) only if all of that succeeds — so an invalid edit or an unreachable
 API/DB leaves the previous, still-working state (which may be the initial unconfigured state) in
-place. This is how config changes made through the web UI (new/removed maps, per-map intervals,
+place. On a successful swap it also pings `rt.wake` (a buffered `chan struct{}`, non-blocking send)
+so `runLoop` (below) reacts immediately instead of finishing out whatever sleep it's already in.
+This is how config changes made through the web UI (new/removed maps, per-map intervals,
 credentials, DB settings) take effect without a process restart. `webServer.enabled`/`address` are
 the one exception: changing those still needs a restart, since the server a reload request arrives on
 can't safely restart itself mid-request — this is also why they live in the bootstrap file rather
@@ -264,7 +295,11 @@ reload), and after that a map with a positive `Interval` is due again once that 
 passed, while a map with no `Interval` is never due again automatically. Due maps (if any) are
 synced together via `rt.runSyncMaps`, then `nextWake` computes how long to sleep: the shortest
 remaining time until any already-synced, positive-`Interval` map next comes due, or `pollInterval`
-if there's no such map (nothing configured, every map is one-shot, or nothing has synced yet).
+if there's no such map (nothing configured, every map is one-shot, or nothing has synced yet). The
+sleep itself (`select { ... case <-time.After(wait): case <-rt.wake: }`) is also woken early by
+`rt.wake` (see `runtime.reload` above) — without it, a map added via `POST /api/maps` while the
+loop was already sleeping out some other map's longer interval would sit unsynced until that
+unrelated timer happened to fire, rather than starting on the next tick as intended.
 This means: whenever `webServer.enabled` is true, the process no longer ever exits on its own (a
 deliberate behavior change from before SQLite-backed config — a config with only one-shot maps
 used to run once and exit even with `webServer` on); `run` only takes the old "run once and exit"

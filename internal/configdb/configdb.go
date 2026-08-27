@@ -134,6 +134,10 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		return err
 	}
 
+	if err := s.ensureMapsUniqueIndex(ctx); err != nil {
+		return err
+	}
+
 	return s.migrateUsersEditConfigSSO(ctx)
 }
 
@@ -491,20 +495,8 @@ func saveMaps(ctx context.Context, tx *sql.Tx, maps []config.MapTarget) error {
 			return fmt.Errorf("get row id for map %q: %w", m.ID, err)
 		}
 
-		for j, version := range m.Versions {
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO map_versions (map_id, version, sort_order) VALUES (?, ?, ?)`,
-				mapRowID, version, j); err != nil {
-				return fmt.Errorf("save version %q for map %q: %w", version, m.ID, err)
-			}
-		}
-
-		for column, value := range m.StaticColumns {
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO map_static_columns (map_id, column, value) VALUES (?, ?, ?)`,
-				mapRowID, column, value); err != nil {
-				return fmt.Errorf("save static column %q for map %q: %w", column, m.ID, err)
-			}
+		if err := insertMapVersionsAndStaticColumns(ctx, tx, mapRowID, m); err != nil {
+			return err
 		}
 	}
 

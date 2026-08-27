@@ -74,42 +74,9 @@ func diffDatabase(before, after config.Database) []string {
 	return changes
 }
 
-// diffMaps compares two []config.MapTarget slices by map ID: additions,
-// removals, and per-map field changes (versions/interval/staticColumns) for
-// any ID present in both.
-func diffMaps(before, after []config.MapTarget) []string {
-	beforeByID := make(map[string]config.MapTarget, len(before))
-	for _, m := range before {
-		beforeByID[m.ID] = m
-	}
-
-	var changes []string
-
-	seen := make(map[string]bool, len(after))
-
-	for _, m := range after {
-		seen[m.ID] = true
-
-		old, existed := beforeByID[m.ID]
-		if !existed {
-			changes = append(changes, fmt.Sprintf("map %q added", m.ID))
-			continue
-		}
-
-		if fieldChanges := diffMapFields(old, m); len(fieldChanges) > 0 {
-			changes = append(changes, fmt.Sprintf("map %q: %s", m.ID, strings.Join(fieldChanges, ", ")))
-		}
-	}
-
-	for _, m := range before {
-		if !seen[m.ID] {
-			changes = append(changes, fmt.Sprintf("map %q removed", m.ID))
-		}
-	}
-
-	return changes
-}
-
+// diffMapFields compares two config.MapTarget values field by field
+// (versions/interval/staticColumns) — used by maps.go's updateMapAPIHandler
+// to log what a PUT /api/maps/{id} actually changed.
 func diffMapFields(old, updated config.MapTarget) []string {
 	var changes []string
 
