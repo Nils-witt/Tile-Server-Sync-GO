@@ -70,13 +70,16 @@ func saveSSOConfigHandler(cfgDB *configdb.Store) http.HandlerFunc {
 			DefaultPermissions: req.DefaultPermissions,
 		}
 
-		if cfg.ClientSecret == "" {
-			stored, err := cfgDB.LoadSSOConfig(r.Context())
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, errorJSON(err.Error()))
-				return
-			}
+		// Loaded unconditionally (not just when ClientSecret is blank) so it
+		// also serves as the "before" side of the diff recorded in the
+		// security log below.
+		stored, err := cfgDB.LoadSSOConfig(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorJSON(err.Error()))
+			return
+		}
 
+		if cfg.ClientSecret == "" {
 			cfg.ClientSecret = stored.ClientSecret
 		}
 
@@ -94,7 +97,8 @@ func saveSSOConfigHandler(cfgDB *configdb.Store) http.HandlerFunc {
 		}
 
 		if actor, ok := currentUser(r.Context()); ok {
-			logSecurityEvent(r, cfgDB, "config_saved", actor.Username, "section=sso")
+			changes := diffSSO(stored, &cfg)
+			logSecurityEvent(r, cfgDB, "config_saved", actor.Username, "section=sso; "+changesDetail(changes))
 		}
 
 		writeJSON(w, http.StatusOK, toSSOConfigDTO(&cfg))

@@ -148,7 +148,14 @@ Every security-relevant action also appends a row to `configdb`'s append-only `s
 SSO logins (success and failure), logouts, account creation/update/deletion, and every config save
 (per-section and raw, including the SSO tab), each with a timestamp, event type, the acting
 username (or attempted username, for a failed login), the request's `RemoteAddr`, and a short
-free-form detail string (e.g. `section=api`, `target=<username>`). Writing a log entry is
+free-form detail string (e.g. `section=api`, `target=<username>`). For every change event (a
+config save or a user create/update/delete), that detail also records what actually changed —
+built by the `diff*`/`changesDetail`/`grantedPermissions` helpers in
+`internal/webserver/audit_diff.go`, which compare the before/after `config.Config`/
+`configdb.SSOConfig`/`configdb.Permissions` field by field (e.g. `changed: baseUrl
+"a"->"b", table changed`) — never in plaintext for a secret field (`API.Password`,
+`Database.DSN`, SSO `ClientSecret`, account passwords), which are only ever reported as changed.
+Writing a log entry is
 best-effort — `internal/webserver/security_log.go`'s `logSecurityEvent` helper only logs a write
 failure to stderr, never blocks or fails the action that triggered it. `GET /security-log`
 (superuser-only, like `/users`) renders it via `GET /api/security-log?limit=N` (default 200, capped

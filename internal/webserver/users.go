@@ -3,6 +3,7 @@ package webserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go-sync-objects/internal/configdb"
 	"net/http"
 	"strconv"
@@ -89,7 +90,9 @@ func createUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store) {
 	}
 
 	if actor, ok := currentUser(r.Context()); ok {
-		logSecurityEvent(r, cfgDB, "user_created", actor.Username, "target="+user.Username)
+		detail := fmt.Sprintf("target=%s; isSuperuser=%v; permissions=%s",
+			user.Username, user.IsSuperuser, strings.Join(grantedPermissions(user.Permissions), ","))
+		logSecurityEvent(r, cfgDB, "user_created", actor.Username, detail)
 	}
 
 	writeJSON(w, http.StatusOK, toUserDTO(*user))
@@ -139,6 +142,18 @@ func updateUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, i
 		}
 	}
 
+	before, err := cfgDB.GetUser(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, configdb.ErrUserNotFound) {
+			status = http.StatusNotFound
+		}
+
+		writeJSON(w, status, errorJSON(err.Error()))
+
+		return
+	}
+
 	if err := cfgDB.UpdateUser(r.Context(), id, req.Permissions, req.IsSuperuser, req.Password); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, configdb.ErrUserNotFound) {
@@ -157,7 +172,17 @@ func updateUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, i
 	}
 
 	if actor, ok := currentUser(r.Context()); ok {
-		logSecurityEvent(r, cfgDB, "user_updated", actor.Username, "target="+user.Username)
+		changes := diffPermissions(before.Permissions, user.Permissions)
+		if before.IsSuperuser != user.IsSuperuser {
+			changes = append(changes, fmt.Sprintf("isSuperuser %v->%v", before.IsSuperuser, user.IsSuperuser))
+		}
+
+		if req.Password != "" {
+			changes = append(changes, "password changed")
+		}
+
+		detail := fmt.Sprintf("target=%s; %s", user.Username, changesDetail(changes))
+		logSecurityEvent(r, cfgDB, "user_updated", actor.Username, detail)
 	}
 
 	writeJSON(w, http.StatusOK, toUserDTO(*user))
@@ -193,7 +218,9 @@ func deleteUser(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, i
 	}
 
 	if actor, ok := currentUser(r.Context()); ok {
-		logSecurityEvent(r, cfgDB, "user_deleted", actor.Username, "target="+target.Username)
+		detail := fmt.Sprintf("target=%s; isSuperuser=%v; permissions=%s",
+			target.Username, target.IsSuperuser, strings.Join(grantedPermissions(target.Permissions), ","))
+		logSecurityEvent(r, cfgDB, "user_deleted", actor.Username, detail)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

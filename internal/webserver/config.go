@@ -8,6 +8,7 @@ import (
 	"go-sync-objects/internal/configdb"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -103,10 +104,11 @@ type mapsSectionRequest struct {
 // POST, decode the request body via decode, then merge just that section
 // into the stored config via saveConfigSection. section is a short label
 // ("api", "database", "maps") recorded in the security log by
-// finishConfigSave.
+// finishConfigSave. merge also returns a human-readable description of what
+// it changed (see the diff* helpers in audit_diff.go), also recorded there.
 func sectionSaveHandler(
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error, section string,
-	decode func(w http.ResponseWriter, r *http.Request) (merge func(cfg *config.Config), err error),
+	decode func(w http.ResponseWriter, r *http.Request) (merge func(cfg *config.Config) []string, err error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -128,18 +130,20 @@ func sectionSaveHandler(
 
 // decodeSectionHandler builds a sectionSaveHandler that decodes its request
 // body as a T and hands it to merge, factoring out the otherwise-identical
-// decode-then-merge shape shared by every section save endpoint below.
+// decode-then-merge shape shared by every section save endpoint below. merge
+// returns the section's before value's diff against what it just wrote into
+// cfg.
 func decodeSectionHandler[T any](
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error, section string,
-	merge func(cfg *config.Config, req T),
+	merge func(cfg *config.Config, req T) []string,
 ) http.HandlerFunc {
-	return sectionSaveHandler(cfgDB, webServer, reload, section, func(w http.ResponseWriter, r *http.Request) (func(*config.Config), error) {
+	return sectionSaveHandler(cfgDB, webServer, reload, section, func(w http.ResponseWriter, r *http.Request) (func(*config.Config) []string, error) {
 		var req T
 		if err := decodeConfigBody(w, r, &req); err != nil {
 			return nil, err
 		}
 
-		return func(cfg *config.Config) { merge(cfg, req) }, nil
+		return func(cfg *config.Config) []string { return merge(cfg, req) }, nil
 	})
 }
 
@@ -150,7 +154,12 @@ func saveAPISectionHandler(
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
 ) http.HandlerFunc {
 	return decodeSectionHandler(cfgDB, webServer, reload, "api",
-		func(cfg *config.Config, req apiSectionRequest) { cfg.API = req.API })
+		func(cfg *config.Config, req apiSectionRequest) []string {
+			changes := diffAPI(cfg.API, req.API)
+			cfg.API = req.API
+
+			return changes
+		})
 }
 
 // saveDatabaseSectionHandler serves POST /api/config/database, the Database
@@ -159,7 +168,12 @@ func saveDatabaseSectionHandler(
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
 ) http.HandlerFunc {
 	return decodeSectionHandler(cfgDB, webServer, reload, "database",
-		func(cfg *config.Config, req databaseSectionRequest) { cfg.Database = req.Database })
+		func(cfg *config.Config, req databaseSectionRequest) []string {
+			changes := diffDatabase(cfg.Database, req.Database)
+			cfg.Database = req.Database
+
+			return changes
+		})
 }
 
 // saveMapsSectionHandler serves POST /api/config/maps, the Maps analogue of
@@ -168,7 +182,12 @@ func saveMapsSectionHandler(
 	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
 ) http.HandlerFunc {
 	return decodeSectionHandler(cfgDB, webServer, reload, "maps",
-		func(cfg *config.Config, req mapsSectionRequest) { cfg.Maps = req.Maps })
+		func(cfg *config.Config, req mapsSectionRequest) []string {
+			changes := diffMaps(cfg.Maps, req.Maps)
+			cfg.Maps = req.Maps
+
+			return changes
+		})
 }
 
 // saveRawConfigHandler serves POST /api/config/raw: the whole-config raw
@@ -206,11 +225,21 @@ func saveRawConfigHandler(
 		// required to already be complete/valid before persisting.
 		cfg.WebServer = webServer
 
-		if cfg.API.Password == "" || cfg.Database.DSN == "" {
-			if err := fillStoredSecrets(r.Context(), cfgDB, &cfg); err != nil {
-				writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
-				return
-			}
+		// Loaded unconditionally (not just when a secret is blank, unlike
+		// fillStoredSecrets' usual callers) so it also serves as the "before"
+		// side of the diff recorded in the security log below.
+		before, err := cfgDB.Load(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
+			return
+		}
+
+		if cfg.API.Password == "" {
+			cfg.API.Password = before.API.Password
+		}
+
+		if cfg.Database.DSN == "" {
+			cfg.Database.DSN = before.Database.DSN
 		}
 
 		if err := cfg.Validate(); err != nil {
@@ -218,7 +247,9 @@ func saveRawConfigHandler(
 			return
 		}
 
-		finishConfigSave(w, r, cfgDB, webServer, reload, "raw", &cfg)
+		changes := slices.Concat(diffAPI(before.API, cfg.API), diffDatabase(before.Database, cfg.Database), diffMaps(before.Maps, cfg.Maps))
+
+		finishConfigSave(w, r, cfgDB, webServer, reload, "raw", changes, &cfg)
 	}
 }
 
@@ -231,12 +262,13 @@ func decodeConfigBody(w http.ResponseWriter, r *http.Request, v any) error {
 }
 
 // saveConfigSection loads the currently stored config, applies merge (which
-// overwrites just one section), and hands off to finishConfigSave. Loading
-// first means every section untouched by merge keeps its existing stored
-// value, matching each tab's "save just this tab" semantics.
+// overwrites just one section and reports what it changed), and hands off to
+// finishConfigSave. Loading first means every section untouched by merge
+// keeps its existing stored value, matching each tab's "save just this tab"
+// semantics.
 func saveConfigSection(
 	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
-	reload func(context.Context) error, section string, merge func(cfg *config.Config),
+	reload func(context.Context) error, section string, merge func(cfg *config.Config) []string,
 ) {
 	cfg, err := cfgDB.Load(r.Context())
 	if err != nil {
@@ -244,8 +276,8 @@ func saveConfigSection(
 		return
 	}
 
-	merge(cfg)
-	finishConfigSave(w, r, cfgDB, webServer, reload, section, cfg)
+	changes := merge(cfg)
+	finishConfigSave(w, r, cfgDB, webServer, reload, section, changes, cfg)
 }
 
 // finishConfigSave is the common tail shared by every save path (per-section
@@ -267,7 +299,7 @@ func saveConfigSection(
 // the one exception — see its own comment.
 func finishConfigSave(
 	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
-	reload func(context.Context) error, section string, cfg *config.Config,
+	reload func(context.Context) error, section string, changes []string, cfg *config.Config,
 ) {
 	// Discard whatever WebServer was submitted (or, for a raw save,
 	// unmarshaled) before saving, so a bad/irrelevant webServer value can
@@ -291,7 +323,7 @@ func finishConfigSave(
 	}
 
 	if actor, ok := currentUser(r.Context()); ok {
-		logSecurityEvent(r, cfgDB, "config_saved", actor.Username, "section="+section)
+		logSecurityEvent(r, cfgDB, "config_saved", actor.Username, "section="+section+"; "+changesDetail(changes))
 	}
 
 	redactSecrets(cfg)
