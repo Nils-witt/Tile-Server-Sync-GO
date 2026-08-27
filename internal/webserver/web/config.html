@@ -62,6 +62,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     <label for="db-table">Table</label>
     <input type="text" id="db-table" placeholder="geo_objects">
     <div class="checkbox-row"><input type="checkbox" id="db-prune"><label for="db-prune">Prune missing rows after each map/version sync</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="db-sync-overlays"><label for="db-sync-overlays">Keep map_src_overlays (EDP) rows in sync with map create/update/delete</label></div>
 
     <details style="margin-top:0.9rem;">
       <summary style="cursor:pointer; font-weight:500; font-size:0.85rem;">Column mapping (advanced &mdash; leave blank to use defaults)</summary>
@@ -178,8 +179,8 @@ instead of waiting for a map's interval, use the per-map Sync button on the
 
   var mapsContainer = document.getElementById("maps-container");
 
-  function summarizeMap(idInput, versionsInput, intervalInput, idSpan, metaSpan) {
-    idSpan.textContent = idInput.value.trim() || "(new map)";
+  function summarizeMap(idInput, nameInput, versionsInput, intervalInput, idSpan, metaSpan) {
+    idSpan.textContent = nameInput.value.trim() || idInput.value.trim() || "(new map)";
     var versions = versionsInput.value.split(",").map(function (v) { return v.trim(); }).filter(Boolean);
     var parts = [];
     parts.push(versions.length === 1 ? "1 version" : versions.length + " versions");
@@ -209,7 +210,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
   function buildMapRow(m, opts) {
     opts = opts || {};
     var persisted = !!opts.persisted;
-    m = m || { id: "", versions: [], interval: "", staticColumns: {} };
+    m = m || { id: "", name: "", versions: [], interval: "", staticColumns: {} };
 
     var details = document.createElement("details");
     details.className = "map-card";
@@ -234,6 +235,13 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     idInput.className = "map-id";
     idInput.value = m.id || "";
     idInput.disabled = persisted;
+
+    var nameLabel = document.createElement("label");
+    nameLabel.textContent = "Name (human-readable; required to sync this map into EDP's overlay list)";
+    var nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.className = "map-name";
+    nameInput.value = m.name || "";
 
     var versionsLabel = document.createElement("label");
     versionsLabel.textContent = "Versions (comma-separated, e.g. current, 3, 4)";
@@ -279,6 +287,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
       var id = idInput.value.trim();
       var payload = {
         id: id,
+        name: nameInput.value.trim(),
         versions: versionsInput.value.split(",").map(function (v) { return v.trim(); }).filter(Boolean),
         interval: intervalInput.value.trim(),
         staticColumns: parseStaticColumns(colsArea.value)
@@ -298,10 +307,12 @@ instead of waiting for a map's interval, use the per-map Sync button on the
           if (res.ok) {
             persisted = true;
             idInput.disabled = true;
-            if (res.body.applied) {
-              showRowMessage(true, "Saved and applied to the running process.");
-            } else {
+            if (!res.body.applied) {
               showRowMessage(false, "Saved, but failed to apply to the running process: " + res.body.applyError);
+            } else if (res.body.overlayError) {
+              showRowMessage(false, "Saved and applied, but failed to sync EDP overlay: " + res.body.overlayError);
+            } else {
+              showRowMessage(true, "Saved and applied to the running process.");
             }
           } else {
             showRowMessage(false, "Not saved: " + res.body.error);
@@ -342,6 +353,8 @@ instead of waiting for a map's interval, use the per-map Sync button on the
 
     body.appendChild(idLabel);
     body.appendChild(idInput);
+    body.appendChild(nameLabel);
+    body.appendChild(nameInput);
     body.appendChild(versionsLabel);
     body.appendChild(versionsInput);
     body.appendChild(intervalLabel);
@@ -357,8 +370,9 @@ instead of waiting for a map's interval, use the per-map Sync button on the
 
     details.appendChild(body);
 
-    function refreshSummary() { summarizeMap(idInput, versionsInput, intervalInput, idSpan, metaSpan); }
+    function refreshSummary() { summarizeMap(idInput, nameInput, versionsInput, intervalInput, idSpan, metaSpan); }
     idInput.addEventListener("input", refreshSummary);
+    nameInput.addEventListener("input", refreshSummary);
     versionsInput.addEventListener("input", refreshSummary);
     intervalInput.addEventListener("input", refreshSummary);
     refreshSummary();
@@ -391,6 +405,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
     document.getElementById("db-dsn").value = "";
     document.getElementById("db-table").value = cfg.database.table || "";
     document.getElementById("db-prune").checked = !!cfg.database.pruneMissing;
+    document.getElementById("db-sync-overlays").checked = !!cfg.database.syncOverlays;
 
     var cols = cfg.database.columns || {};
     COLUMN_FIELDS.forEach(function (f) {
@@ -418,6 +433,7 @@ instead of waiting for a map's interval, use the per-map Sync button on the
       dsn: document.getElementById("db-dsn").value.trim(),
       table: document.getElementById("db-table").value.trim(),
       pruneMissing: document.getElementById("db-prune").checked,
+      syncOverlays: document.getElementById("db-sync-overlays").checked,
       columns: cols
     };
   }

@@ -155,9 +155,19 @@ func run(ctx context.Context, configPath string) error {
 		deleteMapObjects := func(delCtx context.Context, mapID string) (int64, error) {
 			return rt.deleteMapObjects(delCtx, mapID)
 		}
+		createMapOverlays := func(ovCtx context.Context, m config.MapTarget) error {
+			return rt.createMapOverlays(ovCtx, m)
+		}
+		updateMapOverlays := func(ovCtx context.Context, before, after config.MapTarget) error {
+			return rt.updateMapOverlays(ovCtx, before, after)
+		}
+		deleteMapOverlays := func(ovCtx context.Context, m config.MapTarget) error {
+			return rt.deleteMapOverlays(ovCtx, m)
+		}
 
 		stopWebServer := startWebServer(
 			boot.WebServer.Address, rec, cfgDB, boot.WebServer, reload, syncMap, deleteMapObjects,
+			createMapOverlays, updateMapOverlays, deleteMapOverlays,
 		)
 		defer stopWebServer()
 
@@ -223,8 +233,14 @@ func startWebServer(
 	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
 	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
 	deleteMapObjects func(context.Context, string) (int64, error),
+	createMapOverlays func(context.Context, config.MapTarget) error,
+	updateMapOverlays func(context.Context, config.MapTarget, config.MapTarget) error,
+	deleteMapOverlays func(context.Context, config.MapTarget) error,
 ) (stop func()) {
-	srv := webserver.New(addr, rec, cfgDB, webServer, reload, syncMap, deleteMapObjects)
+	srv := webserver.New(
+		addr, rec, cfgDB, webServer, reload, syncMap, deleteMapObjects,
+		createMapOverlays, updateMapOverlays, deleteMapOverlays,
+	)
 
 	go func() {
 		log.Printf("status web server listening on %s", addr)

@@ -17,15 +17,16 @@ import (
 func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 	cfg := &config.Config{}
 
-	var pruneMissing int64
+	var pruneMissing, syncOverlays int64
 
 	row := s.db.QueryRowContext(ctx,
-		`SELECT api_base_url, api_username, api_password, api_token, db_dsn, db_table, db_prune_missing
+		`SELECT api_base_url, api_username, api_password, api_token, db_dsn, db_table,
+		        db_prune_missing, db_sync_overlays
 		 FROM config_scalar WHERE id = 1`)
 
 	switch err := row.Scan(
 		&cfg.API.BaseURL, &cfg.API.Username, &cfg.API.Password, &cfg.API.Token,
-		&cfg.Database.DSN, &cfg.Database.Table, &pruneMissing,
+		&cfg.Database.DSN, &cfg.Database.Table, &pruneMissing, &syncOverlays,
 	); {
 	case errors.Is(err, sql.ErrNoRows):
 		// No row yet: leave cfg's scalars zero-valued.
@@ -33,6 +34,7 @@ func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	default:
 		cfg.Database.PruneMissing = pruneMissing != 0
+		cfg.Database.SyncOverlays = syncOverlays != 0
 	}
 
 	columns, err := s.loadDatabaseColumns(ctx)
@@ -122,7 +124,8 @@ func (s *Store) loadMaps(ctx context.Context) ([]config.MapTarget, error) {
 // queryMapRows reads the maps table's id/map_id columns, in configured
 // order, without yet loading each map's versions/staticColumns.
 func (s *Store) queryMapRows(ctx context.Context) ([]mapRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, map_id, interval FROM maps ORDER BY sort_order ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, map_id, name, interval FROM maps ORDER BY sort_order ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("load maps: %w", err)
 	}
@@ -132,7 +135,7 @@ func (s *Store) queryMapRows(ctx context.Context) ([]mapRow, error) {
 
 	for rows.Next() {
 		var mr mapRow
-		if err := rows.Scan(&mr.rowID, &mr.target.ID, &mr.target.Interval); err != nil {
+		if err := rows.Scan(&mr.rowID, &mr.target.ID, &mr.target.Name, &mr.target.Interval); err != nil {
 			return nil, fmt.Errorf("scan map: %w", err)
 		}
 

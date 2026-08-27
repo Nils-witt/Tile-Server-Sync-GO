@@ -26,9 +26,9 @@ func (s *Store) ListMaps(ctx context.Context) ([]config.MapTarget, error) {
 func (s *Store) GetMap(ctx context.Context, id string) (*config.MapTarget, error) {
 	var mr mapRow
 
-	row := s.db.QueryRowContext(ctx, `SELECT id, map_id, interval FROM maps WHERE map_id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, map_id, name, interval FROM maps WHERE map_id = ?`, id)
 
-	switch err := row.Scan(&mr.rowID, &mr.target.ID, &mr.target.Interval); {
+	switch err := row.Scan(&mr.rowID, &mr.target.ID, &mr.target.Name, &mr.target.Interval); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, fmt.Errorf("get map %q: %w", id, ErrMapNotFound)
 	case err != nil:
@@ -67,7 +67,8 @@ func (s *Store) CreateMap(ctx context.Context, m config.MapTarget) (*config.MapT
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO maps (map_id, sort_order, interval) VALUES (?, ?, ?)`, m.ID, nextOrder, m.Interval)
+		`INSERT INTO maps (map_id, name, sort_order, interval) VALUES (?, ?, ?, ?)`,
+		m.ID, m.Name, nextOrder, m.Interval)
 	if err != nil {
 		if isUniqueConstraintErr(err) {
 			return nil, fmt.Errorf("create map %q: %w", m.ID, ErrMapIDTaken)
@@ -116,7 +117,8 @@ func (s *Store) UpdateMap(ctx context.Context, id string, m config.MapTarget) (*
 		return nil, fmt.Errorf("update map %q: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE maps SET interval = ? WHERE id = ?`, m.Interval, mapRowID); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE maps SET name = ?, interval = ? WHERE id = ?`, m.Name, m.Interval, mapRowID); err != nil {
 		return nil, fmt.Errorf("update map %q: %w", id, err)
 	}
 

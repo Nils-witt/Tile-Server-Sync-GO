@@ -46,13 +46,13 @@ user-defined alias.
 ## Run
 
 ```sh
-go run . -config config.yaml
+go run ./cmd/go-sync-objects -config config.yaml
 ```
 
 Or build a binary:
 
 ```sh
-go build -o go-sync-objects .
+go build -o go-sync-objects ./cmd/go-sync-objects
 ./go-sync-objects -config config.yaml
 ```
 
@@ -117,8 +117,8 @@ existing rows rather than duplicating them.
 
 ## Layout
 
-- `main.go` — CLI entry point / orchestration.
-- `service_windows.go` / `service_other.go` — Windows service install/start/stop/uninstall (`-service ...`); no-op stubs on non-Windows builds.
+- `cmd/go-sync-objects/main.go` — CLI entry point / orchestration.
+- `cmd/go-sync-objects/service_windows.go` / `service_other.go` — Windows service install/start/stop/uninstall (`-service ...`); no-op stubs on non-Windows builds.
 - `internal/config` — YAML config loading and validation.
 - `internal/tileserve` — minimal tileserve-go API client (login + geo-objects fetch).
 - `internal/store` — MariaDB schema management and upserts.

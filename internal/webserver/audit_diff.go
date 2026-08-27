@@ -67,6 +67,10 @@ func diffDatabase(before, after config.Database) []string {
 		changes = append(changes, fmt.Sprintf("pruneMissing %v->%v", before.PruneMissing, after.PruneMissing))
 	}
 
+	if before.SyncOverlays != after.SyncOverlays {
+		changes = append(changes, fmt.Sprintf("syncOverlays %v->%v", before.SyncOverlays, after.SyncOverlays))
+	}
+
 	if !maps.Equal(before.Columns, after.Columns) {
 		changes = append(changes, "columns changed")
 	}
@@ -75,10 +79,14 @@ func diffDatabase(before, after config.Database) []string {
 }
 
 // diffMapFields compares two config.MapTarget values field by field
-// (versions/interval/staticColumns) — used by maps.go's updateMapAPIHandler
-// to log what a PUT /api/maps/{id} actually changed.
+// (name/versions/interval/staticColumns) — used by maps.go's
+// updateMapAPIHandler to log what a PUT /api/maps/{id} actually changed.
 func diffMapFields(old, updated config.MapTarget) []string {
 	var changes []string
+
+	if old.Name != updated.Name {
+		changes = append(changes, fmt.Sprintf("name %q->%q", old.Name, updated.Name))
+	}
 
 	if !slices.Equal(old.Versions, updated.Versions) {
 		changes = append(changes, fmt.Sprintf("versions %v->%v", old.Versions, updated.Versions))

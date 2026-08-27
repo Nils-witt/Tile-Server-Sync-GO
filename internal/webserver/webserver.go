@@ -37,6 +37,9 @@ func New(
 	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
 	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
 	deleteMapObjects func(context.Context, string) (int64, error),
+	createMapOverlays func(context.Context, config.MapTarget) error,
+	updateMapOverlays func(context.Context, config.MapTarget, config.MapTarget) error,
+	deleteMapOverlays func(context.Context, config.MapTarget) error,
 ) *http.Server {
 	mux := http.NewServeMux()
 
@@ -87,12 +90,14 @@ func New(
 	// map no longer requires resubmitting every other configured map.
 	mux.HandleFunc("GET /api/maps", requirePermission(cfgDB, false, permViewConfig)(listMapsAPIHandler(cfgDB)))
 	mux.HandleFunc("POST /api/maps",
-		requirePermission(cfgDB, false, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload)))
+		requirePermission(cfgDB, false, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload, createMapOverlays)))
 	mux.HandleFunc("GET /api/maps/{id}", requirePermission(cfgDB, false, permViewConfig)(getMapAPIHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/maps/{id}",
-		requirePermission(cfgDB, false, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload)))
+		requirePermission(cfgDB, false, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload, updateMapOverlays)))
 	mux.HandleFunc("DELETE /api/maps/{id}",
-		requirePermission(cfgDB, false, permEditConfigMaps)(deleteMapAPIHandler(cfgDB, reload, deleteMapObjects)))
+		requirePermission(cfgDB, false, permEditConfigMaps)(
+			deleteMapAPIHandler(cfgDB, reload, deleteMapObjects, deleteMapOverlays),
+		))
 	mux.HandleFunc("POST /api/maps/{id}/sync",
 		requirePermission(cfgDB, false, permTriggerSync)(syncMapAPIHandler(syncMap)))
 

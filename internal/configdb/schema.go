@@ -16,14 +16,15 @@ import (
 // runs all four.
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS config_scalar (
-		id               INTEGER PRIMARY KEY CHECK (id = 1),
-		api_base_url     TEXT NOT NULL DEFAULT '',
-		api_username     TEXT NOT NULL DEFAULT '',
-		api_password     TEXT NOT NULL DEFAULT '',
-		api_token        TEXT NOT NULL DEFAULT '',
-		db_dsn           TEXT NOT NULL DEFAULT '',
-		db_table         TEXT NOT NULL DEFAULT '',
-		db_prune_missing INTEGER NOT NULL DEFAULT 0
+		id                INTEGER PRIMARY KEY CHECK (id = 1),
+		api_base_url      TEXT NOT NULL DEFAULT '',
+		api_username      TEXT NOT NULL DEFAULT '',
+		api_password      TEXT NOT NULL DEFAULT '',
+		api_token         TEXT NOT NULL DEFAULT '',
+		db_dsn            TEXT NOT NULL DEFAULT '',
+		db_table          TEXT NOT NULL DEFAULT '',
+		db_prune_missing  INTEGER NOT NULL DEFAULT 0,
+		db_sync_overlays  INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS database_columns (
 		field  TEXT PRIMARY KEY,
@@ -32,6 +33,7 @@ var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS maps (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		map_id     TEXT NOT NULL,
+		name       TEXT NOT NULL DEFAULT '',
 		sort_order INTEGER NOT NULL,
 		interval   TEXT NOT NULL DEFAULT ''
 	)`,
@@ -85,6 +87,14 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		return err
 	}
 
+	if err := s.migrateMapsName(ctx); err != nil {
+		return err
+	}
+
+	if err := s.migrateDBSyncOverlays(ctx); err != nil {
+		return err
+	}
+
 	if err := s.ensureMapsUniqueIndex(ctx); err != nil {
 		return err
 	}
@@ -110,6 +120,47 @@ func (s *Store) migrateMapsInterval(ctx context.Context) error {
 
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE maps ADD COLUMN interval TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add maps.interval column: %w", err)
+	}
+
+	return nil
+}
+
+// migrateMapsName adds the maps.name column to a database created before a
+// map had a human-readable name distinct from its id, the same way
+// migrateMapsInterval backfills maps.interval on an older schema.
+func (s *Store) migrateMapsName(ctx context.Context) error {
+	hasName, err := s.tableHasColumn(ctx, `PRAGMA table_info(maps)`, "name")
+	if err != nil {
+		return err
+	}
+
+	if hasName {
+		return nil
+	}
+
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE maps ADD COLUMN name TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add maps.name column: %w", err)
+	}
+
+	return nil
+}
+
+// migrateDBSyncOverlays adds the config_scalar.db_sync_overlays column to a
+// database created before the EDP map_src_overlays sync feature existed, the
+// same way migrateMapsInterval backfills maps.interval on an older schema.
+func (s *Store) migrateDBSyncOverlays(ctx context.Context) error {
+	hasColumn, err := s.tableHasColumn(ctx, `PRAGMA table_info(config_scalar)`, "db_sync_overlays")
+	if err != nil {
+		return err
+	}
+
+	if hasColumn {
+		return nil
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`ALTER TABLE config_scalar ADD COLUMN db_sync_overlays INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add config_scalar.db_sync_overlays column: %w", err)
 	}
 
 	return nil

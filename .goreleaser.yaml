@@ -6,7 +6,7 @@ before:
 
 builds:
   - id: go-sync-objects
-    main: .
+    main: ./cmd/go-sync-objects
     binary: go-sync-objects
     env:
       - CGO_ENABLED=0

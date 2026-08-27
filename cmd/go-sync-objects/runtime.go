@@ -143,6 +143,52 @@ func (rt *runtime) deleteMapObjects(ctx context.Context, mapID string) (int64, e
 	return db.DeleteMapObjects(ctx, mapID)
 }
 
+// createMapOverlays keeps the EDP map_src_overlays table (see
+// internal/store's CreateMapOverlays) in sync with a just-created map,
+// serialized against runSync/runSyncMaps via syncMu for the same reason
+// deleteMapObjects is. A no-op if the runtime has no successful reload yet.
+func (rt *runtime) createMapOverlays(ctx context.Context, m config.MapTarget) error {
+	rt.syncMu.Lock()
+	defer rt.syncMu.Unlock()
+
+	cfg, _, db := rt.current()
+	if db == nil {
+		return nil
+	}
+
+	return db.CreateMapOverlays(ctx, cfg.API.BaseURL, m)
+}
+
+// updateMapOverlays keeps map_src_overlays in sync with an edited map (see
+// internal/store's UpdateMapOverlays), serialized the same way
+// createMapOverlays is. A no-op if the runtime has no successful reload yet.
+func (rt *runtime) updateMapOverlays(ctx context.Context, before, after config.MapTarget) error {
+	rt.syncMu.Lock()
+	defer rt.syncMu.Unlock()
+
+	cfg, _, db := rt.current()
+	if db == nil {
+		return nil
+	}
+
+	return db.UpdateMapOverlays(ctx, cfg.API.BaseURL, before, after)
+}
+
+// deleteMapOverlays removes m's map_src_overlays rows (see internal/store's
+// DeleteMapOverlays), serialized the same way createMapOverlays is. A no-op
+// if the runtime has no successful reload yet.
+func (rt *runtime) deleteMapOverlays(ctx context.Context, m config.MapTarget) error {
+	rt.syncMu.Lock()
+	defer rt.syncMu.Unlock()
+
+	cfg, _, db := rt.current()
+	if db == nil {
+		return nil
+	}
+
+	return db.DeleteMapOverlays(ctx, cfg.API.BaseURL, m)
+}
+
 // reload loads the current configdb-backed config, overlays the fixed
 // bootstrap WebServer, validates it, and — only if that succeeds — builds a
 // fresh client (logging in again unless a token is configured) and database

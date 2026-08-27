@@ -64,8 +64,13 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // be synced. Version may be a real numeric version, the literal "current",
 // or a user-defined alias.
 type MapTarget struct {
-	ID       string   `yaml:"id"                 json:"id"`
-	Versions []string `yaml:"versions"           json:"versions"`
+	ID string `yaml:"id" json:"id"`
+	// Name is a human-readable label for the map, distinct from its ID
+	// (a UUID). Optional for the map itself, but required for it to be
+	// synced to EDP (see Database.SyncOverlays): a map with SyncOverlays
+	// enabled and no Name is skipped, logged, rather than failing the sync.
+	Name     string   `yaml:"name"     json:"name"`
+	Versions []string `yaml:"versions" json:"versions"`
 	// StaticColumns maps extra target table column names onto fixed values
 	// written to every row synced from this map (e.g. a "source" or
 	// "region" tag). These columns are in addition to the ones GeoObject
@@ -123,6 +128,13 @@ type Database struct {
 	// zero objects prunes every row in that map/version's scope. Requires
 	// Columns["mapUuid"] and Columns["version"] to both be set (not skipped).
 	PruneMissing bool `yaml:"pruneMissing" json:"pruneMissing"`
+	// SyncOverlays, if true, keeps a row per configured map/version in the
+	// same MariaDB database's map_src_overlays table (an external
+	// application's overlay list, e.g. EDP) in sync with maps created,
+	// updated, or deleted through this tool — see internal/store's
+	// CreateMapOverlays/UpdateMapOverlays/DeleteMapOverlays. Off by default
+	// so deployments without that table are unaffected.
+	SyncOverlays bool `yaml:"syncOverlays" json:"syncOverlays"`
 }
 
 // WebServer configures the optional HTTP server that exposes sync status and

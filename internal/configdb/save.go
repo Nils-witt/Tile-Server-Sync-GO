@@ -25,10 +25,16 @@ func (s *Store) Save(ctx context.Context, cfg *config.Config) error {
 		pruneMissing = 1
 	}
 
+	syncOverlays := 0
+	if cfg.Database.SyncOverlays {
+		syncOverlays = 1
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO config_scalar
-			(id, api_base_url, api_username, api_password, api_token, db_dsn, db_table, db_prune_missing)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+			(id, api_base_url, api_username, api_password, api_token, db_dsn, db_table,
+			 db_prune_missing, db_sync_overlays)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			api_base_url = excluded.api_base_url,
 			api_username = excluded.api_username,
@@ -36,9 +42,10 @@ func (s *Store) Save(ctx context.Context, cfg *config.Config) error {
 			api_token = excluded.api_token,
 			db_dsn = excluded.db_dsn,
 			db_table = excluded.db_table,
-			db_prune_missing = excluded.db_prune_missing`,
+			db_prune_missing = excluded.db_prune_missing,
+			db_sync_overlays = excluded.db_sync_overlays`,
 		cfg.API.BaseURL, cfg.API.Username, cfg.API.Password, cfg.API.Token,
-		cfg.Database.DSN, cfg.Database.Table, pruneMissing)
+		cfg.Database.DSN, cfg.Database.Table, pruneMissing, syncOverlays)
 	if err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
@@ -80,7 +87,7 @@ func saveMaps(ctx context.Context, tx *sql.Tx, maps []config.MapTarget) error {
 
 	for i, m := range maps {
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO maps (map_id, sort_order, interval) VALUES (?, ?, ?)`, m.ID, i, m.Interval)
+			`INSERT INTO maps (map_id, name, sort_order, interval) VALUES (?, ?, ?, ?)`, m.ID, m.Name, i, m.Interval)
 		if err != nil {
 			return fmt.Errorf("save map %q: %w", m.ID, err)
 		}

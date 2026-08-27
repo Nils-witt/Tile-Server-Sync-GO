@@ -32,6 +32,11 @@ type Store struct {
 	// UpsertGeoObjects deletes rows for the map_uuid/version scopes it
 	// upserts that weren't present in the objects it was given.
 	pruneMissing bool
+	// syncOverlays mirrors config.Database.SyncOverlays: when true,
+	// CreateMapOverlays/UpdateMapOverlays/DeleteMapOverlays keep a row per
+	// map/version in the map_src_overlays table (see overlays.go) in sync
+	// with maps created/updated/deleted through this tool.
+	syncOverlays bool
 }
 
 // Open connects to MariaDB using dbCfg.DSN (e.g.
@@ -69,6 +74,7 @@ func Open(ctx context.Context, dbCfg config.Database, staticColumns []string) (*
 		columns:       dbCfg.Columns,
 		staticColumns: staticColumns,
 		pruneMissing:  dbCfg.PruneMissing,
+		syncOverlays:  dbCfg.SyncOverlays,
 	}, nil
 }
 
