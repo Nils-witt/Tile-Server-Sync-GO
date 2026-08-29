@@ -3,11 +3,11 @@
 package store
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
+	"Tile-Server-Sync-GO/internal/tileserve"
 	"context"
 	"database/sql"
 	"fmt"
-	"go-sync-objects/internal/config"
-	"go-sync-objects/internal/tileserve"
 	"log"
 	"strings"
 	"time"

@@ -1,9 +1,9 @@
 package webserver
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
+	"Tile-Server-Sync-GO/internal/configdb"
 	"fmt"
-	"go-sync-objects/internal/config"
-	"go-sync-objects/internal/configdb"
 	"maps"
 	"slices"
 	"strings"

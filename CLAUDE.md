@@ -15,8 +15,8 @@ API described in [`openapi.yaml`](https://github.com/Nils-witt/Tileserve-GO/blob
 ## Commands
 
 ```sh
-go build -o go-sync-objects ./cmd/go-sync-objects   # build
-go run ./cmd/go-sync-objects -config config.yaml     # run (config.yaml is git-ignored; copy config.example.yaml)
+go build -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO   # build
+go run ./cmd/Tile-Server-Sync-GO -config config.yaml     # run (config.yaml is git-ignored; copy config.example.yaml)
                                         # config.yaml is now just a small bootstrap file (webServer +
                                         # configDb); api/database/maps (each with its own interval)
                                         # are entered via /config
@@ -33,7 +33,7 @@ There is no Go test suite yet (`go test ./...` will report "no test files"). The
 
 ## Architecture
 
-Config now comes from two places, wired together in `cmd/go-sync-objects/main.go`'s `run()`:
+Config now comes from two places, wired together in `cmd/Tile-Server-Sync-GO/main.go`'s `run()`:
 
 ```
 config.LoadBootstrap()  →  configdb.Store  →  tileserve.Client  →  store.Store
@@ -170,7 +170,7 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   synced into EDP, but not for the map itself: a map with `SyncOverlays` enabled and no `Name` is
   skipped, logged, rather than failing the sync). This is wired into map create/update/delete
   through the same `runtime`/`webserver` callback pattern `DeleteMapObjects` already uses (see
-  `cmd/go-sync-objects/runtime.go`'s `createMapOverlays`/`updateMapOverlays`/`deleteMapOverlays` and
+  `cmd/Tile-Server-Sync-GO/runtime.go`'s `createMapOverlays`/`updateMapOverlays`/`deleteMapOverlays` and
   `webserver/maps.go`'s handlers) — a failure here is reported back via each response's
   `overlayError` field but never fails the request, since the map change itself already succeeded.
 
@@ -253,7 +253,7 @@ the logged-in user's username/permissions/superuser flag, and every page's share
 hide nav links / disable form sections the user can't use — purely a UX nicety, since every actual
 enforcement happens server-side per route.
 
-`cmd/go-sync-objects/main.go`'s `run(ctx, configPath)` orchestrates the whole flow and is the place to look first when
+`cmd/Tile-Server-Sync-GO/main.go`'s `run(ctx, configPath)` orchestrates the whole flow and is the place to look first when
 tracing behavior end-to-end: load the bootstrap file → open `configdb` → attempt an initial
 `reload` (see below) → hand off to `syncAll(ctx, maps, client, db, rec)` for each map × version in
 `maps` (some subset of the configured maps — see `runLoop` below): fetch, overwrite each object's
@@ -262,7 +262,7 @@ database, not whatever concrete version the API resolved it to), then upsert (an
 enabled), logging counts as it goes.
 
 The client and database connection aren't held directly by `run`, though — they're wrapped in a
-`*runtime` (`cmd/go-sync-objects/runtime.go`), a mutex-guarded holder of the current `{cfg, client, db}` triple (which
+`*runtime` (`cmd/Tile-Server-Sync-GO/runtime.go`), a mutex-guarded holder of the current `{cfg, client, db}` triple (which
 starts out all-nil — see "starting unconfigured" below), plus a second mutex (`syncMu`) dedicated
 to serializing syncs, and two fields fixed for the process's lifetime: `cfgDB` (the
 `*configdb.Store`) and `webServer` (the bootstrap-sourced `config.WebServer`, overlaid onto every
@@ -305,7 +305,7 @@ starts regardless, `GET /config` renders an all-blank structured form (see the `
 bullet above), and the process falls into `runLoop` regardless of whether any configured map has a
 usable `interval` yet.
 
-`runLoop` (`cmd/go-sync-objects/main.go`) no longer runs one global interval loop — since `Interval` now lives per-map
+`runLoop` (`cmd/Tile-Server-Sync-GO/main.go`) no longer runs one global interval loop — since `Interval` now lives per-map
 (`config.MapTarget`), each map is scheduled independently. It tracks an in-memory
 `lastSync map[string]time.Time` (map ID → last sync start), rebuilt from scratch on every process
 start (nothing about scheduling state is persisted). Each tick: if `rt.configured()` is false, it
@@ -333,16 +333,16 @@ Sync is idempotent: rows are upserted by `uuid`, so re-running (whether manually
 
 ### Windows service support
 
-`-service install|uninstall|start|stop|run` (handled by `handleServiceCommand` in `cmd/go-sync-objects/main.go`)
+`-service install|uninstall|start|stop|run` (handled by `handleServiceCommand` in `cmd/Tile-Server-Sync-GO/main.go`)
 lets the binary register/manage itself as a Windows service instead of running in a console
 session — pairs naturally with maps that have their own `interval` set, for an unattended
 long-running sync. The real
-implementation lives in `cmd/go-sync-objects/service_windows.go` (build-tagged `windows`), using
+implementation lives in `cmd/Tile-Server-Sync-GO/service_windows.go` (build-tagged `windows`), using
 `golang.org/x/sys/windows/svc`/`svc/mgr`/`svc/eventlog`; `install` records the current exe path
 plus an absolute `-config` path and `-service run` as the service's launch command, and registers
-an event log source. `cmd/go-sync-objects/service_other.go` (build-tagged `!windows`) provides stub implementations
+an event log source. `cmd/Tile-Server-Sync-GO/service_other.go` (build-tagged `!windows`) provides stub implementations
 that return an explanatory error, so `go vet`/`golangci-lint`/builds stay green on
-linux/darwin. `cmd/go-sync-objects/main.go` also calls `isWindowsService()` at startup (true only when actually built
+linux/darwin. `cmd/Tile-Server-Sync-GO/main.go` also calls `isWindowsService()` at startup (true only when actually built
 for and running under Windows) as a fallback to route into service mode even without `-service
 run` on the command line. Neither service file changes `run`/`runLoop`/`syncAll` — the service
 wrapper just runs `run(ctx, configPath)` in a goroutine and cancels its context on a Stop/Shutdown

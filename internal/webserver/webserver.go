@@ -3,10 +3,10 @@
 package webserver
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
+	"Tile-Server-Sync-GO/internal/configdb"
+	"Tile-Server-Sync-GO/internal/status"
 	"context"
-	"go-sync-objects/internal/config"
-	"go-sync-objects/internal/configdb"
-	"go-sync-objects/internal/status"
 	"html/template"
 	"net/http"
 	"strings"

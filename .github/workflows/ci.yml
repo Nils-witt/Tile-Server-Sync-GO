@@ -20,7 +20,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Build
-        run: go build -o go-sync-objects ./cmd/go-sync-objects
+        run: go build -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO
 
       - name: Vet
         run: go vet ./...

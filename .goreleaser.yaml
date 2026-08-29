@@ -5,9 +5,9 @@ before:
     - go mod tidy
 
 builds:
-  - id: go-sync-objects
-    main: ./cmd/go-sync-objects
-    binary: go-sync-objects
+  - id: Tile-Server-Sync-GO
+    main: ./cmd/Tile-Server-Sync-GO
+    binary: Tile-Server-Sync-GO
     env:
       - CGO_ENABLED=0
     goos:
@@ -21,7 +21,7 @@ builds:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
 archives:
-  - id: go-sync-objects
+  - id: Tile-Server-Sync-GO
     formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}

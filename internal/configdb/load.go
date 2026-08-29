@@ -1,11 +1,11 @@
 package configdb
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"go-sync-objects/internal/config"
 )
 
 // Load assembles a *config.Config from the stored rows. WebServer is left

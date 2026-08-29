@@ -1,6 +1,6 @@
 //go:build windows
 
-// Windows service integration. go-sync-objects can install itself as a
+// Windows service integration. Tile-Server-Sync-GO can install itself as a
 // Windows service (`-service install`) so it runs unattended in the
 // background under the interval loop (see main.go's run/runLoop), instead
 // of requiring a foreground console session.
@@ -19,7 +19,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-const serviceName = "go-sync-objects"
+const serviceName = "Tile-Server-Sync-GO"
 
 // stopTimeout bounds how long the service waits for an in-flight run() to
 // react to context cancellation (and, separately, for the SCM stop call to
@@ -50,7 +50,7 @@ func (s *winService) Execute(_ []string, r <-chan svc.ChangeRequest, changes cha
 
 	changes <- svc.Status{State: svc.Running, Accepts: accepted}
 
-	s.logInfo("go-sync-objects service started")
+	s.logInfo("Tile-Server-Sync-GO service started")
 
 	for {
 		select {
@@ -94,7 +94,7 @@ func (s *winService) handleRequest(
 		case <-time.After(stopTimeout):
 		}
 
-		s.logInfo("go-sync-objects service stopped")
+		s.logInfo("Tile-Server-Sync-GO service stopped")
 
 		return true
 	default:
@@ -114,7 +114,7 @@ func (s *winService) logError(msg string) {
 	}
 }
 
-// runAsService blocks, running go-sync-objects under SCM control, until the
+// runAsService blocks, running Tile-Server-Sync-GO under SCM control, until the
 // service is stopped.
 func runAsService(configPath string) error {
 	elog, err := eventlog.Open(serviceName)
@@ -152,7 +152,7 @@ func installService(configPath string) error {
 	}
 
 	s, err := m.CreateService(serviceName, exePath, mgr.Config{
-		DisplayName: "go-sync-objects",
+		DisplayName: "Tile-Server-Sync-GO",
 		Description: "Syncs geo objects from tileserve-go into MariaDB.",
 		StartType:   mgr.StartAutomatic,
 	}, "-service", "run", "-config", absConfigPath)

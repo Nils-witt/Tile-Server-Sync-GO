@@ -1,7 +1,7 @@
 package webserver
 
 import (
-	"go-sync-objects/internal/configdb"
+	"Tile-Server-Sync-GO/internal/configdb"
 	"log"
 	"net/http"
 	"strconv"

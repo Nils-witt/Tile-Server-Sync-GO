@@ -1,14 +1,14 @@
 package main
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
+	"Tile-Server-Sync-GO/internal/configdb"
+	"Tile-Server-Sync-GO/internal/status"
+	"Tile-Server-Sync-GO/internal/store"
+	"Tile-Server-Sync-GO/internal/tileserve"
 	"context"
 	"errors"
 	"fmt"
-	"go-sync-objects/internal/config"
-	"go-sync-objects/internal/configdb"
-	"go-sync-objects/internal/status"
-	"go-sync-objects/internal/store"
-	"go-sync-objects/internal/tileserve"
 	"log"
 	"sync"
 )

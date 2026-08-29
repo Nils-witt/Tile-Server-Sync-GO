@@ -1,5 +1,5 @@
 {
-  "name": "go-sync-objects",
+  "name": "Tile-Server-Sync-GO",
   "version": "1.0.0",
   "description": "Fetches geo objects from one or more [tileserve-go](https://github.com/Nils-witt/Tileserve-GO) maps (at given versions) and writes them into a MariaDB database.",
   "main": "index.js",

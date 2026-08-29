@@ -1,11 +1,11 @@
 package configdb
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"go-sync-objects/internal/config"
 )
 
 // Sentinel errors returned by the per-map methods below, following

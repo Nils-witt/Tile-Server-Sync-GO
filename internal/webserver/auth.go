@@ -1,10 +1,10 @@
 package webserver
 
 import (
+	"Tile-Server-Sync-GO/internal/configdb"
 	"context"
 	"encoding/json"
 	"errors"
-	"go-sync-objects/internal/configdb"
 	"net/http"
 	"net/url"
 	"strings"

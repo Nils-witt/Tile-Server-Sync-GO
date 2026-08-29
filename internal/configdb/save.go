@@ -1,10 +1,10 @@
 package configdb
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
 	"context"
 	"database/sql"
 	"fmt"
-	"go-sync-objects/internal/config"
 )
 
 // Save persists every field of cfg except WebServer, replacing the

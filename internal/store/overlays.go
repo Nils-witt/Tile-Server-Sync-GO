@@ -1,11 +1,11 @@
 package store
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"go-sync-objects/internal/config"
 	"log"
 	"regexp"
 	"strings"

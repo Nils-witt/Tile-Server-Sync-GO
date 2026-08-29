@@ -1,4 +1,4 @@
-module go-sync-objects
+module Tile-Server-Sync-GO
 
 go 1.26
 

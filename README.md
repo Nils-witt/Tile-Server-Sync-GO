@@ -1,4 +1,4 @@
-# go-sync-objects
+# Tile-Server-Sync-GO
 
 Fetches geo objects from one or more [tileserve-go](https://github.com/Nils-witt/Tileserve-GO)
 maps (at given versions) and writes them into a MariaDB database.
@@ -46,32 +46,32 @@ user-defined alias.
 ## Run
 
 ```sh
-go run ./cmd/go-sync-objects -config config.yaml
+go run ./cmd/Tile-Server-Sync-GO -config config.yaml
 ```
 
 Or build a binary:
 
 ```sh
-go build -o go-sync-objects ./cmd/go-sync-objects
-./go-sync-objects -config config.yaml
+go build -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO
+./Tile-Server-Sync-GO -config config.yaml
 ```
 
 ## Running as a Windows service
 
-On Windows, go-sync-objects can install itself as a service instead of
+On Windows, Tile-Server-Sync-GO can install itself as a service instead of
 running in a console window (most useful together with each map's own
 `interval`, so it keeps syncing in the background across reboots):
 
 ```
-go-sync-objects -service install -config C:\path\to\config.yaml
-go-sync-objects -service start
+Tile-Server-Sync-GO -service install -config C:\path\to\config.yaml
+Tile-Server-Sync-GO -service start
 ```
 
-`-service install` registers the service (as `go-sync-objects`, start type
+`-service install` registers the service (as `Tile-Server-Sync-GO`, start type
 Automatic) using the current executable's path and an absolute path to the
 given `-config`, and registers an event log source so start/stop/error
 messages show up in the Windows Event Log (Application log, source
-`go-sync-objects`). Manage it afterwards with `-service start`,
+`Tile-Server-Sync-GO`). Manage it afterwards with `-service start`,
 `-service stop`, `-service uninstall`, or the regular `services.msc` /
 `sc.exe` tools. `-service run` is used internally — it's what the SCM
 invokes to actually start the process — and isn't normally run by hand.
@@ -117,8 +117,8 @@ existing rows rather than duplicating them.
 
 ## Layout
 
-- `cmd/go-sync-objects/main.go` — CLI entry point / orchestration.
-- `cmd/go-sync-objects/service_windows.go` / `service_other.go` — Windows service install/start/stop/uninstall (`-service ...`); no-op stubs on non-Windows builds.
+- `cmd/Tile-Server-Sync-GO/main.go` — CLI entry point / orchestration.
+- `cmd/Tile-Server-Sync-GO/service_windows.go` / `service_other.go` — Windows service install/start/stop/uninstall (`-service ...`); no-op stubs on non-Windows builds.
 - `internal/config` — YAML config loading and validation.
 - `internal/tileserve` — minimal tileserve-go API client (login + geo-objects fetch).
 - `internal/store` — MariaDB schema management and upserts.

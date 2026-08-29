@@ -1,4 +1,4 @@
-// Command go-sync-objects fetches geo objects for one or more tileserve-go
+// Command Tile-Server-Sync-GO fetches geo objects for one or more tileserve-go
 // maps (and given versions) and writes them into a MariaDB database.
 //
 // See https://github.com/Nils-witt/Tileserve-GO/blob/main/internal/handler/openapi.yaml
@@ -6,16 +6,16 @@
 package main
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
+	"Tile-Server-Sync-GO/internal/configdb"
+	"Tile-Server-Sync-GO/internal/status"
+	"Tile-Server-Sync-GO/internal/store"
+	"Tile-Server-Sync-GO/internal/tileserve"
+	"Tile-Server-Sync-GO/internal/webserver"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"go-sync-objects/internal/config"
-	"go-sync-objects/internal/configdb"
-	"go-sync-objects/internal/status"
-	"go-sync-objects/internal/store"
-	"go-sync-objects/internal/tileserve"
-	"go-sync-objects/internal/webserver"
 	"io"
 	"log"
 	"net/http"
@@ -44,7 +44,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("go-sync-objects %s (commit %s, built %s)\n", version, commit, date)
+		fmt.Printf("Tile-Server-Sync-GO %s (commit %s, built %s)\n", version, commit, date)
 		return
 	}
 
@@ -208,12 +208,12 @@ func (f fanoutWriter) Write(p []byte) (int, error) {
 }
 
 // openLogFile opens (creating if needed, appending if not) a
-// go-sync-objects.log file next to the config file at configPath, so logs
+// Tile-Server-Sync-GO.log file next to the config file at configPath, so logs
 // land alongside the config that produced them rather than wherever the
 // process happens to be run from (e.g. the Windows service's working
 // directory).
 func openLogFile(configPath string) (*os.File, error) {
-	logPath := filepath.Join(filepath.Dir(configPath), "go-sync-objects.log")
+	logPath := filepath.Join(filepath.Dir(configPath), "Tile-Server-Sync-GO.log")
 
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // configPath is a trusted, user-supplied CLI flag
 	if err != nil {

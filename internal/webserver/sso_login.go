@@ -10,13 +10,13 @@
 package webserver
 
 import (
+	"Tile-Server-Sync-GO/internal/configdb"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go-sync-objects/internal/configdb"
 	"log"
 	"net/http"
 	"strings"

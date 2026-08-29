@@ -3,7 +3,7 @@
 // Non-Windows stand-ins for the Windows service management functions in
 // service_windows.go. Windows service support only makes sense when built
 // for windows (see .goreleaser.yaml), so every other platform keeps
-// running go-sync-objects as a plain foreground process.
+// running Tile-Server-Sync-GO as a plain foreground process.
 package main
 
 import "errors"
