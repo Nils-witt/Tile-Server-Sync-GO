@@ -9,6 +9,7 @@ import (
 	"go-sync-objects/internal/status"
 	"html/template"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -35,12 +36,32 @@ import (
 // safely trigger mid-request.
 func New(
 	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
+	version, commit string,
 	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
 	deleteMapObjects func(context.Context, string) (int64, error),
 	createMapOverlays func(context.Context, config.MapTarget) error,
 	updateMapOverlays func(context.Context, config.MapTarget, config.MapTarget) error,
 	deleteMapOverlays func(context.Context, config.MapTarget) error,
 ) *http.Server {
+	// version/commit (main.go's -ldflags-set build info) aren't known until
+	// New() is called, so the shared copyright footer's {{FOOTER}} marker
+	// (left in every page by renderPage/pageReplacer, see web.go) is
+	// resolved here rather than at package init.
+	footer := buildFooter(version, commit)
+
+	loginPageHTML = strings.Replace(loginPageHTML, "{{FOOTER}}", footer, 1)
+	setupPageHTML = strings.Replace(setupPageHTML, "{{FOOTER}}", footer, 1)
+	configPageHTML = strings.Replace(configPageHTML, "{{FOOTER}}", footer, 1)
+	usersPageHTML = strings.Replace(usersPageHTML, "{{FOOTER}}", footer, 1)
+	securityLogPageHTML = strings.Replace(securityLogPageHTML, "{{FOOTER}}", footer, 1)
+
+	// status.html needs its {{FOOTER}} resolved before html/template parses
+	// it, not after: {{FOOTER}} would otherwise be parsed as an (invalid)
+	// template action rather than left alone the way pageReplacer's own
+	// tokens are (see renderPage/pageReplacer in web.go).
+	statusHTML := strings.Replace(renderPage("status.html"), "{{FOOTER}}", footer, 1)
+	pageTemplate := template.Must(template.New("status").Parse(statusHTML))
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/setup", setupHandler(cfgDB))
@@ -62,7 +83,7 @@ func New(
 	// method on a registered path would fall through to this handler instead
 	// of getting a 405), turning every wrong-verb request that should 405
 	// into a 404/login-redirect from statusHandler instead.
-	mux.HandleFunc("GET /{$}", requirePermission(cfgDB, true, permViewStatus)(statusHandler(rec)))
+	mux.HandleFunc("GET /{$}", requirePermission(cfgDB, true, permViewStatus)(statusHandler(rec, pageTemplate)))
 	mux.HandleFunc("/config", requirePermission(cfgDB, true, permViewConfig)(configPageHandler))
 	mux.HandleFunc("/users", requireSuperuser(cfgDB, true)(usersPageHandler))
 	mux.HandleFunc("/security-log", requireSuperuser(cfgDB, true)(securityLogPageHandler))
@@ -127,20 +148,17 @@ func permEditConfigDatabase(p configdb.Permissions) bool { return p.EditConfigDa
 func permEditConfigMaps(p configdb.Permissions) bool     { return p.EditConfigMaps }
 func permEditConfigSSO(p configdb.Permissions) bool      { return p.EditConfigSSO }
 
-func statusHandler(rec *status.Recorder) http.HandlerFunc {
+// statusHandler serves the status page (see web/status.html) — the one page
+// in this package that needs server-side templating (StartedAt, Runs,
+// Results, ...), unlike every other page here. tmpl is built once in New,
+// since resolving its {{FOOTER}} marker needs the build version/commit only
+// New receives.
+func statusHandler(rec *status.Recorder, tmpl *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-		if err := pageTemplate.Execute(w, rec.Snapshot()); err != nil {
+		if err := tmpl.Execute(w, rec.Snapshot()); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
 }
-
-// pageTemplate is the status page served at GET / (see web/status.html) —
-// the one page here that needs server-side templating (StartedAt, Runs,
-// Results, ...), unlike every other page in this package. renderPage
-// splices in the shared CSS/JS partials the same way it does for the static
-// pages; the {{.Field}}/{{range}}/... actions that remain afterward are
-// then parsed as an html/template, once, at package init.
-var pageTemplate = template.Must(template.New("status").Parse(renderPage("status.html")))

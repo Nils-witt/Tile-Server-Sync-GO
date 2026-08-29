@@ -50,6 +50,14 @@ a:hover { text-decoration: underline; }
 
 main { max-width: 64rem; margin: 0 auto; padding: 1.5rem; }
 
+.site-footer {
+  max-width: 64rem; margin: 1rem auto 0; padding: 1rem 1.5rem 1.5rem;
+  border-top: 1px solid var(--border); color: var(--text-muted);
+  font-size: 0.78rem; text-align: center;
+}
+.site-footer a { color: var(--text-muted); text-decoration: underline; }
+.site-footer a:hover { color: var(--accent); }
+
 .tabs { display: flex; gap: 0.2rem; border-bottom: 1px solid var(--border); margin-bottom: 1.1rem; overflow-x: auto; }
 .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; padding: 0.6rem 1rem; font: inherit; font-size: 0.88rem; font-weight: 500; color: var(--text-muted); cursor: pointer; white-space: nowrap; border-radius: 0; }
 .tab-btn:hover { color: var(--text); }

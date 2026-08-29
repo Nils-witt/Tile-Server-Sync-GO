@@ -238,7 +238,7 @@ func startWebServer(
 	deleteMapOverlays func(context.Context, config.MapTarget) error,
 ) (stop func()) {
 	srv := webserver.New(
-		addr, rec, cfgDB, webServer, reload, syncMap, deleteMapObjects,
+		addr, rec, cfgDB, webServer, version, commit, reload, syncMap, deleteMapObjects,
 		createMapOverlays, updateMapOverlays, deleteMapOverlays,
 	)
 
