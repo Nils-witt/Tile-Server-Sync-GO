@@ -1,4 +1,3 @@
-
 :root {
   --bg: #f6f7f8; --card: #ffffff; --border: #e1e3e6; --border-strong: #c7cad0;
   --text: #1a1a1a; --text-muted: #666; --accent: #1a7f37; --accent-dark: #146029;
@@ -11,7 +10,7 @@
 /* Dark palette: applied when the OS prefers dark and the user hasn't
    explicitly picked light, or when the user has explicitly picked dark
    (data-theme, set by the topbar toggle and persisted in localStorage —
-   see theme_init.js/theme_toggle.js). */
+   see ThemeContext.tsx). */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #14161a; --card: #1c1f24; --border: #2c3038; --border-strong: #3a3f47;
@@ -31,6 +30,7 @@
   --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 1px 8px rgba(0,0,0,0.25);
 }
 * { box-sizing: border-box; }
+html, body, #root { height: 100%; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   margin: 0; background: var(--bg); color: var(--text); line-height: 1.45;
@@ -47,6 +47,7 @@ a:hover { text-decoration: underline; }
 .topbar nav { display: flex; gap: 1.25rem; font-size: 0.9rem; }
 .topbar nav a { color: var(--text-muted); font-weight: 500; padding: 0.3rem 0; }
 .topbar nav a.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+.topbar #account-nav { display: flex; align-items: center; gap: 0.6rem; }
 
 main { max-width: 64rem; margin: 0 auto; padding: 1.5rem; }
 
@@ -86,7 +87,7 @@ td .sync-map-btn { padding: 0.25rem 0.6rem; font-size: 0.78rem; }
 .badge.ok { background: var(--ok-bg); color: var(--accent-dark); }
 .badge.err { background: var(--danger-bg); color: var(--danger); }
 
-pre.log { background: #111418; color: #d8dee3; padding: 1rem; border-radius: var(--radius-sm); overflow-x: auto; max-height: 50vh; font-size: 0.82rem; margin: 0.6rem 0 0; }
+pre.log { background: #111418; color: #d8dee3; padding: 1rem; border-radius: var(--radius-sm); overflow-x: auto; max-height: 50vh; font-size: 0.82rem; margin: 0.6rem 0 0; white-space: pre-wrap; }
 
 details.log-card > summary { cursor: pointer; font-weight: 600; font-size: 0.9rem; list-style: none; }
 details.log-card > summary::-webkit-details-marker { display: none; }
@@ -123,9 +124,9 @@ button:disabled { opacity: 0.6; cursor: default; }
 }
 .theme-toggle.standalone { position: fixed; top: 0.9rem; right: 1.5rem; }
 
-#msg.banner { padding: 0.7rem 1rem; border-radius: var(--radius-sm); margin-bottom: 1.1rem; display: none; font-size: 0.9rem; }
-#msg.banner.ok { display: block; background: var(--ok-bg); color: var(--accent-dark); }
-#msg.banner.err { display: block; background: var(--danger-bg); color: var(--danger); white-space: pre-wrap; }
+.banner { padding: 0.7rem 1rem; border-radius: var(--radius-sm); margin-bottom: 1.1rem; font-size: 0.9rem; }
+.banner.ok { background: var(--ok-bg); color: var(--accent-dark); }
+.banner.err { background: var(--danger-bg); color: var(--danger); white-space: pre-wrap; }
 
 .hint { color: var(--text-muted); font-size: 0.8rem; margin: 0.2rem 0 0; }
 
@@ -142,6 +143,9 @@ details.map-card[open] > summary::before { transform: rotate(90deg); }
 details.map-card .map-body { padding: 0.2rem 0.9rem 0.9rem; }
 
 .actions-row { display: flex; gap: 0.6rem; margin-top: 1.4rem; }
+
+.center-page { max-width: 22rem; margin: 3.5rem auto 0; padding: 0 1rem; }
+.center-page.wide { max-width: 24rem; }
 
 @media (max-width: 40rem) {
   main { padding: 1rem; }
