@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -29,48 +28,24 @@ func currentUser(ctx context.Context) (*configdb.User, bool) {
 	return u, ok
 }
 
-// setupGate wraps the whole mux: while no account exists yet, every request
-// except /setup itself is redirected there; once at least one account
-// exists, /setup redirects to /login instead of ever rendering again. A
-// UserCount error fails toward "proceed to normal auth" (requireUser will
-// then simply reject the missing/invalid session) rather than either
-// bypassing setup or blocking the entire server on a transient DB hiccup.
-func setupGate(cfgDB *configdb.Store, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n, err := cfgDB.UserCount(r.Context())
-		if err != nil {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		switch {
-		case n == 0 && r.URL.Path != "/setup":
-			http.Redirect(w, r, "/setup", http.StatusSeeOther)
-		case n > 0 && r.URL.Path == "/setup":
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-		default:
-			next.ServeHTTP(w, r)
-		}
-	})
-}
-
 // requireUser resolves the session cookie to a user before calling next,
-// storing the user in the request context (see currentUser). page controls
-// how a missing/invalid session is reported: true redirects to
-// /login?next=<original path> (for browser-rendered pages), false writes a
-// 401 JSON body (for the fetch-driven JSON API).
-func requireUser(cfgDB *configdb.Store, page bool) func(http.HandlerFunc) http.HandlerFunc {
+// storing the user in the request context (see currentUser). Every route in
+// this package is JSON-only (the frontend is a client-routed SPA — see
+// spa.go — with no server-rendered page left to redirect), so a missing/
+// invalid session always gets a 401 JSON body; the SPA itself decides
+// whether to navigate to /login based on that.
+func requireUser(cfgDB *configdb.Store) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie(sessionCookieName)
 			if err != nil {
-				denyUnauthenticated(w, r, page)
+				writeJSON(w, http.StatusUnauthorized, errorJSON("not logged in"))
 				return
 			}
 
 			user, err := cfgDB.SessionUser(r.Context(), cookie.Value)
 			if err != nil {
-				denyUnauthenticated(w, r, page)
+				writeJSON(w, http.StatusUnauthorized, errorJSON("not logged in"))
 				return
 			}
 
@@ -79,28 +54,16 @@ func requireUser(cfgDB *configdb.Store, page bool) func(http.HandlerFunc) http.H
 	}
 }
 
-func denyUnauthenticated(w http.ResponseWriter, r *http.Request, page bool) {
-	if page {
-		next := url.QueryEscape(r.URL.RequestURI())
-		http.Redirect(w, r, "/login?next="+next, http.StatusSeeOther)
-
-		return
-	}
-
-	writeJSON(w, http.StatusUnauthorized, errorJSON("not logged in"))
-}
-
 // requirePermission composes requireUser with a check of the logged-in
-// user's Permissions, denying with a 403 (page: plain-text error, api: JSON)
-// if check returns false.
+// user's Permissions, denying with a 403 JSON body if check returns false.
 func requirePermission(
-	cfgDB *configdb.Store, page bool, check func(configdb.Permissions) bool,
+	cfgDB *configdb.Store, check func(configdb.Permissions) bool,
 ) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
-		return requireUser(cfgDB, page)(func(w http.ResponseWriter, r *http.Request) {
+		return requireUser(cfgDB)(func(w http.ResponseWriter, r *http.Request) {
 			user, _ := currentUser(r.Context())
 			if !check(user.Permissions) {
-				denyForbidden(w, page)
+				writeJSON(w, http.StatusForbidden, errorJSON("forbidden"))
 				return
 			}
 
@@ -111,12 +74,12 @@ func requirePermission(
 
 // requireSuperuser composes requireUser with an IsSuperuser check, the same
 // way requirePermission checks a Permissions flag.
-func requireSuperuser(cfgDB *configdb.Store, page bool) func(http.HandlerFunc) http.HandlerFunc {
+func requireSuperuser(cfgDB *configdb.Store) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
-		return requireUser(cfgDB, page)(func(w http.ResponseWriter, r *http.Request) {
+		return requireUser(cfgDB)(func(w http.ResponseWriter, r *http.Request) {
 			user, _ := currentUser(r.Context())
 			if !user.IsSuperuser {
-				denyForbidden(w, page)
+				writeJSON(w, http.StatusForbidden, errorJSON("forbidden"))
 				return
 			}
 
@@ -125,48 +88,52 @@ func requireSuperuser(cfgDB *configdb.Store, page bool) func(http.HandlerFunc) h
 	}
 }
 
-func denyForbidden(w http.ResponseWriter, page bool) {
-	if page {
-		http.Error(w, "forbidden: you don't have permission to view this page", http.StatusForbidden)
-		return
-	}
-
-	writeJSON(w, http.StatusForbidden, errorJSON("forbidden"))
-}
-
-// loginRequest/loginResponse are the JSON shapes for POST /login when called
-// via fetch; the login page also supports a plain HTML form post (no
-// JavaScript required to log in).
+// loginResponse is the JSON shape for POST /api/login and POST /api/setup.
 type loginResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-// pageGetPostHandler serves html on GET and delegates to handlePost on POST,
-// 405-ing any other method — the shared shape behind both loginHandler and
-// setupHandler.
-func pageGetPostHandler(html string, handlePost http.HandlerFunc) http.HandlerFunc {
+// setupStatusResponse is what GET /api/setup-status returns: whether the
+// SPA should route to /setup (no account exists yet) instead of /login.
+type setupStatusResponse struct {
+	NeedsSetup bool `json:"needsSetup"`
+}
+
+// setupStatusAPIHandler serves GET /api/setup-status, deliberately
+// unauthenticated like /api/login and /api/sso/status — it's what the SPA
+// calls before any session exists to decide whether to render /setup or
+// /login. A UserCount error fails toward "setup not needed" (normal auth
+// then simply rejects the missing/invalid session) rather than either
+// bypassing setup or blocking the whole app on a transient DB hiccup.
+func setupStatusAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(html))
-		case http.MethodPost:
-			handlePost(w, r)
-		default:
-			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
 		}
+
+		n, err := cfgDB.UserCount(r.Context())
+		writeJSON(w, http.StatusOK, setupStatusResponse{NeedsSetup: err == nil && n == 0})
 	}
 }
 
 func loginHandler(cfgDB *configdb.Store) http.HandlerFunc {
-	return pageGetPostHandler(loginPageHTML, func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
 		handleLoginPost(w, r, cfgDB)
-	})
+	}
 }
 
 func handleLoginPost(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store) {
-	username, password, next, err := readLoginCredentials(w, r)
+	username, password, err := readLoginCredentials(w, r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, loginResponse{Error: err.Error()})
 		return
@@ -188,37 +155,31 @@ func handleLoginPost(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Sto
 
 	logSecurityEvent(r, cfgDB, "login", user.Username, "")
 	setSessionCookie(w, r, token, expiresAt)
-	writeJSON(w, http.StatusOK, map[string]string{"redirect": safeNext(next)})
+	writeJSON(w, http.StatusOK, meResponse{Username: user.Username, IsSuperuser: user.IsSuperuser, Permissions: user.Permissions})
 }
 
-// readLoginCredentials accepts either a JSON body ({username,password,next})
-// or an HTML form post, so the login page works both with and without its
-// own JavaScript.
-func readLoginCredentials(w http.ResponseWriter, r *http.Request) (username, password, next string, err error) {
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		var req struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-			Next     string `json:"next"`
-		}
-
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-			return "", "", "", errors.New("decode request: " + err.Error())
-		}
-
-		return req.Username, req.Password, req.Next, nil
+// readLoginCredentials decodes a JSON {username,password} body — the SPA is
+// the only caller, unlike the old server-rendered login page which also had
+// to support a plain HTML form post for no-JavaScript use.
+func readLoginCredentials(w http.ResponseWriter, r *http.Request) (username, password string, err error) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
 	}
 
-	if err := r.ParseForm(); err != nil {
-		return "", "", "", errors.New("parse form: " + err.Error())
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		return "", "", errors.New("decode request: " + err.Error())
 	}
 
-	return r.FormValue("username"), r.FormValue("password"), r.FormValue("next"), nil
+	return req.Username, req.Password, nil
 }
 
 // safeNext returns next if it's a same-site relative path (starts with "/"
 // but not "//", which browsers treat as protocol-relative and could send a
-// logged-in user off-site), or "/" otherwise.
+// logged-in user off-site), or "/" otherwise. Only the SSO redirect flow
+// (sso_login.go) still needs this — the local-login path above no longer
+// carries a "next" through a redirect at all, since the SPA itself already
+// knows what page it was on.
 func safeNext(next string) string {
 	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
 		return "/"
@@ -276,14 +237,21 @@ func logoutHandler(cfgDB *configdb.Store) http.HandlerFunc {
 		}
 
 		clearSessionCookie(w, r)
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	}
 }
 
 func setupHandler(cfgDB *configdb.Store) http.HandlerFunc {
-	return pageGetPostHandler(setupPageHTML, func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
 		handleSetupPost(w, r, cfgDB)
-	})
+	}
 }
 
 // allPermissions is what the very first account is created with: there's no
@@ -297,28 +265,30 @@ func allPermissions() configdb.Permissions {
 }
 
 func handleSetupPost(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store) {
-	// setupGate already ensures this handler only runs while the users table
-	// is empty, but re-check here to close the race between two browsers
-	// both loading /setup before either has submitted.
+	// Re-checked here (not just relied on via GET /api/setup-status, which
+	// the SPA uses only to decide which page to render) to close the race
+	// between two browsers both loading /setup before either has submitted.
 	if n, err := cfgDB.UserCount(r.Context()); err != nil || n > 0 {
 		writeJSON(w, http.StatusConflict, loginResponse{Error: "setup already completed"})
 		return
 	}
 
-	if err := r.ParseForm(); err != nil {
-		writeJSON(w, http.StatusBadRequest, loginResponse{Error: "parse form: " + err.Error()})
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, loginResponse{Error: "decode request: " + err.Error()})
 		return
 	}
 
-	username := r.FormValue("username")
-	password := r.FormValue("password")
-
-	if username == "" || password == "" {
+	if req.Username == "" || req.Password == "" {
 		writeJSON(w, http.StatusBadRequest, loginResponse{Error: "username and password are required"})
 		return
 	}
 
-	user, err := cfgDB.CreateUser(r.Context(), username, password, allPermissions(), true)
+	user, err := cfgDB.CreateUser(r.Context(), req.Username, req.Password, allPermissions(), true)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, loginResponse{Error: err.Error()})
 		return
@@ -334,11 +304,12 @@ func handleSetupPost(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Sto
 
 	logSecurityEvent(r, cfgDB, "login", user.Username, "")
 	setSessionCookie(w, r, token, expiresAt)
-	writeJSON(w, http.StatusOK, map[string]string{"redirect": "/"})
+	writeJSON(w, http.StatusOK, meResponse{Username: user.Username, IsSuperuser: user.IsSuperuser, Permissions: user.Permissions})
 }
 
-// meResponse is what GET /api/me returns: enough for every page's script to
-// decide what to show/hide for the logged-in user.
+// meResponse is what GET /api/me (and successful POST /api/login,
+// /api/setup) return: enough for the SPA to decide what to show/hide for the
+// logged-in user.
 type meResponse struct {
 	Username    string               `json:"username"`
 	IsSuperuser bool                 `json:"isSuperuser"`

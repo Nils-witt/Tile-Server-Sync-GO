@@ -15,21 +15,27 @@ API described in [`openapi.yaml`](https://github.com/Nils-witt/Tileserve-GO/blob
 ## Commands
 
 ```sh
-go build -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO   # build
+cd frontend && npm ci && npm run build && cd ..   # build the SPA into frontend/dist (embedded — see below)
+go build -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO   # build (needs frontend/dist to exist first — see below)
 go run ./cmd/Tile-Server-Sync-GO -config config.yaml     # run (config.yaml is git-ignored; copy config.example.yaml)
                                         # config.yaml is now just a small bootstrap file (webServer +
                                         # configDb); api/database/maps (each with its own interval)
-                                        # are entered via /config
+                                        # are entered via the SPA's /config page
 go vet ./...                           # vet
 golangci-lint run                      # lint (see .golangci.yml — extensive linter set enabled)
 govulncheck ./...                      # vulnerability scan
 ```
 
 Both `golangci-lint run` and `govulncheck ./...` run in the Husky `pre-commit` hook
-(`.husky/pre-commit`) — expect them to run on every commit.
+(`.husky/pre-commit`) — expect them to run on every commit. Neither needs a real frontend build
+first (see the `frontend` bullet below for why a bare `go build`/`go vet` still succeeds without
+one); the hook doesn't build the frontend itself.
 
 There is no Go test suite yet (`go test ./...` will report "no test files"). The root
-`package.json`/`npm` setup exists only to drive Husky; it is not a Node project.
+`package.json`/`npm` setup exists only to drive Husky; it is not a Node project — the actual
+frontend lives in `frontend/` as its own npm project (`frontend/package.json`), see below. In
+`frontend/`, `npm run build` runs `tsc -b && vite build`; `npx oxlint` lints it (also warns-only in
+CI, doesn't fail the build).
 
 ## Architecture
 
@@ -100,34 +106,71 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   exchanges username/password for a bearer token; `SetToken()` bypasses login when a token is
   already known. `GeoObjects(mapID, version)` fetches and JSON-decodes one map/version's objects
   (`GeoObject` struct mirrors the API's schema exactly — field-for-field, including JSON tags).
-- **`internal/webserver`** — besides the status page (`/`), serves a config editor at `/config`
-  (HTML+vanilla JS, no build step, sections split into tabs — API / Database / Maps / SSO) backed
-  by a REST-shaped JSON API, all registered in `webserver.go` using Go 1.22+ `http.ServeMux`'s
-  native `"METHOD /path/{param}"` patterns (a wrong method on a registered path gets an automatic
-  405 with an `Allow` header from the mux itself, not a per-handler check) — every route's required
-  permission is declared right at its `mux.HandleFunc` call, not hidden in a handler. The one route
-  needing care around this: the status page is registered as `"GET /{$}"` (exact-root-only), not a
-  bare `"/"` — a bare `"/"` is a catch-all subtree pattern that would match *every* unmatched
-  method on *every other* path too, silently suppressing the mux's automatic 405 for the whole
-  `/api/...` family (a bug caught and fixed during the REST restructuring below — see
-  `statusHandler`'s doc comment).
+- **`frontend`** — the UI: a Vite + React + TypeScript SPA (client-routed with `react-router-dom`),
+  entirely separate from the root `package.json`/Husky setup (its own `frontend/package.json`,
+  `node_modules`, lockfile). Routes: `/` (status), `/config/{api,database,maps,sso}` (tabs, each its
+  own route rather than the old hash-fragment tab switcher), `/users`, `/security-log`, `/login`,
+  `/setup` — all in `frontend/src/pages`. `frontend/src/auth/AuthContext.tsx` fetches `GET
+  /api/me` + `GET /api/setup-status` once on load; `App.tsx`'s `AuthGate` is what the old server-side
+  `setupGate`/`requireUser(page=true)` redirects (see "Authentication & permissions" below) turned
+  into — it client-side-redirects to `/setup`/`/login`/`/` based on those two calls plus the current
+  route, instead of the server ever 302ing a page request. Per-route permission checks
+  (`frontend/src/auth/guards.tsx`'s `RequirePermission`/`RequireSuperuser`) render a plain
+  "forbidden" message in place of a page the logged-in user lacks the permission for — a UX nicety
+  only; every actual enforcement is still the server's `requirePermission`/`requireSuperuser` on each
+  API call. `frontend/src/api/client.ts` + `types.ts` are the one place that knows every JSON DTO
+  shape `internal/webserver` sends/expects — keep them in sync by hand when a Go DTO's fields change,
+  there's no code generation between them.
+
+  Building it (`npm ci && npm run build` inside `frontend/`, or `npm run dev` for a live-reloading
+  dev server that proxies `/api` and `/login/sso` to a separately-running backend — see
+  `vite.config.ts`'s `VITE_BACKEND` env var, default `http://localhost:8080`) produces
+  `frontend/dist`, embedded into the Go binary by `frontend/embed.go`'s `//go:embed all:dist`
+  (`frontend.Dist`) and served by `internal/webserver/spa.go` — see that bullet below. `frontend/dist`
+  is git-ignored *except* for a force-added `frontend/dist/index.html` placeholder (a plain "run npm
+  run build" message) kept just so `go:embed`, which needs at least one real file to match at compile
+  time, doesn't fail a bare `go build`/`go vet`/`golangci-lint run` for someone who hasn't run the
+  frontend build yet — CI (`.github/workflows/ci.yml`'s `frontend` job) and GoReleaser
+  (`.goreleaser.yaml`'s `before.hooks`) always build the real thing first. Because that placeholder is
+  a tracked file, running a real `npm run build` locally leaves it showing as modified in `git
+  status` — expected, don't commit that back unless you're deliberately updating the placeholder
+  itself.
+- **`internal/webserver`** — a JSON API only (`internal/webserver/*.go`, no HTML templates or
+  server-rendered pages of any kind anymore) plus `spa.go`'s static-file server for the `frontend`
+  bullet's build output, all registered in `webserver.go` using Go 1.22+ `http.ServeMux`'s native
+  `"METHOD /path/{param}"` patterns (a wrong method on a registered path gets an automatic 405 with
+  an `Allow` header from the mux itself, not a per-handler check) — every route's required permission
+  is declared right at its `mux.HandleFunc` call, not hidden in a handler. `spa.go`'s `spaHandler` is
+  registered as `"GET /"` (a *method-qualified* catch-all, not a bare `"/"`) last, so every
+  `/api/...` pattern above still wins for the paths it owns: a bare `"/"` would match every
+  unmatched *method* on every other path too, silently suppressing the mux's automatic 405 for the
+  whole `/api/...` family. That same conflict rule is also why `/login/sso` and
+  `/login/sso/callback` (real browser redirects for the OIDC dance, not JSON — see "SSO" below) had
+  to move from a bare, all-methods pattern to `"GET /login/sso"`/`"GET /login/sso/callback"` once
+  `spaHandler`'s `"GET /"` catch-all existed: `net/http.ServeMux.HandleFunc` *panics* at
+  registration time on two patterns where neither dominates the other on both the method and path
+  dimensions (a bare pattern is broader on method but narrower on path than `"GET /"`, which is the
+  reverse) — see `webserver.go`'s comment at the `spaHandler` registration for the exact rule.
+  `spaHandler` itself: a request naming a real file under the embedded `frontend/dist` (e.g.
+  `/assets/index-<hash>.js`, long-cached since Vite content-hashes those names) is served as that
+  file; anything else — `/`, `/config/maps`, a hard-reload on any client-side route — falls back to
+  `index.html` so `react-router` (running client-side) can render it.
 
   `GET /api/config` (`internal/webserver/config.go`) returns the whole stored config as a bundle
-  (`{config}`, secrets redacted — see `redactSecrets`; there is no accompanying raw-YAML
-  representation, removed along with `POST /api/config/raw`), reading/writing a `*configdb.Store`
-  instead of a file path; an empty/unconfigured database is not
-  an error, so the structured form always renders (blank on a fresh install). The API and Database
-  tabs are each their own sub-resource — `GET`/`PUT /api/config/api` and `GET`/`PUT
-  /api/config/database` — as is SSO (`GET`/`PUT /api/config/sso`, `internal/webserver/sso.go`). A
-  `PUT` loads the currently stored config, replaces just that one section, and saves — deliberately
-  *not* gated on `Config.Validate()` passing for the whole merged config (see `finishConfigSave`'s
-  doc comment in `config.go`), since that would make it impossible to ever save a single tab during
-  initial setup (each tab alone is always "incomplete"). Instead every save calls `reload` (see
-  below) immediately afterward and reports whether the *whole* config was valid enough to apply
-  live via the response's `applied`/`applyError` fields — the same mechanism already used for a
-  valid-but-unreachable API/database. `webServer.enabled`/`address` have no inputs in the config
-  page at all (removed entirely, not just disabled) since changing them isn't possible through this
-  API and always needs a process restart — see below.
+  (`{config}`, secrets redacted — see `redactSecrets`), reading/writing a `*configdb.Store` instead
+  of a file path; an empty/unconfigured database is not an error, so the SPA's structured form
+  always has something to render (blank on a fresh install). The API and Database tabs are each
+  their own sub-resource — `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database` — as is
+  SSO (`GET`/`PUT /api/config/sso`, `internal/webserver/sso.go`). A `PUT` loads the currently stored
+  config, replaces just that one section, and saves — deliberately *not* gated on `Config.Validate()`
+  passing for the whole merged config (see `finishConfigSave`'s doc comment in `config.go`), since
+  that would make it impossible to ever save a single tab during initial setup (each tab alone is
+  always "incomplete"). Instead every save calls `reload` (see below) immediately afterward and
+  reports whether the *whole* config was valid enough to apply live via the response's
+  `applied`/`applyError` fields — the same mechanism already used for a valid-but-unreachable
+  API/database. `webServer.enabled`/`address` have no inputs in the config page at all (removed
+  entirely, not just disabled) since changing them isn't possible through this API and always needs
+  a process restart — see below.
 
   The Maps tab is not a config section at all but a first-class CRUD resource
   (`internal/webserver/maps.go`): `GET`/`POST /api/maps` (collection) and `GET`/`PUT`/`DELETE
@@ -144,10 +187,17 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   below), a map added via `POST /api/maps` starts syncing almost immediately rather than waiting
   out `runLoop`'s current sleep.
 
-  A `/users` page (superuser-only) manages accounts via `GET`/`POST /api/users` and
-  `GET`/`PUT`/`PATCH`/`DELETE /api/users/{id}`, and a `/security-log` page (superuser-only, backed
-  by `GET /api/security-log`) shows the audit trail — see "Authentication & permissions" below for
-  how every route in this package is now gated, and for the security log itself.
+  `GET /api/status` (`status_api.go`) is the status page's data source — a JSON version of
+  `status.Recorder.Snapshot()` (timestamps as RFC3339 strings), polled by the SPA every 10s to match
+  the old server-rendered page's `<meta http-equiv="refresh" content="10">`. `GET /api/version`
+  (also `status_api.go`, deliberately unauthenticated since the footer it feeds is shown on
+  `/login`/`/setup` too) replaces the old build-time-spliced `{{FOOTER}}` template marker with a
+  runtime call.
+
+  User management (`GET`/`POST /api/users`, `GET`/`PUT`/`PATCH`/`DELETE /api/users/{id}`, superuser
+  only) and the security log (`GET /api/security-log`, superuser only) are otherwise unchanged from
+  before the SPA rewrite — see "Authentication & permissions" below for how every route in this
+  package is gated, and for the security log itself.
 - **`internal/store`** — owns the MariaDB schema (`EnsureSchema`, idempotent
   `CREATE TABLE IF NOT EXISTS`) and writes (`UpsertGeoObjects`, one transaction per call, batched
   `INSERT ... ON DUPLICATE KEY UPDATE` keyed on `uuid`). Depends on `internal/tileserve` for the
@@ -176,9 +226,13 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
 
 ### Authentication & permissions
 
-Every route the web server serves requires a logged-in account — there is no public route
-anymore, including the status page. Accounts live in `configdb`'s `users`/`sessions` tables (see
-above) and are managed at `/users` (superuser-only, backed by `/api/users`, `/api/users/{id}`).
+Every API route the web server serves requires a logged-in account — there is no public route
+anymore, including status (`/api/status`). `internal/webserver/spa.go`'s static-file serving is the
+one exception (see the `internal/webserver` bullet above): the SPA shell itself is always served
+regardless of session, since it's the SPA's own `AuthGate` (see the `frontend` bullet above) that
+now does what server-side page redirects used to. Accounts live in `configdb`'s `users`/`sessions`
+tables (see above) and are managed at `/users` (superuser-only, backed by `/api/users`,
+`/api/users/{id}`).
 
 Each account has seven independent boolean permissions (`configdb.Permissions`): `view_status`,
 `trigger_sync`, `view_config`, and four config-editing permissions — `edit_config_api`,
@@ -222,8 +276,9 @@ discovery document (`github.com/coreos/go-oidc/v3/oidc`) and rebuilds the `oauth
 (`golang.org/x/oauth2`) fresh on every `/login/sso` and `/login/sso/callback` request, unlike
 `runtime.reload`'s cached `{cfg, client, db}` — SSO logins are infrequent enough (interactive,
 human-driven) that the extra discovery round-trip per attempt is cheap, and this avoids a second
-live-reload path to maintain. The login page's unauthenticated `GET /api/sso/status` tells its
-script whether to render an SSO button and with what label, without exposing provider details.
+live-reload path to maintain. The unauthenticated `GET /api/sso/status` tells
+`frontend/src/pages/LoginPage.tsx` whether to render an SSO button and with what label, without
+exposing provider details.
 
 `GET /login/sso` starts the authorization-code-with-PKCE flow (state/nonce/verifier held in a
 short-lived `gso_sso_flow` cookie, mirroring the session cookie's `HttpOnly`/`SameSite=Lax`/
@@ -237,21 +292,24 @@ random, never-revealed password. An SSO-provisioned account is never a superuser
 that stays a manual grant via `/users`, exactly like every other account-creation path.
 
 `internal/webserver/auth.go` implements this: `requireUser`/`requirePermission`/`requireSuperuser`
-are `http.HandlerFunc` wrappers, parameterized by `page bool` — `true` redirects an unauthenticated/
-unauthorized browser request to `/login` (or 403s with a plain-text page), `false` writes a JSON
-401/403 for the fetch-driven API. Sessions are a random token (in an `HttpOnly`, `SameSite=Lax`
-cookie — `Secure` only when the request arrived over TLS, since the server is still meant to work
-unencrypted on a trusted network) resolved via `configdb.Store.SessionUser`, which only ever sees
-the token's SHA-256 hash.
+are `http.HandlerFunc` wrappers that always write a JSON 401/403 (there's no more `page bool`
+branch redirecting a browser request server-side — every route here is JSON-only now that the SPA
+owns all page routing; see the `frontend` bullet above). Sessions are a random token (in an
+`HttpOnly`, `SameSite=Lax` cookie — `Secure` only when the request arrived over TLS, since the
+server is still meant to work unencrypted on a trusted network) resolved via
+`configdb.Store.SessionUser`, which only ever sees the token's SHA-256 hash.
 
-While the `users` table is empty (a fresh install), `setupGate` (wrapping the whole mux) redirects
-every request to a one-time `/setup` page instead; the account created there always gets every
-permission plus superuser, since there's no one else yet to have granted anything more selectively.
-Once at least one account exists, `/setup` redirects to `/login` forever after. `/api/me` returns
-the logged-in user's username/permissions/superuser flag, and every page's shared inline script
-(`accountNavJS` in `shared_script.go`) calls it to render the topbar's account/logout control and
-hide nav links / disable form sections the user can't use — purely a UX nicety, since every actual
-enforcement happens server-side per route.
+While the `users` table is empty (a fresh install), `GET /api/setup-status` reports `{needsSetup:
+true}` and the SPA's `AuthGate` routes to `/setup` instead of `/login`; the account created there
+(via `POST /api/setup`, which still re-checks `UserCount` itself to close the race between two
+browsers both loading `/setup` before either submits) always gets every permission plus superuser,
+since there's no one else yet to have granted anything more selectively. `POST /api/login` and
+`POST /api/setup` both return the same `meResponse` shape `GET /api/me` does, so the SPA doesn't
+need a separate round trip right after either succeeds. `/api/me` returns the logged-in user's
+username/permissions/superuser flag; `frontend/src/components/TopBar.tsx` is what the old shared
+`accountNavJS` inline script became — it renders the topbar's account/logout control and hides nav
+links the user can't use, purely a UX nicety, since every actual enforcement happens server-side
+per route.
 
 `cmd/Tile-Server-Sync-GO/main.go`'s `run(ctx, configPath)` orchestrates the whole flow and is the place to look first when
 tracing behavior end-to-end: load the bootstrap file → open `configdb` → attempt an initial

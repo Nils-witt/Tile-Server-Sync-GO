@@ -9,8 +9,42 @@ permissions:
   contents: read
 
 jobs:
+  frontend:
+    name: Frontend build & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Type-check & build
+        working-directory: frontend
+        run: npm run build
+
+      - name: Lint
+        working-directory: frontend
+        run: npx oxlint
+
+      # The Go build below (and every other job in this file) embeds
+      # frontend/dist via frontend/embed.go — upload it so "build" doesn't
+      # have to rebuild the frontend a second time.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
   build:
     name: Build & vet
+    needs: frontend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -18,6 +52,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: frontend-dist
+          path: frontend/dist
 
       - name: Build
         run: go build -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO

@@ -77,26 +77,3 @@ func securityLogAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, dtos)
 	}
 }
-
-func securityLogPageHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/security-log" {
-		http.NotFound(w, r)
-		return
-	}
-
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(securityLogPageHTML))
-}
-
-// securityLogPageHTML is served at GET /security-log (see
-// web/security_log.html), reachable only by superusers. Like usersPageHTML,
-// it's a static page driven entirely by a fetch call to /api/security-log,
-// with no server-side templating.
-var securityLogPageHTML = renderPage("security_log.html")

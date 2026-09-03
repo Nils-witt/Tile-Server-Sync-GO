@@ -1,5 +1,6 @@
-// Package webserver exposes a minimal HTTP status page showing sync status
-// and recent log output, backed by an internal/status.Recorder.
+// Package webserver exposes a JSON API (status, config, maps, users,
+// security log, auth) consumed by the frontend package's embedded React SPA
+// (see spa.go), backed by an internal/status.Recorder.
 package webserver
 
 import (
@@ -7,25 +8,23 @@ import (
 	"Tile-Server-Sync-GO/internal/configdb"
 	"Tile-Server-Sync-GO/internal/status"
 	"context"
-	"html/template"
 	"net/http"
-	"strings"
 	"time"
 )
 
-// New builds an *http.Server serving the status page at "/" (with a
-// per-map "Sync" button hitting "POST /api/maps/{id}/sync"), a config editor
-// at "/config" (backed by a JSON API at "/api/config" and its per-section
-// GET/PUT endpoints, plus the "/api/maps" CRUD family for the Maps tab — see
-// config.go and maps.go), a user management page at "/users", and a superuser-only
-// audit trail at "/security-log" (backed by "/api/security-log", see
+// New builds an *http.Server serving the built React SPA (see spa.go) for
+// every browser-navigated route ("/", "/config", "/users", "/security-log",
+// "/login", "/setup", and any client-side sub-route of those), backed by a
+// JSON API under "/api/...": status (api/status), a config editor
+// (api/config and its per-section GET/PUT endpoints, plus the api/maps CRUD
+// family for the Maps tab — see config.go and maps.go), user management
+// (api/users), and a superuser-only audit trail (api/security-log, see
 // security_log.go) recording logins, logouts, user-account changes, and
-// config saves — all gated behind a session-cookie login (see auth.go) and
-// the logged-in user's permissions (see configdb.Permissions). While no
-// account exists yet, every request is
-// redirected to a one-time "/setup" page (setupGate) that creates the first,
-// fully-permissioned superuser account. It does not start listening; call
-// ListenAndServe (typically in a goroutine).
+// config saves. Every API route is gated behind a session-cookie login (see
+// auth.go) and the logged-in user's permissions (see configdb.Permissions);
+// the SPA itself decides what to render based on GET /api/me, GET
+// /api/setup-status, and each request's own 401/403. It does not start
+// listening; call ListenAndServe (typically in a goroutine).
 //
 // A successful config save also calls reload itself, so the running process
 // picks up the change immediately without a separate action — see
@@ -43,96 +42,97 @@ func New(
 	updateMapOverlays func(context.Context, config.MapTarget, config.MapTarget) error,
 	deleteMapOverlays func(context.Context, config.MapTarget) error,
 ) *http.Server {
-	// version/commit (main.go's -ldflags-set build info) aren't known until
-	// New() is called, so the shared copyright footer's {{FOOTER}} marker
-	// (left in every page by renderPage/pageReplacer, see web.go) is
-	// resolved here rather than at package init.
-	footer := buildFooter(version, commit)
-
-	loginPageHTML = strings.Replace(loginPageHTML, "{{FOOTER}}", footer, 1)
-	setupPageHTML = strings.Replace(setupPageHTML, "{{FOOTER}}", footer, 1)
-	configPageHTML = strings.Replace(configPageHTML, "{{FOOTER}}", footer, 1)
-	usersPageHTML = strings.Replace(usersPageHTML, "{{FOOTER}}", footer, 1)
-	securityLogPageHTML = strings.Replace(securityLogPageHTML, "{{FOOTER}}", footer, 1)
-
-	// status.html needs its {{FOOTER}} resolved before html/template parses
-	// it, not after: {{FOOTER}} would otherwise be parsed as an (invalid)
-	// template action rather than left alone the way pageReplacer's own
-	// tokens are (see renderPage/pageReplacer in web.go).
-	statusHTML := strings.Replace(renderPage("status.html"), "{{FOOTER}}", footer, 1)
-	pageTemplate := template.Must(template.New("status").Parse(statusHTML))
-
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/setup", setupHandler(cfgDB))
-	mux.HandleFunc("/login", loginHandler(cfgDB))
-	mux.HandleFunc("/logout", logoutHandler(cfgDB))
-	mux.HandleFunc("GET /api/me", requireUser(cfgDB, false)(meAPIHandler))
+	mux.HandleFunc("POST /api/setup", setupHandler(cfgDB))
+	mux.HandleFunc("GET /api/setup-status", setupStatusAPIHandler(cfgDB))
+	mux.HandleFunc("POST /api/login", loginHandler(cfgDB))
+	mux.HandleFunc("POST /api/logout", logoutHandler(cfgDB))
+	mux.HandleFunc("GET /api/me", requireUser(cfgDB)(meAPIHandler))
+	mux.HandleFunc("GET /api/version", versionAPIHandler(version, commit))
 
-	// SSO login-flow routes are deliberately unauthenticated (like /login
-	// itself): a session doesn't exist yet at the point these are reached.
+	// SSO login-flow routes are deliberately unauthenticated (like
+	// /api/login itself): a session doesn't exist yet at the point these are
+	// reached. Unlike every other route here, they're real browser
+	// navigations/redirects (the OAuth dance), not fetch calls, so they stay
+	// outside /api/... — the SPA just sets window.location to them. Both
+	// handlers already 405 any non-GET method themselves, but they must
+	// still be *registered* as "GET ..." (not a bare, all-methods pattern):
+	// net/http's ServeMux refuses to register a bare "/login/sso" alongside
+	// the catch-all "GET /" registered below for the SPA shell, since
+	// neither pattern would then dominate the other on both the method and
+	// path dimensions (a bare pattern matches every method but this one
+	// exact path; "GET /" matches only GET but every path) — an ambiguity
+	// ServeMux rejects at registration time (panics) rather than resolves.
 	mux.HandleFunc("GET /api/sso/status", ssoStatusAPIHandler(cfgDB))
-	mux.HandleFunc("/login/sso", loginSSOStartHandler(cfgDB))
-	mux.HandleFunc("/login/sso/callback", loginSSOCallbackHandler(cfgDB))
+	mux.HandleFunc("GET /login/sso", loginSSOStartHandler(cfgDB))
+	mux.HandleFunc("GET /login/sso/callback", loginSSOCallbackHandler(cfgDB))
 
-	// "GET /{$}" (exact-root-only), not the bare "/" catch-all subtree
-	// pattern: a bare "/" would match every path/method not otherwise
-	// registered, which — combined with the method-specific "/api/..."
-	// patterns below — would silently suppress net/http's automatic 405
-	// Method Not Allowed handling for all of them (a request with the wrong
-	// method on a registered path would fall through to this handler instead
-	// of getting a 405), turning every wrong-verb request that should 405
-	// into a 404/login-redirect from statusHandler instead.
-	mux.HandleFunc("GET /{$}", requirePermission(cfgDB, true, permViewStatus)(statusHandler(rec, pageTemplate)))
-	mux.HandleFunc("/config", requirePermission(cfgDB, true, permViewConfig)(configPageHandler))
-	mux.HandleFunc("/users", requireSuperuser(cfgDB, true)(usersPageHandler))
-	mux.HandleFunc("/security-log", requireSuperuser(cfgDB, true)(securityLogPageHandler))
+	mux.HandleFunc("GET /api/status", requirePermission(cfgDB, permViewStatus)(statusAPIHandler(rec)))
 
 	// Config: GET /api/config is the whole-config bundle (api/database
-	// sections plus a raw-YAML view — the Maps tab is served by the /api/maps
-	// family below instead). Each section has its own GET (view_config) and
-	// PUT (edit_config_{api,database,sso}) registered separately, so the
+	// sections — the Maps tab is served by the /api/maps family below
+	// instead). Each section has its own GET (view_config) and PUT
+	// (edit_config_{api,database,sso}) registered separately, so the
 	// permission each method requires is visible right here rather than
 	// buried in a per-handler method switch.
-	mux.HandleFunc("GET /api/config", requirePermission(cfgDB, false, permViewConfig)(configAPIHandler(cfgDB, webServer)))
-	mux.HandleFunc("GET /api/config/api", requirePermission(cfgDB, false, permViewConfig)(getAPISectionHandler(cfgDB)))
+	mux.HandleFunc("GET /api/config", requirePermission(cfgDB, permViewConfig)(configAPIHandler(cfgDB, webServer)))
+	mux.HandleFunc("GET /api/config/api", requirePermission(cfgDB, permViewConfig)(getAPISectionHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/config/api",
-		requirePermission(cfgDB, false, permEditConfigAPI)(saveAPISectionHandler(cfgDB, webServer, reload)))
+		requirePermission(cfgDB, permEditConfigAPI)(saveAPISectionHandler(cfgDB, webServer, reload)))
 	mux.HandleFunc("GET /api/config/database",
-		requirePermission(cfgDB, false, permViewConfig)(getDatabaseSectionHandler(cfgDB)))
+		requirePermission(cfgDB, permViewConfig)(getDatabaseSectionHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/config/database",
-		requirePermission(cfgDB, false, permEditConfigDatabase)(saveDatabaseSectionHandler(cfgDB, webServer, reload)))
-	mux.HandleFunc("GET /api/config/sso", requirePermission(cfgDB, false, permViewConfig)(getSSOConfigHandler(cfgDB)))
+		requirePermission(cfgDB, permEditConfigDatabase)(saveDatabaseSectionHandler(cfgDB, webServer, reload)))
+	mux.HandleFunc("GET /api/config/sso", requirePermission(cfgDB, permViewConfig)(getSSOConfigHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/config/sso",
-		requirePermission(cfgDB, false, permEditConfigSSO)(saveSSOConfigHandler(cfgDB)))
+		requirePermission(cfgDB, permEditConfigSSO)(saveSSOConfigHandler(cfgDB)))
 
 	// Maps: a first-class CRUD resource (see maps.go), not a config section —
 	// each map is independently addressable/mutable, so adding or editing one
 	// map no longer requires resubmitting every other configured map.
-	mux.HandleFunc("GET /api/maps", requirePermission(cfgDB, false, permViewConfig)(listMapsAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/maps", requirePermission(cfgDB, permViewConfig)(listMapsAPIHandler(cfgDB)))
 	mux.HandleFunc("POST /api/maps",
-		requirePermission(cfgDB, false, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload, createMapOverlays)))
-	mux.HandleFunc("GET /api/maps/{id}", requirePermission(cfgDB, false, permViewConfig)(getMapAPIHandler(cfgDB)))
+		requirePermission(cfgDB, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload, createMapOverlays)))
+	mux.HandleFunc("GET /api/maps/{id}", requirePermission(cfgDB, permViewConfig)(getMapAPIHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/maps/{id}",
-		requirePermission(cfgDB, false, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload, updateMapOverlays)))
+		requirePermission(cfgDB, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload, updateMapOverlays)))
 	mux.HandleFunc("DELETE /api/maps/{id}",
-		requirePermission(cfgDB, false, permEditConfigMaps)(
+		requirePermission(cfgDB, permEditConfigMaps)(
 			deleteMapAPIHandler(cfgDB, reload, deleteMapObjects, deleteMapOverlays),
 		))
 	mux.HandleFunc("POST /api/maps/{id}/sync",
-		requirePermission(cfgDB, false, permTriggerSync)(syncMapAPIHandler(syncMap)))
+		requirePermission(cfgDB, permTriggerSync)(syncMapAPIHandler(syncMap)))
 
-	mux.HandleFunc("GET /api/users", requireSuperuser(cfgDB, false)(listUsersAPIHandler(cfgDB)))
-	mux.HandleFunc("POST /api/users", requireSuperuser(cfgDB, false)(createUserAPIHandler(cfgDB)))
-	mux.HandleFunc("GET /api/users/{id}", requireSuperuser(cfgDB, false)(getUserAPIHandler(cfgDB)))
-	mux.HandleFunc("PUT /api/users/{id}", requireSuperuser(cfgDB, false)(updateUserAPIHandler(cfgDB)))
-	mux.HandleFunc("PATCH /api/users/{id}", requireSuperuser(cfgDB, false)(updateUserAPIHandler(cfgDB)))
-	mux.HandleFunc("DELETE /api/users/{id}", requireSuperuser(cfgDB, false)(deleteUserAPIHandler(cfgDB)))
-	mux.HandleFunc("GET /api/security-log", requireSuperuser(cfgDB, false)(securityLogAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/users", requireSuperuser(cfgDB)(listUsersAPIHandler(cfgDB)))
+	mux.HandleFunc("POST /api/users", requireSuperuser(cfgDB)(createUserAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/users/{id}", requireSuperuser(cfgDB)(getUserAPIHandler(cfgDB)))
+	mux.HandleFunc("PUT /api/users/{id}", requireSuperuser(cfgDB)(updateUserAPIHandler(cfgDB)))
+	mux.HandleFunc("PATCH /api/users/{id}", requireSuperuser(cfgDB)(updateUserAPIHandler(cfgDB)))
+	mux.HandleFunc("DELETE /api/users/{id}", requireSuperuser(cfgDB)(deleteUserAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/security-log", requireSuperuser(cfgDB)(securityLogAPIHandler(cfgDB)))
+
+	// The SPA shell: registered last (net/http's ServeMux resolves by
+	// pattern specificity regardless of registration order, but the ordering
+	// here mirrors "API routes first, catch-all fallback last" for
+	// readability). "GET /" is a method-qualified subtree wildcard, not a
+	// bare "/" — a bare "/" would match every unmatched *method* too on
+	// every path, which would silently suppress net/http's automatic 405
+	// Method Not Allowed handling for every "/api/..." route above (a wrong
+	// verb on a registered API path falling through to the SPA shell instead
+	// of 405ing). "GET /" only ever competes with a GET request, and every
+	// "/api/..." pattern above is strictly more specific than it for the
+	// paths it actually owns, so those still win for GET too.
+	dist, err := spaFS()
+	if err != nil {
+		panic("webserver: load embedded frontend build: " + err.Error())
+	}
+
+	mux.HandleFunc("GET /", spaHandler(dist))
 
 	return &http.Server{
 		Addr:              addr,
-		Handler:           setupGate(cfgDB, mux),
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 }
@@ -147,18 +147,3 @@ func permEditConfigAPI(p configdb.Permissions) bool { return p.EditConfigAPI }
 func permEditConfigDatabase(p configdb.Permissions) bool { return p.EditConfigDatabase }
 func permEditConfigMaps(p configdb.Permissions) bool     { return p.EditConfigMaps }
 func permEditConfigSSO(p configdb.Permissions) bool      { return p.EditConfigSSO }
-
-// statusHandler serves the status page (see web/status.html) — the one page
-// in this package that needs server-side templating (StartedAt, Runs,
-// Results, ...), unlike every other page here. tmpl is built once in New,
-// since resolving its {{FOOTER}} marker needs the build version/commit only
-// New receives.
-func statusHandler(rec *status.Recorder, tmpl *template.Template) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-		if err := tmpl.Execute(w, rec.Snapshot()); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-	}
-}

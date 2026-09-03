@@ -305,20 +305,3 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func errorJSON(msg string) map[string]string {
 	return map[string]string{"error": msg}
 }
-
-func configPageHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/config" {
-		http.NotFound(w, r)
-		return
-	}
-
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(configPageHTML))
-}

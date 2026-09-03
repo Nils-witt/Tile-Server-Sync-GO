@@ -2,6 +2,14 @@ version: 2
 
 before:
   hooks:
+    # The Go build below embeds frontend/dist via frontend/embed.go, so the
+    # SPA must be built first — go:embed has no way to invoke npm itself.
+    # Top-level `before.hooks` entries are plain argv strings (parsed with
+    # shellwords, no real shell — no `&&`/`cd`), unlike per-build pre/post
+    # hooks, which do support the `cmd`/`dir` map form. `npm --prefix` is
+    # npm's own way to target another directory without needing a shell cd.
+    - npm --prefix frontend ci
+    - npm --prefix frontend run build
     - go mod tidy
 
 builds:
