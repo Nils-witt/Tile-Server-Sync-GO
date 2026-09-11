@@ -53,7 +53,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: frontend/dist
