@@ -36,7 +36,7 @@ jobs:
       # The Go build below (and every other job in this file) embeds
       # frontend/dist via frontend/embed.go — upload it so "build" doesn't
       # have to rebuild the frontend a second time.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist
