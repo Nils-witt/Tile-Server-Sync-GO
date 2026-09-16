@@ -311,9 +311,11 @@ type syncResponse struct {
 // path value on each POST, running that one map's sync immediately
 // (serialized against any concurrent scheduled sync — see
 // runtime.runSyncMaps in main.go) instead of waiting for its next interval
-// tick, and reports how many objects were synced or why it failed. It blocks
-// for as long as the sync takes. This is what the status page's per-map
-// "Sync" button calls. Requires trigger_sync.
+// tick, and reports how many objects were synced or why it failed. This
+// works even for a map with Disabled set — see runtime.runSyncMaps — since
+// Disabled only opts a map out of *automatic* scheduling, not this explicit,
+// user-triggered request. It blocks for as long as the sync takes. This is
+// what the status page's per-map "Sync" button calls. Requires trigger_sync.
 func syncMapAPIHandler(syncMap func(context.Context, string) (int, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")

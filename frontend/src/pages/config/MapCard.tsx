@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import { Banner, type BannerState } from '../../components/Banner'
 import type { MapTarget } from '../../api/types'
@@ -30,12 +30,14 @@ interface Props {
 }
 
 export function MapCard({ initial, persisted: initialPersisted, openByDefault, disabled, onRemoved }: Props) {
+  const disabledCheckboxId = useId()
   const [persisted, setPersisted] = useState(initialPersisted)
   const [id, setId] = useState(initial.id)
   const [name, setName] = useState(initial.name)
   const [versionsText, setVersionsText] = useState((initial.versions || []).join(', '))
   const [interval, setInterval_] = useState(initial.interval)
   const [colsText, setColsText] = useState(staticColumnsText(initial.staticColumns || {}))
+  const [syncDisabled, setSyncDisabled] = useState(initial.disabled)
   const [banner, setBanner] = useState<BannerState | null>(null)
   const [saving, setSaving] = useState(false)
   const [removing, setRemoving] = useState(false)
@@ -46,7 +48,7 @@ export function MapCard({ initial, persisted: initialPersisted, openByDefault, d
   )
 
   const summaryId = name.trim() || id.trim() || '(new map)'
-  const summaryMeta = `${versions.length === 1 ? '1 version' : `${versions.length} versions`} · ${interval.trim() ? `every ${interval.trim()}` : 'one-shot'}`
+  const summaryMeta = `${versions.length === 1 ? '1 version' : `${versions.length} versions`} · ${interval.trim() ? `every ${interval.trim()}` : 'one-shot'}${syncDisabled ? ' · sync disabled' : ''}`
 
   async function handleSave(e: React.MouseEvent) {
     e.preventDefault()
@@ -57,6 +59,7 @@ export function MapCard({ initial, persisted: initialPersisted, openByDefault, d
       versions,
       interval: interval.trim(),
       staticColumns: parseStaticColumns(colsText),
+      disabled: syncDisabled,
     }
 
     setSaving(true)
@@ -128,6 +131,17 @@ export function MapCard({ initial, persisted: initialPersisted, openByDefault, d
 
         <label>Static columns (one key=value per line)</label>
         <textarea rows={3} value={colsText} disabled={disabled} onChange={(e) => setColsText(e.target.value)} />
+
+        <div className="checkbox-row">
+          <input
+            type="checkbox"
+            id={disabledCheckboxId}
+            disabled={disabled}
+            checked={syncDisabled}
+            onChange={(e) => setSyncDisabled(e.target.checked)}
+          />
+          <label htmlFor={disabledCheckboxId}>Disable automatic syncing of this map</label>
+        </div>
 
         <div className="actions-row">
           <button type="button" className="primary" disabled={disabled || saving} onClick={handleSave}>

@@ -79,7 +79,7 @@ func diffDatabase(before, after config.Database) []string {
 }
 
 // diffMapFields compares two config.MapTarget values field by field
-// (name/versions/interval/staticColumns) — used by maps.go's
+// (name/versions/interval/disabled/staticColumns) — used by maps.go's
 // updateMapAPIHandler to log what a PUT /api/maps/{id} actually changed.
 func diffMapFields(old, updated config.MapTarget) []string {
 	var changes []string
@@ -94,6 +94,10 @@ func diffMapFields(old, updated config.MapTarget) []string {
 
 	if old.Interval != updated.Interval {
 		changes = append(changes, fmt.Sprintf("interval %q->%q", old.Interval, updated.Interval))
+	}
+
+	if old.Disabled != updated.Disabled {
+		changes = append(changes, fmt.Sprintf("disabled %v->%v", old.Disabled, updated.Disabled))
 	}
 
 	if !maps.Equal(old.StaticColumns, updated.StaticColumns) {

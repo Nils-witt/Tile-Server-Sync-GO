@@ -35,7 +35,8 @@ var schemaStatements = []string{
 		map_id     TEXT NOT NULL,
 		name       TEXT NOT NULL DEFAULT '',
 		sort_order INTEGER NOT NULL,
-		interval   TEXT NOT NULL DEFAULT ''
+		interval   TEXT NOT NULL DEFAULT '',
+		disabled   INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS map_versions (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,23 +84,22 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		}
 	}
 
-	if err := s.migrateMapsInterval(ctx); err != nil {
-		return err
+	migrations := []func(context.Context) error{
+		s.migrateMapsInterval,
+		s.migrateMapsName,
+		s.migrateMapsDisabled,
+		s.migrateDBSyncOverlays,
+		s.ensureMapsUniqueIndex,
+		s.migrateUsersEditConfigSSO,
 	}
 
-	if err := s.migrateMapsName(ctx); err != nil {
-		return err
+	for _, migrate := range migrations {
+		if err := migrate(ctx); err != nil {
+			return err
+		}
 	}
 
-	if err := s.migrateDBSyncOverlays(ctx); err != nil {
-		return err
-	}
-
-	if err := s.ensureMapsUniqueIndex(ctx); err != nil {
-		return err
-	}
-
-	return s.migrateUsersEditConfigSSO(ctx)
+	return nil
 }
 
 // migrateMapsInterval adds the maps.interval column to a database created by
@@ -140,6 +140,26 @@ func (s *Store) migrateMapsName(ctx context.Context) error {
 
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE maps ADD COLUMN name TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add maps.name column: %w", err)
+	}
+
+	return nil
+}
+
+// migrateMapsDisabled adds the maps.disabled column to a database created
+// before a map could be individually excluded from automatic syncing, the
+// same way migrateMapsInterval backfills maps.interval on an older schema.
+func (s *Store) migrateMapsDisabled(ctx context.Context) error {
+	hasDisabled, err := s.tableHasColumn(ctx, `PRAGMA table_info(maps)`, "disabled")
+	if err != nil {
+		return err
+	}
+
+	if hasDisabled {
+		return nil
+	}
+
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE maps ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add maps.disabled column: %w", err)
 	}
 
 	return nil

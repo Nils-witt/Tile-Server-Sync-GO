@@ -12,7 +12,7 @@ interface Row {
   openByDefault?: boolean
 }
 
-const emptyMap: MapTarget = { id: '', name: '', versions: [], interval: '', staticColumns: {} }
+const emptyMap: MapTarget = { id: '', name: '', versions: [], interval: '', staticColumns: {}, disabled: false }
 
 export function MapsTab() {
   const { me } = useAuth()

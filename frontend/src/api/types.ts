@@ -39,6 +39,7 @@ export interface MapTarget {
   versions: string[]
   interval: string
   staticColumns: Record<string, string>
+  disabled: boolean
 }
 
 export interface WebServerSection {

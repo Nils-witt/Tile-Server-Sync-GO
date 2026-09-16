@@ -24,16 +24,21 @@ func (s *Store) ListMaps(ctx context.Context) ([]config.MapTarget, error) {
 // GetMap returns the single map identified by id (config.MapTarget.ID, not
 // the internal autoincrement row id), or ErrMapNotFound if none matches.
 func (s *Store) GetMap(ctx context.Context, id string) (*config.MapTarget, error) {
-	var mr mapRow
+	var (
+		mr       mapRow
+		disabled int64
+	)
 
-	row := s.db.QueryRowContext(ctx, `SELECT id, map_id, name, interval FROM maps WHERE map_id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, map_id, name, interval, disabled FROM maps WHERE map_id = ?`, id)
 
-	switch err := row.Scan(&mr.rowID, &mr.target.ID, &mr.target.Name, &mr.target.Interval); {
+	switch err := row.Scan(&mr.rowID, &mr.target.ID, &mr.target.Name, &mr.target.Interval, &disabled); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, fmt.Errorf("get map %q: %w", id, ErrMapNotFound)
 	case err != nil:
 		return nil, fmt.Errorf("get map %q: %w", id, err)
 	}
+
+	mr.target.Disabled = disabled != 0
 
 	versions, err := s.loadMapVersions(ctx, mr.rowID)
 	if err != nil {
@@ -67,8 +72,8 @@ func (s *Store) CreateMap(ctx context.Context, m config.MapTarget) (*config.MapT
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO maps (map_id, name, sort_order, interval) VALUES (?, ?, ?, ?)`,
-		m.ID, m.Name, nextOrder, m.Interval)
+		`INSERT INTO maps (map_id, name, sort_order, interval, disabled) VALUES (?, ?, ?, ?, ?)`,
+		m.ID, m.Name, nextOrder, m.Interval, boolToInt(m.Disabled))
 	if err != nil {
 		if isUniqueConstraintErr(err) {
 			return nil, fmt.Errorf("create map %q: %w", m.ID, ErrMapIDTaken)
@@ -118,7 +123,8 @@ func (s *Store) UpdateMap(ctx context.Context, id string, m config.MapTarget) (*
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE maps SET name = ?, interval = ? WHERE id = ?`, m.Name, m.Interval, mapRowID); err != nil {
+		`UPDATE maps SET name = ?, interval = ?, disabled = ? WHERE id = ?`,
+		m.Name, m.Interval, boolToInt(m.Disabled), mapRowID); err != nil {
 		return nil, fmt.Errorf("update map %q: %w", id, err)
 	}
 

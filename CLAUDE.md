@@ -62,13 +62,20 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   the same `webServer.enabled && address == ""` defaulting as `Validate` (shared via
   `WebServer.applyDefault`), and resolves `ConfigDB` (default `"config.db"`) relative to the
   bootstrap file's own directory. `Config.Maps` is a list of `{id, versions[], interval,
-  staticColumns}` entries; a version string may be a real numeric version, the literal `"current"`,
-  or a user-defined alias (see `PUT /maps/{id}/aliases/{alias}` in the tileserve-go API). Each
-  map's own optional `interval` (a Go duration string, parsed by `MapTarget.validateInterval` and
-  read back via `MapTarget.SyncInterval()`) controls how often *that* map re-syncs — there is no
-  longer a global interval; a map with no `interval` syncs once and isn't automatically repeated
-  (see `runLoop` below). Validation requires either `api.token` or both
-  `api.username`/`api.password`.
+  staticColumns, disabled}` entries; a version string may be a real numeric version, the literal
+  `"current"`, or a user-defined alias (see `PUT /maps/{id}/aliases/{alias}` in the tileserve-go
+  API). Each map's own optional `interval` (a Go duration string, parsed by
+  `MapTarget.validateInterval` and read back via `MapTarget.SyncInterval()`) controls how often
+  *that* map re-syncs — there is no longer a global interval; a map with no `interval` syncs once
+  and isn't automatically repeated (see `runLoop` below). `disabled`, if true, opts a map out of
+  *automatic* syncing only — `scheduleTick` (see `runLoop` below) never considers it due, and
+  `runtime.runSync`'s run-once path skips it too — while leaving its stored config untouched and
+  still letting it be synced on demand via its own "Sync" button/`POST /api/maps/{id}/sync`, which
+  passes its ID explicitly rather than relying on scheduling (see `runtime.runSyncMaps`).
+  `Config.Maps` requiring at least one entry was dropped from `Validate` — an empty `maps` list is
+  a valid (if idle) config now, not a validation error, so removing the last map (or none having
+  been added yet on a fresh install) no longer blocks saving/applying the rest of the config.
+  Validation requires either `api.token` or both `api.username`/`api.password`.
 - **`internal/configdb`** — the new SQLite-backed store for everything in `Config` except
   `WebServer`, as a relational schema (not a serialized blob): a singleton `config_scalar` row for
   `api`/`database`'s scalar fields, plus `database_columns`, `maps` (which also holds each map's

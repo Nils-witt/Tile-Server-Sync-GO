@@ -364,14 +364,16 @@ func tick(ctx context.Context, rt *runtime, rec *status.Recorder, lastSync map[s
 }
 
 // scheduleTick computes, in one pass over maps, which map IDs are due to
-// sync right now (a map with no lastSync entry yet is always due, once;
-// after that, a map with a positive Interval is due again once that much
-// time has passed since its last sync, while a map with no Interval is
-// never due again automatically) together with otherWait/haveWait: the
-// shortest remaining time until any *not-due* map with a positive Interval
-// next comes due (haveWait is false if there's no such map — nothing
-// configured yet, every configured map is one-shot or already due, or none
-// has synced yet).
+// sync right now (a disabled map is skipped entirely — never due, never
+// factored into otherWait, and its lastSync entry, if any from before it was
+// disabled, is simply left stale; a map with no lastSync entry yet is
+// always due, once; after that, a map with a positive Interval is due again
+// once that much time has passed since its last sync, while a map with no
+// Interval is never due again automatically) together with otherWait/
+// haveWait: the shortest remaining time until any *not-due* map with a
+// positive Interval next comes due (haveWait is false if there's no such
+// map — nothing configured yet, every configured map is one-shot, disabled,
+// or already due, or none has synced yet).
 //
 // dueIntervals carries the positive Interval of every due map, so runLoop
 // can fold each just-synced map's fresh next-due time into otherWait after
@@ -383,6 +385,10 @@ func scheduleTick(maps []config.MapTarget, lastSync map[string]time.Time, now ti
 	due map[string]struct{}, dueIntervals map[string]time.Duration, otherWait time.Duration, haveWait bool,
 ) {
 	for _, m := range maps {
+		if m.Disabled {
+			continue
+		}
+
 		last, seen := lastSync[m.ID]
 		interval := m.SyncInterval()
 

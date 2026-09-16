@@ -75,10 +75,11 @@ func (rt *runtime) current() (*config.Config, *tileserve.Client, *store.Store) {
 // reload has happened yet.
 var errNotConfigured = errors.New("not configured yet: use /config to enter and save configuration")
 
-// runSync runs syncAll once against every map in the runtime's current
-// config, serialized against any other call to runSync/runSyncMaps via
-// syncMu. It is what both the run-once path (no interval configured on any
-// map) and the web UI's manual "sync now" request go through.
+// runSync runs syncAll once against every enabled map in the runtime's
+// current config (a Disabled map is skipped, the same way scheduleTick skips
+// it for runLoop), serialized against any other call to runSync/runSyncMaps
+// via syncMu. It is what both the run-once path (no interval configured on
+// any map) and the web UI's manual "sync now" request go through.
 func (rt *runtime) runSync(ctx context.Context, rec *status.Recorder) (int, error) {
 	rt.syncMu.Lock()
 	defer rt.syncMu.Unlock()
@@ -89,16 +90,29 @@ func (rt *runtime) runSync(ctx context.Context, rec *status.Recorder) (int, erro
 		return 0, errNotConfigured
 	}
 
-	return syncAll(ctx, cfg.Maps, client, db, rec)
+	enabled := make([]config.MapTarget, 0, len(cfg.Maps))
+
+	for _, m := range cfg.Maps {
+		if !m.Disabled {
+			enabled = append(enabled, m)
+		}
+	}
+
+	return syncAll(ctx, enabled, client, db, rec)
 }
 
 // runSyncMaps runs syncAll against just the maps in the runtime's current
 // config whose ID is in ids, serialized the same way runSync is. It's what
 // runLoop's per-map interval scheduler calls with the set of currently-due
-// map IDs, re-reading rt.current() itself (rather than trusting maps handed
-// to it earlier) so it always syncs each map's latest configured versions/
-// staticColumns, even if a reload landed between runLoop computing ids and
-// this call acquiring syncMu.
+// map IDs (scheduleTick already excludes disabled maps from that set), and
+// what the status page's per-map "Sync" button calls with a single explicit
+// ID — unlike the scheduler, that explicit request is honored regardless of
+// Disabled, since a user clicking "Sync" on a specific map is an intentional
+// override of the map's own automatic-scheduling opt-out, not something
+// scheduling decided. It re-reads rt.current() itself (rather than trusting
+// maps handed to it earlier) so it always syncs each map's latest
+// configured versions/staticColumns, even if a reload landed between
+// runLoop computing ids and this call acquiring syncMu.
 func (rt *runtime) runSyncMaps(ctx context.Context, rec *status.Recorder, ids map[string]struct{}) (int, error) {
 	rt.syncMu.Lock()
 	defer rt.syncMu.Unlock()

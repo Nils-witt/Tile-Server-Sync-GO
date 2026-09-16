@@ -125,7 +125,7 @@ func (s *Store) loadMaps(ctx context.Context) ([]config.MapTarget, error) {
 // order, without yet loading each map's versions/staticColumns.
 func (s *Store) queryMapRows(ctx context.Context) ([]mapRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, map_id, name, interval FROM maps ORDER BY sort_order ASC, id ASC`)
+		`SELECT id, map_id, name, interval, disabled FROM maps ORDER BY sort_order ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("load maps: %w", err)
 	}
@@ -134,10 +134,16 @@ func (s *Store) queryMapRows(ctx context.Context) ([]mapRow, error) {
 	var mapRows []mapRow
 
 	for rows.Next() {
-		var mr mapRow
-		if err := rows.Scan(&mr.rowID, &mr.target.ID, &mr.target.Name, &mr.target.Interval); err != nil {
+		var (
+			mr       mapRow
+			disabled int64
+		)
+
+		if err := rows.Scan(&mr.rowID, &mr.target.ID, &mr.target.Name, &mr.target.Interval, &disabled); err != nil {
 			return nil, fmt.Errorf("scan map: %w", err)
 		}
+
+		mr.target.Disabled = disabled != 0
 
 		mapRows = append(mapRows, mr)
 	}

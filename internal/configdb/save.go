@@ -87,7 +87,8 @@ func saveMaps(ctx context.Context, tx *sql.Tx, maps []config.MapTarget) error {
 
 	for i, m := range maps {
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO maps (map_id, name, sort_order, interval) VALUES (?, ?, ?, ?)`, m.ID, m.Name, i, m.Interval)
+			`INSERT INTO maps (map_id, name, sort_order, interval, disabled) VALUES (?, ?, ?, ?, ?)`,
+			m.ID, m.Name, i, m.Interval, boolToInt(m.Disabled))
 		if err != nil {
 			return fmt.Errorf("save map %q: %w", m.ID, err)
 		}

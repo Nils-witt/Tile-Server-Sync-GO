@@ -86,6 +86,16 @@ type MapTarget struct {
 	// interval is Interval parsed by validateInterval(); read it via
 	// SyncInterval.
 	interval time.Duration
+	// Disabled, if true, excludes this map from automatic syncing: runLoop's
+	// per-map scheduler never considers it due (see scheduleTick in
+	// main.go), and the run-once path (runtime.runSync) skips it too. Its
+	// config (versions, interval, staticColumns) is kept as-is — disabling
+	// is meant to be temporary, not a lighter-weight delete — and it can
+	// still be synced on demand via its own "Sync" button/API call
+	// (runtime.runSyncMaps), which is given its ID explicitly rather than
+	// discovering it through scheduling. Defaults to false (enabled) so an
+	// existing map, or a request that omits the field, keeps syncing.
+	Disabled bool `yaml:"disabled" json:"disabled"`
 }
 
 // SyncInterval returns m's parsed Interval, or 0 if none was configured,
@@ -167,13 +177,15 @@ type Config struct {
 
 const defaultWebServerAddress = ":8080"
 
-// HasRecurringMaps reports whether any configured map has a positive
-// Interval. If false, every configured map is one-shot, so a caller that
-// only runs once when there's nothing to repeat (see main.go's run, when
-// webServer is disabled) knows it can sync once and exit rather than loop.
+// HasRecurringMaps reports whether any enabled configured map has a
+// positive Interval (a disabled map never runs automatically regardless of
+// its Interval, so it doesn't count). If false, every configured map is
+// one-shot or disabled, so a caller that only runs once when there's
+// nothing to repeat (see main.go's run, when webServer is disabled) knows
+// it can sync once and exit rather than loop.
 func (c *Config) HasRecurringMaps() bool {
 	for _, m := range c.Maps {
-		if m.SyncInterval() > 0 {
+		if !m.Disabled && m.SyncInterval() > 0 {
 			return true
 		}
 	}
