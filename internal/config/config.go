@@ -237,10 +237,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if len(c.Maps) == 0 {
-		return errors.New("at least one entry under maps is required")
-	}
-
 	c.WebServer.applyDefault()
 
 	return c.ValidateMaps()

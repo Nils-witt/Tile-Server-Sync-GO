@@ -207,11 +207,11 @@ func saveConfigSection(
 // fillStoredSecrets), save, and apply the change live via reload.
 //
 // Deliberately not gated on cfg.Validate(): Config.Validate requires the
-// *whole* config to be complete (api.baseUrl, api credentials, database.dsn,
-// at least one map — see internal/config's Validate), which a single
-// section save can never satisfy on its own during initial setup — saving
-// just the API tab would always fail because Database/Maps aren't filled in
-// yet, and vice versa, so nothing could ever be saved for the first time.
+// *whole* config to be complete (api.baseUrl, api credentials, database.dsn —
+// see internal/config's Validate; maps may be empty), which a single section
+// save can never satisfy on its own during initial setup — saving just the
+// API tab would always fail because Database isn't filled in yet, and vice
+// versa, so nothing could ever be saved for the first time.
 // Instead, an incomplete-but-persisted config is simply not applied live:
 // reload() below runs Validate() itself and reports why via ApplyError
 // (the same "saved, but not yet applied" outcome already used for a

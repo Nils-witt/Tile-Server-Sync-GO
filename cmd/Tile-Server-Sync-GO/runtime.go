@@ -136,11 +136,12 @@ func (rt *runtime) runSyncMaps(ctx context.Context, rec *status.Recorder, ids ma
 // still under syncMu, via removeMap. This matters because the caller
 // (deleteMapAPIHandler) always follows this call with reload(), and reload()
 // only swaps in the freshly loaded (mapID-less) config if the *whole*
-// config still validates — which fails if mapID was the last configured map
-// (Config.Validate requires at least one). Without stripping it here too,
-// that failed reload would leave the previous, stale in-memory config —
-// still containing the deleted map — active, so a later scheduled or manual
-// sync would keep re-syncing it and re-inserting the very rows just purged
+// config still validates and the API/database it describes are still
+// reachable — e.g. a login failure or an unrelated validation error at the
+// moment of this particular reload. Without stripping it here too, a failed
+// reload would leave the previous, stale in-memory config — still
+// containing the deleted map — active, so a later scheduled or manual sync
+// would keep re-syncing it and re-inserting the very rows just purged
 // above, with nothing left to prune them afterward.
 func (rt *runtime) deleteMapObjects(ctx context.Context, mapID string) (int64, error) {
 	rt.syncMu.Lock()
