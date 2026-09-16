@@ -131,6 +131,17 @@ func (rt *runtime) runSyncMaps(ctx context.Context, rec *status.Recorder, ids ma
 // otherwise race on inserting rows this delete is in the middle of removing.
 // It's a no-op (0, nil) if the runtime has no successful reload yet — a map
 // deleted before any sync ever ran has nothing to clean up.
+//
+// It also strips mapID from the runtime's currently active config here,
+// still under syncMu, via removeMap. This matters because the caller
+// (deleteMapAPIHandler) always follows this call with reload(), and reload()
+// only swaps in the freshly loaded (mapID-less) config if the *whole*
+// config still validates — which fails if mapID was the last configured map
+// (Config.Validate requires at least one). Without stripping it here too,
+// that failed reload would leave the previous, stale in-memory config —
+// still containing the deleted map — active, so a later scheduled or manual
+// sync would keep re-syncing it and re-inserting the very rows just purged
+// above, with nothing left to prune them afterward.
 func (rt *runtime) deleteMapObjects(ctx context.Context, mapID string) (int64, error) {
 	rt.syncMu.Lock()
 	defer rt.syncMu.Unlock()
@@ -140,7 +151,43 @@ func (rt *runtime) deleteMapObjects(ctx context.Context, mapID string) (int64, e
 		return 0, nil
 	}
 
-	return db.DeleteMapObjects(ctx, mapID)
+	deleted, err := db.DeleteMapObjects(ctx, mapID)
+
+	rt.removeMap(mapID)
+
+	return deleted, err
+}
+
+// removeMap removes mapID from the runtime's currently active config's Maps
+// slice, if present, by swapping in a new *config.Config value with a
+// filtered Maps slice rather than mutating rt.cfg.Maps in place — current()
+// callers may be reading the slice they were handed without rt.mu held, so
+// an in-place mutation would race with them. A no-op if the runtime has no
+// config yet or mapID isn't in it. See deleteMapObjects for why this exists
+// alongside reload().
+func (rt *runtime) removeMap(mapID string) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	if rt.cfg == nil {
+		return
+	}
+
+	maps := make([]config.MapTarget, 0, len(rt.cfg.Maps))
+
+	for _, m := range rt.cfg.Maps {
+		if m.ID != mapID {
+			maps = append(maps, m)
+		}
+	}
+
+	if len(maps) == len(rt.cfg.Maps) {
+		return
+	}
+
+	newCfg := *rt.cfg
+	newCfg.Maps = maps
+	rt.cfg = &newCfg
 }
 
 // createMapOverlays keeps the EDP map_src_overlays table (see
