@@ -4,44 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
-
-// userSchemaStatements creates the users/sessions tables backing web server
-// authentication. Run through the same ensureSchema loop as
-// schemaStatements, so it stays idempotent CREATE TABLE IF NOT EXISTS on
-// every startup like the rest of this package's schema.
-var userSchemaStatements = []string{
-	`CREATE TABLE IF NOT EXISTS users (
-		id                        INTEGER PRIMARY KEY AUTOINCREMENT,
-		username                  TEXT NOT NULL UNIQUE,
-		password_hash             TEXT NOT NULL,
-		is_superuser              INTEGER NOT NULL DEFAULT 0,
-		perm_view_status          INTEGER NOT NULL DEFAULT 0,
-		perm_trigger_sync         INTEGER NOT NULL DEFAULT 0,
-		perm_view_config          INTEGER NOT NULL DEFAULT 0,
-		perm_edit_config_api      INTEGER NOT NULL DEFAULT 0,
-		perm_edit_config_database INTEGER NOT NULL DEFAULT 0,
-		perm_edit_config_maps     INTEGER NOT NULL DEFAULT 0,
-		perm_edit_config_sso      INTEGER NOT NULL DEFAULT 0,
-		created_at                TEXT NOT NULL
-	)`,
-	`CREATE TABLE IF NOT EXISTS sessions (
-		token_hash TEXT PRIMARY KEY,
-		user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-		created_at TEXT NOT NULL,
-		expires_at TEXT NOT NULL
-	)`,
-	`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
-}
 
 // Sentinel errors returned by the user/session methods below. Callers use
 // errors.Is to distinguish these from unexpected/internal failures.
@@ -66,29 +37,37 @@ type Permissions struct {
 	EditConfigSSO      bool `json:"editConfigSSO"`
 }
 
-// User is a stored account, without its password hash — never let that
-// leak into a JSON response. IsSuperuser is orthogonal to Permissions: it
-// only gates user management (see internal/webserver/users.go), and is not
-// implied by, nor implies, any of the six feature permissions.
+// User is a stored account. PasswordHash is exported only because GORM
+// requires it (unexported fields aren't reachable by reflection) — nothing
+// outside this package ever reads it, and json:"-" keeps it out of any
+// accidental direct marshaling (every JSON response goes through a
+// hand-built DTO instead, e.g. internal/webserver/users.go's userDTO).
+// IsSuperuser is orthogonal to Permissions: it only gates user management
+// (see internal/webserver/users.go), and is not implied by, nor implies,
+// any of the seven feature permissions. Permissions is embedded with the
+// "perm_" column prefix — see schema.go's migrate and SSOConfig's
+// DefaultPermissions for the "default_"-prefixed counterpart.
 type User struct {
-	ID          int64
-	Username    string
-	IsSuperuser bool
-	Permissions
-	CreatedAt time.Time
+	ID           int64       `gorm:"column:id;primaryKey;autoIncrement"        json:"-"`
+	Username     string      `gorm:"column:username;not null;uniqueIndex"      json:"-"`
+	PasswordHash string      `gorm:"column:password_hash;not null"             json:"-"`
+	IsSuperuser  bool        `gorm:"column:is_superuser;not null;default:false" json:"-"`
+	Permissions  Permissions `gorm:"embedded;embeddedPrefix:perm_"             json:"-"`
+	CreatedAt    time.Time   `gorm:"column:created_at;not null"                json:"-"`
 }
 
-const timeFormat = time.RFC3339Nano
+// TableName pins this model to its existing table name.
+func (User) TableName() string { return "users" }
 
 // UserCount reports how many accounts exist, used by the web server to
 // decide whether to gate every request behind the one-time /setup page.
 func (s *Store) UserCount(ctx context.Context) (int, error) {
-	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
+	var n int64
+	if err := s.db.WithContext(ctx).Model(&User{}).Count(&n).Error; err != nil {
 		return 0, fmt.Errorf("count users: %w", err)
 	}
 
-	return n, nil
+	return int(n), nil
 }
 
 // CreateUser hashes password with bcrypt and inserts a new account. It
@@ -101,44 +80,23 @@ func (s *Store) CreateUser(
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	createdAt := time.Now().UTC()
+	u := User{
+		Username:     username,
+		PasswordHash: string(hash),
+		IsSuperuser:  isSuperuser,
+		Permissions:  perms,
+		CreatedAt:    time.Now().UTC(),
+	}
 
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO users (
-			username, password_hash, is_superuser,
-			perm_view_status, perm_trigger_sync, perm_view_config,
-			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, perm_edit_config_sso,
-			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		username, string(hash), boolToInt(isSuperuser),
-		boolToInt(perms.ViewStatus), boolToInt(perms.TriggerSync), boolToInt(perms.ViewConfig),
-		boolToInt(perms.EditConfigAPI), boolToInt(perms.EditConfigDatabase), boolToInt(perms.EditConfigMaps),
-		boolToInt(perms.EditConfigSSO),
-		createdAt.Format(timeFormat))
-	if err != nil {
-		if isUniqueConstraintErr(err) {
+	if err := s.db.WithContext(ctx).Create(&u).Error; err != nil {
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
 			return nil, fmt.Errorf("create user %q: %w", username, ErrUsernameTaken)
 		}
 
 		return nil, fmt.Errorf("create user %q: %w", username, err)
 	}
 
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("create user %q: %w", username, err)
-	}
-
-	return &User{
-		ID: id, Username: username, IsSuperuser: isSuperuser, Permissions: perms, CreatedAt: createdAt,
-	}, nil
-}
-
-// isUniqueConstraintErr reports whether err looks like a SQLite UNIQUE
-// constraint violation. modernc.org/sqlite doesn't export a typed
-// sentinel/code for this, so this matches on the driver's error text, which
-// is stable across modernc.org/sqlite releases ("UNIQUE constraint failed").
-func isUniqueConstraintErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+	return &u, nil
 }
 
 // VerifyPassword loads the user named username and checks password against
@@ -146,101 +104,26 @@ func isUniqueConstraintErr(err error) bool {
 // same ErrInvalidCredentials so a caller can never distinguish which part
 // was wrong.
 func (s *Store) VerifyPassword(ctx context.Context, username, password string) (*User, error) {
-	var (
-		u    User
-		hash string
-	)
+	var u User
 
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, username, password_hash, is_superuser,
-			perm_view_status, perm_trigger_sync, perm_view_config,
-			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, perm_edit_config_sso,
-			created_at
-		FROM users WHERE username = ?`, username)
-
-	if err := scanUser(row, &u, &hash); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrInvalidCredentials
-		}
-
+	switch err := s.db.WithContext(ctx).Where("username = ?", username).First(&u).Error; {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return nil, ErrInvalidCredentials
+	case err != nil:
 		return nil, fmt.Errorf("load user %q: %w", username, err)
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
 		return nil, ErrInvalidCredentials
 	}
 
 	return &u, nil
 }
 
-// rowScanner is satisfied by both *sql.Row and *sql.Rows, letting scanUser
-// serve both a single-row lookup and a multi-row list without duplicating
-// the column list.
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanUser(row rowScanner, u *User, hash *string) error {
-	var (
-		isSuperuser, viewStatus, triggerSync, viewConfig                 int
-		editConfigAPI, editConfigDatabase, editConfigMaps, editConfigSSO int
-		createdAt                                                        string
-	)
-
-	if err := row.Scan(
-		&u.ID, &u.Username, hash, &isSuperuser,
-		&viewStatus, &triggerSync, &viewConfig,
-		&editConfigAPI, &editConfigDatabase, &editConfigMaps, &editConfigSSO,
-		&createdAt,
-	); err != nil {
-		return err
-	}
-
-	u.IsSuperuser = isSuperuser != 0
-	u.ViewStatus = viewStatus != 0
-	u.TriggerSync = triggerSync != 0
-	u.ViewConfig = viewConfig != 0
-	u.EditConfigAPI = editConfigAPI != 0
-	u.EditConfigDatabase = editConfigDatabase != 0
-	u.EditConfigMaps = editConfigMaps != 0
-	u.EditConfigSSO = editConfigSSO != 0
-
-	if parsed, err := time.Parse(timeFormat, createdAt); err == nil {
-		u.CreatedAt = parsed
-	}
-
-	return nil
-}
-
 // ListUsers returns every account, ordered by id (creation order).
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, username, password_hash, is_superuser,
-			perm_view_status, perm_trigger_sync, perm_view_config,
-			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, perm_edit_config_sso,
-			created_at
-		FROM users ORDER BY id ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("list users: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
 	var users []User
-
-	for rows.Next() {
-		var (
-			u    User
-			hash string
-		)
-
-		if err := scanUser(rows, &u, &hash); err != nil {
-			return nil, fmt.Errorf("scan user: %w", err)
-		}
-
-		users = append(users, u)
-	}
-
-	if err := rows.Err(); err != nil {
+	if err := s.db.WithContext(ctx).Order("id ASC").Find(&users).Error; err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
 
@@ -249,23 +132,12 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 
 // GetUser loads a single account by id, or ErrUserNotFound if none exists.
 func (s *Store) GetUser(ctx context.Context, id int64) (*User, error) {
-	var (
-		u    User
-		hash string
-	)
+	var u User
 
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, username, password_hash, is_superuser,
-			perm_view_status, perm_trigger_sync, perm_view_config,
-			perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, perm_edit_config_sso,
-			created_at
-		FROM users WHERE id = ?`, id)
-
-	if err := scanUser(row, &u, &hash); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrUserNotFound
-		}
-
+	switch err := s.db.WithContext(ctx).First(&u, id).Error; {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return nil, ErrUserNotFound
+	case err != nil:
 		return nil, fmt.Errorf("load user %d: %w", id, err)
 	}
 
@@ -277,52 +149,32 @@ func (s *Store) GetUser(ctx context.Context, id int64) (*User, error) {
 // unchanged", mirroring the existing convention for API.Password/
 // Database.DSN in the web server's own config save handling.
 func (s *Store) UpdateUser(ctx context.Context, id int64, perms Permissions, isSuperuser bool, newPassword string) error {
-	if newPassword == "" {
-		res, err := s.db.ExecContext(ctx, `
-			UPDATE users SET
-				is_superuser = ?, perm_view_status = ?, perm_trigger_sync = ?, perm_view_config = ?,
-				perm_edit_config_api = ?, perm_edit_config_database = ?, perm_edit_config_maps = ?, perm_edit_config_sso = ?
-			WHERE id = ?`,
-			boolToInt(isSuperuser), boolToInt(perms.ViewStatus), boolToInt(perms.TriggerSync), boolToInt(perms.ViewConfig),
-			boolToInt(perms.EditConfigAPI), boolToInt(perms.EditConfigDatabase), boolToInt(perms.EditConfigMaps),
-			boolToInt(perms.EditConfigSSO),
-			id)
+	updates := map[string]any{
+		"is_superuser":              isSuperuser,
+		"perm_view_status":          perms.ViewStatus,
+		"perm_trigger_sync":         perms.TriggerSync,
+		"perm_view_config":          perms.ViewConfig,
+		"perm_edit_config_api":      perms.EditConfigAPI,
+		"perm_edit_config_database": perms.EditConfigDatabase,
+		"perm_edit_config_maps":     perms.EditConfigMaps,
+		"perm_edit_config_sso":      perms.EditConfigSSO,
+	}
+
+	if newPassword != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 		if err != nil {
-			return fmt.Errorf("update user %d: %w", id, err)
+			return fmt.Errorf("hash password: %w", err)
 		}
 
-		return checkRowAffected(res, id)
+		updates["password_hash"] = string(hash)
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
-	if err != nil {
-		return fmt.Errorf("hash password: %w", err)
+	res := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", id).Updates(updates)
+	if res.Error != nil {
+		return fmt.Errorf("update user %d: %w", id, res.Error)
 	}
 
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE users SET
-			password_hash = ?, is_superuser = ?, perm_view_status = ?, perm_trigger_sync = ?, perm_view_config = ?,
-			perm_edit_config_api = ?, perm_edit_config_database = ?, perm_edit_config_maps = ?, perm_edit_config_sso = ?
-		WHERE id = ?`,
-		string(hash),
-		boolToInt(isSuperuser), boolToInt(perms.ViewStatus), boolToInt(perms.TriggerSync), boolToInt(perms.ViewConfig),
-		boolToInt(perms.EditConfigAPI), boolToInt(perms.EditConfigDatabase), boolToInt(perms.EditConfigMaps),
-		boolToInt(perms.EditConfigSSO),
-		id)
-	if err != nil {
-		return fmt.Errorf("update user %d: %w", id, err)
-	}
-
-	return checkRowAffected(res, id)
-}
-
-func checkRowAffected(res sql.Result, id int64) error {
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update user %d: %w", id, err)
-	}
-
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		return fmt.Errorf("update user %d: %w", id, ErrUserNotFound)
 	}
 
@@ -332,12 +184,16 @@ func checkRowAffected(res sql.Result, id int64) error {
 // DeleteUser removes an account; its sessions cascade via
 // sessions.user_id's ON DELETE CASCADE.
 func (s *Store) DeleteUser(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("delete user %d: %w", id, err)
+	res := s.db.WithContext(ctx).Delete(&User{}, id)
+	if res.Error != nil {
+		return fmt.Errorf("delete user %d: %w", id, res.Error)
 	}
 
-	return checkRowAffected(res, id)
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("delete user %d: %w", id, ErrUserNotFound)
+	}
+
+	return nil
 }
 
 // CreateSession issues a new random session token for userID, valid for
@@ -353,10 +209,8 @@ func (s *Store) CreateSession(ctx context.Context, userID int64, ttl time.Durati
 	now := time.Now().UTC()
 	expiresAt := now.Add(ttl)
 
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		hashToken(token), userID, now.Format(timeFormat), expiresAt.Format(timeFormat))
-	if err != nil {
+	sess := session{TokenHash: hashToken(token), UserID: userID, CreatedAt: now, ExpiresAt: expiresAt}
+	if err := s.db.WithContext(ctx).Create(&sess).Error; err != nil {
 		return "", time.Time{}, fmt.Errorf("create session: %w", err)
 	}
 
@@ -370,29 +224,21 @@ func (s *Store) CreateSession(ctx context.Context, userID int64, ttl time.Durati
 func (s *Store) SessionUser(ctx context.Context, token string) (*User, error) {
 	tokenHash := hashToken(token)
 
-	var (
-		userID    int64
-		expiresAt string
-	)
+	var sess session
 
-	err := s.db.QueryRowContext(ctx,
-		`SELECT user_id, expires_at FROM sessions WHERE token_hash = ?`, tokenHash,
-	).Scan(&userID, &expiresAt)
-
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	switch err := s.db.WithContext(ctx).Where("token_hash = ?", tokenHash).First(&sess).Error; {
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, ErrSessionInvalid
 	case err != nil:
 		return nil, fmt.Errorf("load session: %w", err)
 	}
 
-	expiry, parseErr := time.Parse(timeFormat, expiresAt)
-	if parseErr != nil || time.Now().UTC().After(expiry) {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, tokenHash)
+	if time.Now().UTC().After(sess.ExpiresAt) {
+		_ = s.db.WithContext(ctx).Where("token_hash = ?", tokenHash).Delete(&session{}).Error
 		return nil, ErrSessionInvalid
 	}
 
-	u, err := s.GetUser(ctx, userID)
+	u, err := s.GetUser(ctx, sess.UserID)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			return nil, ErrSessionInvalid
@@ -407,7 +253,7 @@ func (s *Store) SessionUser(ctx context.Context, token string) (*User, error) {
 // DeleteSession removes a session by its raw token (logout). Deleting an
 // already-gone/unknown token is not an error.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, hashToken(token)); err != nil {
+	if err := s.db.WithContext(ctx).Where("token_hash = ?", hashToken(token)).Delete(&session{}).Error; err != nil {
 		return fmt.Errorf("delete session: %w", err)
 	}
 
@@ -417,12 +263,4 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
-}
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-
-	return 0
 }

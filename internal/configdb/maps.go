@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"gorm.io/gorm"
 )
 
 // Sentinel errors returned by the per-map methods below, following
@@ -24,78 +26,60 @@ func (s *Store) ListMaps(ctx context.Context) ([]config.MapTarget, error) {
 // GetMap returns the single map identified by id (config.MapTarget.ID, not
 // the internal autoincrement row id), or ErrMapNotFound if none matches.
 func (s *Store) GetMap(ctx context.Context, id string) (*config.MapTarget, error) {
-	var (
-		mr       mapRow
-		disabled int64
-	)
+	var record mapRecord
 
-	row := s.db.QueryRowContext(ctx, `SELECT id, map_id, name, interval, disabled FROM maps WHERE map_id = ?`, id)
+	err := s.db.WithContext(ctx).
+		Preload("Versions", func(db *gorm.DB) *gorm.DB { return db.Order("sort_order ASC, id ASC") }).
+		Preload("StaticColumns").
+		Where("map_id = ?", id).
+		First(&record).Error
 
-	switch err := row.Scan(&mr.rowID, &mr.target.ID, &mr.target.Name, &mr.target.Interval, &disabled); {
-	case errors.Is(err, sql.ErrNoRows):
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, fmt.Errorf("get map %q: %w", id, ErrMapNotFound)
 	case err != nil:
 		return nil, fmt.Errorf("get map %q: %w", id, err)
 	}
 
-	mr.target.Disabled = disabled != 0
+	target := record.toMapTarget()
 
-	versions, err := s.loadMapVersions(ctx, mr.rowID)
-	if err != nil {
-		return nil, err
-	}
-
-	staticColumns, err := s.loadMapStaticColumns(ctx, mr.rowID)
-	if err != nil {
-		return nil, err
-	}
-
-	mr.target.Versions = versions
-	mr.target.StaticColumns = staticColumns
-
-	return &mr.target, nil
+	return &target, nil
 }
 
 // CreateMap inserts a new map, appended after every currently configured map
 // (matching the order a whole-list save used to produce). Returns
 // ErrMapIDTaken (wrapped) if m.ID is already in use.
 func (s *Store) CreateMap(ctx context.Context, m config.MapTarget) (*config.MapTarget, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	var created config.MapTarget
 
-	var nextOrder int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sort_order), -1) + 1 FROM maps`).Scan(&nextOrder); err != nil {
-		return nil, fmt.Errorf("create map %q: %w", m.ID, err)
-	}
-
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO maps (map_id, name, sort_order, interval, disabled) VALUES (?, ?, ?, ?, ?)`,
-		m.ID, m.Name, nextOrder, m.Interval, boolToInt(m.Disabled))
-	if err != nil {
-		if isUniqueConstraintErr(err) {
-			return nil, fmt.Errorf("create map %q: %w", m.ID, ErrMapIDTaken)
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var maxOrder sql.NullInt64
+		if err := tx.Model(&mapRecord{}).Select("MAX(sort_order)").Scan(&maxOrder).Error; err != nil {
+			return fmt.Errorf("create map %q: %w", m.ID, err)
 		}
 
-		return nil, fmt.Errorf("create map %q: %w", m.ID, err)
-	}
+		nextOrder := 0
+		if maxOrder.Valid {
+			nextOrder = int(maxOrder.Int64) + 1
+		}
 
-	mapRowID, err := res.LastInsertId()
+		record := mapRecordFromTarget(m, nextOrder)
+
+		if err := tx.Create(&record).Error; err != nil {
+			if errors.Is(err, gorm.ErrDuplicatedKey) {
+				return fmt.Errorf("create map %q: %w", m.ID, ErrMapIDTaken)
+			}
+
+			return fmt.Errorf("create map %q: %w", m.ID, err)
+		}
+
+		created = record.toMapTarget()
+
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("create map %q: %w", m.ID, err)
-	}
-
-	if err := insertMapVersionsAndStaticColumns(ctx, tx, mapRowID, m); err != nil {
 		return nil, err
 	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
-	}
-
-	created := m
 
 	return &created, nil
 }
@@ -107,44 +91,55 @@ func (s *Store) CreateMap(ctx context.Context, m config.MapTarget) (*config.MapT
 // rename a map. Returns ErrMapNotFound if id doesn't match any configured
 // map.
 func (s *Store) UpdateMap(ctx context.Context, id string, m config.MapTarget) (*config.MapTarget, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	var updated config.MapTarget
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var record mapRecord
+
+		switch err := tx.Where("map_id = ?", id).First(&record).Error; {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			return fmt.Errorf("update map %q: %w", id, ErrMapNotFound)
+		case err != nil:
+			return fmt.Errorf("update map %q: %w", id, err)
+		}
+
+		record.Name = m.Name
+		record.Interval = m.Interval
+		record.Disabled = m.Disabled
+
+		if err := tx.Model(&record).Select("Name", "Interval", "Disabled").Updates(&record).Error; err != nil {
+			return fmt.Errorf("update map %q: %w", id, err)
+		}
+
+		if err := tx.Where("map_id = ?", record.ID).Delete(&mapVersion{}).Error; err != nil {
+			return fmt.Errorf("update map %q: %w", id, err)
+		}
+
+		if err := tx.Where("map_id = ?", record.ID).Delete(&mapStaticColumn{}).Error; err != nil {
+			return fmt.Errorf("update map %q: %w", id, err)
+		}
+
+		for i, version := range m.Versions {
+			v := mapVersion{MapRowID: record.ID, Version: version, SortOrder: i}
+			if err := tx.Create(&v).Error; err != nil {
+				return fmt.Errorf("save version %q for map %q: %w", version, id, err)
+			}
+		}
+
+		for column, value := range m.StaticColumns {
+			c := mapStaticColumn{MapRowID: record.ID, Column: column, Value: value}
+			if err := tx.Create(&c).Error; err != nil {
+				return fmt.Errorf("save static column %q for map %q: %w", column, id, err)
+			}
+		}
+
+		updated = m
+		updated.ID = id
+
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var mapRowID int64
-
-	switch err := tx.QueryRowContext(ctx, `SELECT id FROM maps WHERE map_id = ?`, id).Scan(&mapRowID); {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil, fmt.Errorf("update map %q: %w", id, ErrMapNotFound)
-	case err != nil:
-		return nil, fmt.Errorf("update map %q: %w", id, err)
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE maps SET name = ?, interval = ?, disabled = ? WHERE id = ?`,
-		m.Name, m.Interval, boolToInt(m.Disabled), mapRowID); err != nil {
-		return nil, fmt.Errorf("update map %q: %w", id, err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM map_versions WHERE map_id = ?`, mapRowID); err != nil {
-		return nil, fmt.Errorf("update map %q: %w", id, err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM map_static_columns WHERE map_id = ?`, mapRowID); err != nil {
-		return nil, fmt.Errorf("update map %q: %w", id, err)
-	}
-
-	updated := m
-	updated.ID = id
-
-	if err := insertMapVersionsAndStaticColumns(ctx, tx, mapRowID, updated); err != nil {
 		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
 	return &updated, nil
@@ -154,58 +149,13 @@ func (s *Store) UpdateMap(ctx context.Context, id string, m config.MapTarget) (*
 // staticColumns rows via the maps table's ON DELETE CASCADE references).
 // Returns ErrMapNotFound if id doesn't match any configured map.
 func (s *Store) DeleteMap(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM maps WHERE map_id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("delete map %q: %w", id, err)
+	res := s.db.WithContext(ctx).Where("map_id = ?", id).Delete(&mapRecord{})
+	if res.Error != nil {
+		return fmt.Errorf("delete map %q: %w", id, res.Error)
 	}
 
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("delete map %q: %w", id, err)
-	}
-
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		return fmt.Errorf("delete map %q: %w", id, ErrMapNotFound)
-	}
-
-	return nil
-}
-
-// insertMapVersionsAndStaticColumns inserts m's versions and staticColumns
-// rows for the maps-table row mapRowID, shared by saveMaps (whole-list
-// delete-then-reinsert, in configdb.go) and CreateMap/UpdateMap above.
-func insertMapVersionsAndStaticColumns(ctx context.Context, tx *sql.Tx, mapRowID int64, m config.MapTarget) error {
-	for j, version := range m.Versions {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO map_versions (map_id, version, sort_order) VALUES (?, ?, ?)`,
-			mapRowID, version, j); err != nil {
-			return fmt.Errorf("save version %q for map %q: %w", version, m.ID, err)
-		}
-	}
-
-	for column, value := range m.StaticColumns {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO map_static_columns (map_id, column, value) VALUES (?, ?, ?)`,
-			mapRowID, column, value); err != nil {
-			return fmt.Errorf("save static column %q for map %q: %w", column, m.ID, err)
-		}
-	}
-
-	return nil
-}
-
-// ensureMapsUniqueIndex adds a UNIQUE index on maps.map_id if it doesn't
-// already exist, so map_id can serve as the stable per-map resource
-// identifier the GetMap/UpdateMap/DeleteMap methods above key on. Nothing
-// enforced map_id uniqueness before it became an API identity; on an
-// existing install where two rows already share one (the whole-list save
-// this replaced never checked), this fails outright at startup rather than
-// leaving {id}-addressed lookups ambiguous.
-func (s *Store) ensureMapsUniqueIndex(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_maps_map_id ON maps(map_id)`); err != nil {
-		return fmt.Errorf(
-			"create unique index on maps.map_id (likely duplicate map ids exist — resolve them first): %w", err,
-		)
 	}
 
 	return nil

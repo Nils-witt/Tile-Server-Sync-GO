@@ -3,9 +3,10 @@ package configdb
 import (
 	"Tile-Server-Sync-GO/internal/config"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
+
+	"gorm.io/gorm"
 )
 
 // Load assembles a *config.Config from the stored rows. WebServer is left
@@ -17,24 +18,22 @@ import (
 func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 	cfg := &config.Config{}
 
-	var pruneMissing, syncOverlays int64
+	var scalar configScalar
 
-	row := s.db.QueryRowContext(ctx,
-		`SELECT api_base_url, api_username, api_password, api_token, db_dsn, db_table,
-		        db_prune_missing, db_sync_overlays
-		 FROM config_scalar WHERE id = 1`)
-
-	switch err := row.Scan(
-		&cfg.API.BaseURL, &cfg.API.Username, &cfg.API.Password, &cfg.API.Token,
-		&cfg.Database.DSN, &cfg.Database.Table, &pruneMissing, &syncOverlays,
-	); {
-	case errors.Is(err, sql.ErrNoRows):
+	switch err := s.db.WithContext(ctx).First(&scalar, 1).Error; {
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		// No row yet: leave cfg's scalars zero-valued.
 	case err != nil:
 		return nil, fmt.Errorf("load config: %w", err)
 	default:
-		cfg.Database.PruneMissing = pruneMissing != 0
-		cfg.Database.SyncOverlays = syncOverlays != 0
+		cfg.API.BaseURL = scalar.APIBaseURL
+		cfg.API.Username = scalar.APIUsername
+		cfg.API.Password = scalar.APIPassword
+		cfg.API.Token = scalar.APIToken
+		cfg.Database.DSN = scalar.DBDSN
+		cfg.Database.Table = scalar.DBTable
+		cfg.Database.PruneMissing = scalar.DBPruneMissing
+		cfg.Database.SyncOverlays = scalar.DBSyncOverlays
 	}
 
 	columns, err := s.loadDatabaseColumns(ctx)
@@ -55,158 +54,94 @@ func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 }
 
 func (s *Store) loadDatabaseColumns(ctx context.Context) (map[string]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT field, column FROM database_columns`)
-	if err != nil {
+	var rows []databaseColumn
+	if err := s.db.WithContext(ctx).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("load database columns: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	var columns map[string]string
 
-	for rows.Next() {
-		var field, column string
-		if err := rows.Scan(&field, &column); err != nil {
-			return nil, fmt.Errorf("scan database column: %w", err)
-		}
-
+	for _, row := range rows {
 		if columns == nil {
-			columns = make(map[string]string)
+			columns = make(map[string]string, len(rows))
 		}
 
-		columns[field] = column
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("load database columns: %w", err)
+		columns[row.Field] = row.Column
 	}
 
 	return columns, nil
 }
 
-// mapRow is one maps table row, before its versions/staticColumns are
-// loaded.
-type mapRow struct {
-	rowID  int64
-	target config.MapTarget
-}
-
-func (s *Store) loadMaps(ctx context.Context) ([]config.MapTarget, error) {
-	mapRows, err := s.queryMapRows(ctx)
-	if err != nil {
-		return nil, err
+// toMapTarget converts a loaded mapRecord (with its Versions/StaticColumns
+// associations already preloaded) into the config.MapTarget shape callers
+// outside this package deal in.
+func (r mapRecord) toMapTarget() config.MapTarget {
+	target := config.MapTarget{
+		ID:       r.MapID,
+		Name:     r.Name,
+		Interval: r.Interval,
+		Disabled: r.Disabled,
 	}
 
-	if mapRows == nil {
+	if len(r.Versions) > 0 {
+		target.Versions = make([]string, len(r.Versions))
+		for i, v := range r.Versions {
+			target.Versions[i] = v.Version
+		}
+	}
+
+	if len(r.StaticColumns) > 0 {
+		target.StaticColumns = make(map[string]string, len(r.StaticColumns))
+		for _, c := range r.StaticColumns {
+			target.StaticColumns[c.Column] = c.Value
+		}
+	}
+
+	return target
+}
+
+// mapRecordFromTarget builds a mapRecord (with its Versions/StaticColumns
+// associations populated, unsaved) from a config.MapTarget, ready to be
+// passed to *gorm.DB.Create — GORM cascades the Create to the associations'
+// own tables.
+func mapRecordFromTarget(m config.MapTarget, sortOrder int) mapRecord {
+	record := mapRecord{
+		MapID: m.ID, Name: m.Name, SortOrder: sortOrder, Interval: m.Interval, Disabled: m.Disabled,
+	}
+
+	for i, version := range m.Versions {
+		record.Versions = append(record.Versions, mapVersion{Version: version, SortOrder: i})
+	}
+
+	for column, value := range m.StaticColumns {
+		record.StaticColumns = append(record.StaticColumns, mapStaticColumn{Column: column, Value: value})
+	}
+
+	return record
+}
+
+// loadMaps returns every configured map, in configured order, with each
+// map's Versions/StaticColumns preloaded in their own configured order.
+func (s *Store) loadMaps(ctx context.Context) ([]config.MapTarget, error) {
+	var records []mapRecord
+
+	err := s.db.WithContext(ctx).
+		Preload("Versions", func(db *gorm.DB) *gorm.DB { return db.Order("sort_order ASC, id ASC") }).
+		Preload("StaticColumns").
+		Order("sort_order ASC, id ASC").
+		Find(&records).Error
+	if err != nil {
+		return nil, fmt.Errorf("load maps: %w", err)
+	}
+
+	if records == nil {
 		return nil, nil
 	}
 
-	targets := make([]config.MapTarget, len(mapRows))
-
-	for i, mr := range mapRows {
-		versions, err := s.loadMapVersions(ctx, mr.rowID)
-		if err != nil {
-			return nil, err
-		}
-
-		staticColumns, err := s.loadMapStaticColumns(ctx, mr.rowID)
-		if err != nil {
-			return nil, err
-		}
-
-		mr.target.Versions = versions
-		mr.target.StaticColumns = staticColumns
-		targets[i] = mr.target
+	targets := make([]config.MapTarget, len(records))
+	for i, r := range records {
+		targets[i] = r.toMapTarget()
 	}
 
 	return targets, nil
-}
-
-// queryMapRows reads the maps table's id/map_id columns, in configured
-// order, without yet loading each map's versions/staticColumns.
-func (s *Store) queryMapRows(ctx context.Context) ([]mapRow, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, map_id, name, interval, disabled FROM maps ORDER BY sort_order ASC, id ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("load maps: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var mapRows []mapRow
-
-	for rows.Next() {
-		var (
-			mr       mapRow
-			disabled int64
-		)
-
-		if err := rows.Scan(&mr.rowID, &mr.target.ID, &mr.target.Name, &mr.target.Interval, &disabled); err != nil {
-			return nil, fmt.Errorf("scan map: %w", err)
-		}
-
-		mr.target.Disabled = disabled != 0
-
-		mapRows = append(mapRows, mr)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("load maps: %w", err)
-	}
-
-	return mapRows, nil
-}
-
-func (s *Store) loadMapVersions(ctx context.Context, mapRowID int64) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT version FROM map_versions WHERE map_id = ? ORDER BY sort_order ASC, id ASC`, mapRowID)
-	if err != nil {
-		return nil, fmt.Errorf("load map versions: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var versions []string
-
-	for rows.Next() {
-		var version string
-		if err := rows.Scan(&version); err != nil {
-			return nil, fmt.Errorf("scan map version: %w", err)
-		}
-
-		versions = append(versions, version)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("load map versions: %w", err)
-	}
-
-	return versions, nil
-}
-
-func (s *Store) loadMapStaticColumns(ctx context.Context, mapRowID int64) (map[string]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT column, value FROM map_static_columns WHERE map_id = ?`, mapRowID)
-	if err != nil {
-		return nil, fmt.Errorf("load map static columns: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var columns map[string]string
-
-	for rows.Next() {
-		var column, value string
-		if err := rows.Scan(&column, &value); err != nil {
-			return nil, fmt.Errorf("scan map static column: %w", err)
-		}
-
-		if columns == nil {
-			columns = make(map[string]string)
-		}
-
-		columns[column] = value
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("load map static columns: %w", err)
-	}
-
-	return columns, nil
 }

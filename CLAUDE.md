@@ -31,7 +31,8 @@ Both `golangci-lint run` and `govulncheck ./...` run in the Husky `pre-commit` h
 first (see the `frontend` bullet below for why a bare `go build`/`go vet` still succeeds without
 one); the hook doesn't build the frontend itself.
 
-There is no Go test suite yet (`go test ./...` will report "no test files"). The root
+There is no Go test suite for most packages (`go test ./...` reports "no test files" for
+everything except `internal/configdb`, which has GORM-backed store/migration tests). The root
 `package.json`/`npm` setup exists only to drive Husky; it is not a Node project — the actual
 frontend lives in `frontend/` as its own npm project (`frontend/package.json`), see below. In
 `frontend/`, `npm run build` runs `tsc -b && vite build`; `npx oxlint` lints it (also warns-only in
@@ -84,22 +85,41 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   assembles a `*config.Config`
   with `WebServer` left zero-valued — callers always overlay the bootstrap value before using or
   validating it. `Store.Save` replaces `database_columns`/`maps` wholesale inside one transaction
-  (delete-then-reinsert, not diffed) and never reads or writes `WebServer`. Uses
-  `modernc.org/sqlite` (pure Go, no cgo, to keep GoReleaser's cross-compiled and Windows service
-  builds working) and pins the connection pool to one connection (`SetMaxOpenConns(1)`) so its
-  `PRAGMA foreign_keys = ON` (needed for `ON DELETE CASCADE` on `maps` deletes) reliably applies —
-  SQLite pragmas are per-connection, and `database/sql`'s pool would otherwise silently hand out a
-  fresh, pragma-less one. Unrelated to `internal/store` (MariaDB geo-object storage); no shared
-  code. The same database also holds `users` and `sessions` tables (`internal/configdb/users.go`),
+  (delete-then-reinsert, not diffed) and never reads or writes `WebServer`. Backed by
+  [GORM](https://gorm.io) (`gorm.io/gorm`) over `github.com/glebarez/sqlite` — a pure-Go, cgo-free
+  SQLite driver/dialector (wrapping `modernc.org/sqlite`), to keep GoReleaser's cross-compiled and
+  Windows service builds working the same way the old hand-written-SQL version did. `Open`
+  (`configdb.go`) still pins the connection pool to one connection (`SetMaxOpenConns(1)`) so its
+  `PRAGMA foreign_keys = ON` reliably applies — SQLite pragmas are per-connection, and
+  `database/sql`'s pool would otherwise silently hand out a fresh, pragma-less one — and still runs
+  its own schema/migration step (`schema.go`'s `migrate`) rather than relying purely on GORM's
+  `AutoMigrate`: the four tables that need a real `ON DELETE CASCADE` foreign key
+  (`map_versions`/`map_static_columns` → `maps`, `sessions`/`sso_identities` → `users`) are created
+  via raw `CREATE TABLE IF NOT EXISTS` SQL with every Go-side association tagged `constraint:-` to
+  keep GORM from ever trying to manage that FK itself. That's not just style: SQLite can only
+  declare a foreign key at `CREATE TABLE` time (no `ALTER TABLE ADD CONSTRAINT`), so letting GORM
+  reconcile one on a database created by the old raw-SQL schema makes it recreate the table, and
+  `glebarez/sqlite`'s recreate-table DDL parser (as of v1.11.0) corrupts the column list when a
+  table also has a composite inline `UNIQUE(a, b)` constraint next to a column literally named
+  `column` (a SQL reserved word) — exactly `map_static_columns`' and `sso_identities`' shape.
+  `migrate` works around it by first rewriting (`dropLegacyInlineUniqueConstraint`, with an
+  explicit column list rather than `SELECT *`) any such table still on the old inline-constraint
+  shape into one with a separate named unique index instead, before `AutoMigrate` ever touches it.
+  `AutoMigrate` itself is still what backfills a missing column/index on a database created by an
+  older version of this schema (e.g. the old plain-`INTEGER` boolean/`TEXT` timestamp columns) —
+  see `internal/configdb/legacy_migration_test.go` for a regression test that seeds a database
+  using the old hand-written schema and asserts `Open` migrates it (including cascade deletes)
+  without losing data. Unrelated to `internal/store` (MariaDB geo-object storage); no shared code.
+  The same database also holds `users` and `sessions` tables (`internal/configdb/users.go`),
   backing the web server's authentication — see the `internal/webserver` bullet below. Unlike
   `api`/`database`, `users` and (`internal/configdb/maps.go`) `maps` get real per-row CRUD methods
   instead of only going through the whole-graph `Load`/`Save` above: `ListMaps`/`GetMap`/
   `CreateMap`/`UpdateMap`/`DeleteMap` (returning `ErrMapNotFound`/`ErrMapIDTaken`, mirroring
   `users`' `ErrUserNotFound`/`ErrUsernameTaken`) back the `/api/maps` REST family in
   `internal/webserver/maps.go` — each map is edited independently rather than resubmitting the
-  whole `maps` array. `map_id` has a `CREATE UNIQUE INDEX IF NOT EXISTS` (added in `ensureSchema`,
-  since nothing enforced this before it became a per-map resource key) so `{id}`-addressed
-  lookups are unambiguous; `CreateUser`, `VerifyPassword`, `ListUsers`,
+  whole `maps` array. `map_id` has a unique index (`mapRecord`'s `uniqueIndex` struct tag in
+  `schema.go`, added automatically by `AutoMigrate` — nothing enforced this before it became a
+  per-map resource key) so `{id}`-addressed lookups are unambiguous; `CreateUser`, `VerifyPassword`, `ListUsers`,
   `GetUser`, `UpdateUser`, `DeleteUser`, `CreateSession`, `SessionUser`, `DeleteSession`,
   `UserCount` are `users`' equivalents. Passwords are hashed with
   `golang.org/x/crypto/bcrypt`; a session's random token is only ever stored as its SHA-256 hash

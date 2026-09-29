@@ -3,8 +3,10 @@ package configdb
 import (
 	"Tile-Server-Sync-GO/internal/config"
 	"context"
-	"database/sql"
 	"fmt"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Save persists every field of cfg except WebServer, replacing the
@@ -14,92 +16,65 @@ import (
 // every save; nothing outside this package references them. Save does not
 // call cfg.Validate() itself — callers validate before calling Save.
 func (s *Store) Save(ctx context.Context, cfg *config.Config) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		scalar := configScalar{
+			ID:             1,
+			APIBaseURL:     cfg.API.BaseURL,
+			APIUsername:    cfg.API.Username,
+			APIPassword:    cfg.API.Password,
+			APIToken:       cfg.API.Token,
+			DBDSN:          cfg.Database.DSN,
+			DBTable:        cfg.Database.Table,
+			DBPruneMissing: cfg.Database.PruneMissing,
+			DBSyncOverlays: cfg.Database.SyncOverlays,
+		}
 
-	pruneMissing := 0
-	if cfg.Database.PruneMissing {
-		pruneMissing = 1
-	}
+		err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}},
+			UpdateAll: true,
+		}).Create(&scalar).Error
+		if err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
 
-	syncOverlays := 0
-	if cfg.Database.SyncOverlays {
-		syncOverlays = 1
-	}
+		if err := saveDatabaseColumns(tx, cfg.Database.Columns); err != nil {
+			return err
+		}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO config_scalar
-			(id, api_base_url, api_username, api_password, api_token, db_dsn, db_table,
-			 db_prune_missing, db_sync_overlays)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			api_base_url = excluded.api_base_url,
-			api_username = excluded.api_username,
-			api_password = excluded.api_password,
-			api_token = excluded.api_token,
-			db_dsn = excluded.db_dsn,
-			db_table = excluded.db_table,
-			db_prune_missing = excluded.db_prune_missing,
-			db_sync_overlays = excluded.db_sync_overlays`,
-		cfg.API.BaseURL, cfg.API.Username, cfg.API.Password, cfg.API.Token,
-		cfg.Database.DSN, cfg.Database.Table, pruneMissing, syncOverlays)
-	if err != nil {
-		return fmt.Errorf("save config: %w", err)
-	}
-
-	if err := saveDatabaseColumns(ctx, tx, cfg.Database.Columns); err != nil {
-		return err
-	}
-
-	if err := saveMaps(ctx, tx, cfg.Maps); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-
-	return nil
+		return saveMaps(tx, cfg.Maps)
+	})
 }
 
-func saveDatabaseColumns(ctx context.Context, tx *sql.Tx, columns map[string]string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM database_columns`); err != nil {
+func saveDatabaseColumns(tx *gorm.DB, columns map[string]string) error {
+	if err := tx.Exec("DELETE FROM database_columns").Error; err != nil {
 		return fmt.Errorf("clear database columns: %w", err)
 	}
 
+	if len(columns) == 0 {
+		return nil
+	}
+
+	rows := make([]databaseColumn, 0, len(columns))
 	for field, column := range columns {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO database_columns (field, column) VALUES (?, ?)`, field, column); err != nil {
-			return fmt.Errorf("save database column %q: %w", field, err)
-		}
+		rows = append(rows, databaseColumn{Field: field, Column: column})
+	}
+
+	if err := tx.Create(&rows).Error; err != nil {
+		return fmt.Errorf("save database columns: %w", err)
 	}
 
 	return nil
 }
 
-func saveMaps(ctx context.Context, tx *sql.Tx, maps []config.MapTarget) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM maps`); err != nil {
+func saveMaps(tx *gorm.DB, maps []config.MapTarget) error {
+	if err := tx.Exec("DELETE FROM maps").Error; err != nil {
 		return fmt.Errorf("clear maps: %w", err)
 	}
 
 	for i, m := range maps {
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO maps (map_id, name, sort_order, interval, disabled) VALUES (?, ?, ?, ?, ?)`,
-			m.ID, m.Name, i, m.Interval, boolToInt(m.Disabled))
-		if err != nil {
+		record := mapRecordFromTarget(m, i)
+		if err := tx.Create(&record).Error; err != nil {
 			return fmt.Errorf("save map %q: %w", m.ID, err)
-		}
-
-		mapRowID, err := res.LastInsertId()
-		if err != nil {
-			return fmt.Errorf("get row id for map %q: %w", m.ID, err)
-		}
-
-		if err := insertMapVersionsAndStaticColumns(ctx, tx, mapRowID, m); err != nil {
-			return err
 		}
 	}
 

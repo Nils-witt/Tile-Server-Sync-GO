@@ -8,14 +8,24 @@ on:
 permissions:
   contents: write
 
+# Never run two releases at once, and never cancel one halfway through
+# publishing assets.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   goreleaser:
     name: GoReleaser
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # GoReleaser authenticates via GITHUB_TOKEN below, not the checkout's
+          # stored git credentials.
+          persist-credentials: false
 
       - uses: actions/setup-go@v7
         with:

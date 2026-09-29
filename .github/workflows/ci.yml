@@ -4,16 +4,31 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  # New advisories land in the Go vulnerability database without any code
+  # change here — re-run govulncheck weekly so they surface on their own.
+  schedule:
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
 
+# Superseded pushes to the same PR/branch cancel their still-running CI.
+# main is never cancelled, so every commit there gets a complete run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   frontend:
-    name: Frontend build & lint
+    name: Frontend & binary build
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
@@ -31,35 +46,33 @@ jobs:
 
       - name: Lint
         working-directory: frontend
-        run: npx oxlint
+        run: npm run lint
 
-      # The Go build below (and every other job in this file) embeds
-      # frontend/dist via frontend/embed.go — upload it so "build" doesn't
-      # have to rebuild the frontend a second time.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: frontend/dist
-          retention-days: 1
-
-  build:
-    name: Build & vet
-    needs: frontend
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
+      # The binary embeds frontend/dist via frontend/embed.go — build it here,
+      # right next to the real SPA build, instead of shipping dist to another
+      # job as an artifact. Vet/test/lint below don't need the real dist (the
+      # tracked placeholder index.html satisfies go:embed), so they run in
+      # parallel with this job rather than waiting on it.
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      - uses: actions/download-artifact@v6
-        with:
-          name: frontend-dist
-          path: frontend/dist
-
       - name: Build
-        run: go build -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO
+        run: go build -trimpath -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO
+
+  test:
+    name: Vet & test
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
 
       - name: Vet
         run: go vet ./...
@@ -69,13 +82,20 @@ jobs:
 
   lint:
     name: Lint
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          # golangci-lint-action keeps its own cache (module + analysis
+          # cache); setup-go's would just duplicate the module download.
+          cache: false
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -85,15 +105,15 @@ jobs:
   govulncheck:
     name: Vulnerability scan
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
-
       - name: Run govulncheck
-        run: govulncheck ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
