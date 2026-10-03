@@ -193,7 +193,8 @@ func flatDDL(stmt string) string {
 }
 
 // migrate creates/updates every table this package owns. It first drops
-// the old local-account tables (see removeLocalUserTables); the table
+// the obsolete local-account and SSO-settings tables (see
+// removeObsoleteTables); the table
 // fkTableStatements' foreign keys point at must then exist first (maps); then legacyInlineUniqueTables' one-time rewrite (see
 // dropLegacyInlineUniqueConstraint); then fkTableStatements itself; then
 // GORM's AutoMigrate over every model, which is idempotent (safe on every
@@ -205,7 +206,7 @@ func flatDDL(stmt string) string {
 func (s *Store) migrate(ctx context.Context) error {
 	db := s.db.WithContext(ctx)
 
-	if err := removeLocalUserTables(db); err != nil {
+	if err := removeObsoleteTables(db); err != nil {
 		return err
 	}
 
@@ -239,15 +240,15 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
-// removeLocalUserTables drops the tables that held local accounts on an
-// older database: users (with their own permission grants and, before
+// removeObsoleteTables drops tables an older database still has but nothing
+// reads any more: users (with their own permission grants and, before
 // that, password hashes), plus the sessions and sso_identities rows hanging
-// off it. Every login is SSO now and every permission comes from the
-// token's groups (see internal/webserver/sso_bearer.go), so none of it is
-// read any more. Children go first; this runs before Open enforces foreign
+// off it — every login is SSO now and every permission comes from the
+// token's groups (see internal/webserver/sso_bearer.go) — and sso_config,
+// since the SSO settings moved to the bootstrap file. Children go first; this runs before Open enforces foreign
 // keys anyway. A no-op on a fresh or already-cleaned database.
-func removeLocalUserTables(db *gorm.DB) error {
-	for _, table := range []string{"sessions", "sso_identities", "users"} {
+func removeObsoleteTables(db *gorm.DB) error {
+	for _, table := range []string{"sessions", "sso_identities", "users", "sso_config"} {
 		if err := db.Exec("DROP TABLE IF EXISTS " + table).Error; err != nil {
 			return fmt.Errorf("migrate config schema: drop %s: %w", table, err)
 		}

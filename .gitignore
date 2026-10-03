@@ -9,3 +9,5 @@ node_modules/
 /agent/
 /.agents/
 /.claude/skills/
+# Runtime log written next to the config file
+Tile-Server-Sync-GO.log

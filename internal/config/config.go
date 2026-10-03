@@ -1,15 +1,14 @@
-// Package config loads the application's YAML configuration file.
+// Package config defines the application's configuration types and their
+// validation/defaulting; the small bootstrap YAML file is loaded by
+// LoadBootstrap.
 package config
 
 import (
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Field keys usable in database.columns to map a GeoObject field (or the
@@ -193,45 +192,10 @@ func (c *Config) HasRecurringMaps() bool {
 	return false
 }
 
-// Load reads and parses the YAML config file at path. path is a
-// user-supplied CLI flag naming a local config file, not untrusted input
-// from a remote caller.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is a trusted, user-supplied CLI flag
-	if err != nil {
-		return nil, fmt.Errorf("read config %q: %w", path, err)
-	}
-
-	cfg, err := Parse(data)
-	if err != nil {
-		return nil, fmt.Errorf("%w (from %q)", err, path)
-	}
-
-	return cfg, nil
-}
-
-// Parse unmarshals and validates a YAML config document already in memory
-// (e.g. one already read by the caller), applying the same defaulting and
-// validation Load does. On success, every field left unset in data is
-// filled with its default value.
-func Parse(data []byte) (*Config, error) {
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
-	}
-
-	return &cfg, nil
-}
-
 // Validate checks c for consistency, filling in defaults (Database.Table,
 // Database.Columns, WebServer.Address) as it goes. Callers that assemble a
-// *Config from a source other than Parse (configdb, plus the WebServer
-// overlay applied by runtime.reload) must call this themselves before using
-// the result.
+// *Config (configdb, plus the WebServer overlay applied by
+// syncer.Engine.Reload) must call this themselves before using the result.
 func (c *Config) Validate() error {
 	if c.API.BaseURL == "" {
 		return errors.New("api.baseUrl is required")

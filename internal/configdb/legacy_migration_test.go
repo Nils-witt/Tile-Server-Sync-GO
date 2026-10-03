@@ -190,11 +190,11 @@ func assertLegacyConfigIntact(ctx context.Context, t *testing.T, s *Store) {
 }
 
 // assertLegacyUserTablesDropped checks that migrate removed the old
-// local-account tables (see removeLocalUserTables).
+// local-account and SSO-settings tables (see removeObsoleteTables).
 func assertLegacyUserTablesDropped(ctx context.Context, t *testing.T, s *Store) {
 	t.Helper()
 
-	for _, table := range []string{"users", "sessions", "sso_identities"} {
+	for _, table := range []string{"users", "sessions", "sso_identities", "sso_config"} {
 		if s.db.WithContext(ctx).Migrator().HasTable(table) {
 			t.Errorf("legacy %s table was not dropped", table)
 		}

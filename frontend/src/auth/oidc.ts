@@ -54,10 +54,6 @@ export function onSsoSessionEnded(cb: () => void): () => void {
   return manager.events.addUserUnloaded(cb)
 }
 
-export function oidcEnabled(): boolean {
-  return manager !== null
-}
-
 /**
  * The current access token, renewed first if it has already expired, or null
  * if not signed in via SSO (or the session has ended).
@@ -153,6 +149,6 @@ export async function logoutOidc(): Promise<boolean> {
 }
 
 /** A same-site relative path, or '/'. "//host" is protocol-relative, so it would leave the site. */
-export function safeNext(next: string): string {
+function safeNext(next: string): string {
   return next.startsWith('/') && !next.startsWith('//') ? next : '/'
 }

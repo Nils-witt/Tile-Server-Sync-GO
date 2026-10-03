@@ -181,7 +181,8 @@ func (e *Engine) runSyncMaps(ctx context.Context, ids map[string]struct{}) (int,
 // reload would leave the previous, stale in-memory config — still
 // containing the deleted map — active, so a later scheduled or manual sync
 // would keep re-syncing it and re-inserting the very rows just purged
-// above, with nothing left to prune them afterward.
+// above, with nothing left to prune them afterward. It also drops the map's
+// results from the status recorder, so the status page stops listing it.
 func (e *Engine) DeleteMapObjects(ctx context.Context, mapID string) (int64, error) {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
@@ -194,6 +195,7 @@ func (e *Engine) DeleteMapObjects(ctx context.Context, mapID string) (int64, err
 	deleted, err := db.DeleteMapObjects(ctx, mapID)
 
 	e.removeMap(mapID)
+	e.rec.RemoveMap(mapID)
 
 	return deleted, err
 }

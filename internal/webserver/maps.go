@@ -29,20 +29,6 @@ func listMapsAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 	}
 }
 
-// getMapAPIHandler serves GET /api/maps/{id}: one configured map. Requires
-// view_config.
-func getMapAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		m, err := cfgDB.GetMap(r.Context(), r.PathValue("id"))
-		if err != nil {
-			writeJSON(w, mapErrorStatus(err), errorJSON(err.Error()))
-			return
-		}
-
-		writeJSON(w, http.StatusOK, m)
-	}
-}
-
 // mapSaveResponse is what POST /api/maps and PUT /api/maps/{id} return: the
 // saved map plus whether the change was also applied live — the same
 // Applied/ApplyError concept finishConfigSave uses for a whole config save,

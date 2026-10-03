@@ -10,10 +10,8 @@ import (
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
 )
 
-// configGetResponse is what GET /api/config returns, and (with Applied/
-// ApplyError additionally set) what each of the section save endpoints
-// below returns too. Cfg is the loaded config (WebServer overlaid from the
-// fixed bootstrap value for display) — always set on success, even when
+// configGetResponse is what each of the section save endpoints below
+// returns. Cfg is the saved config — always set on success, even when
 // it's all zero values (e.g. a brand new install with nothing saved yet), so
 // the structured editor always has something to render. API.Password and
 // Database.DSN (which typically embeds the MariaDB credentials) are
@@ -33,39 +31,11 @@ type configGetResponse struct {
 	ApplyError string         `json:"applyError,omitempty"`
 }
 
-// configAPIHandler serves GET /api/config, the JSON the config page's script
-// uses to populate the API/Database tabs (the Maps tab now sources its data
-// from GET /api/maps instead — see maps.go). Saving is done per-section
-// instead — see saveAPISectionHandler/saveDatabaseSectionHandler — so each
-// tab's edit permission is enforced independently at the route level (see
-// webserver.go).
-func configAPIHandler(cfgDB *configdb.Store, webServer config.WebServer) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		getConfig(r.Context(), w, cfgDB, webServer)
-	}
-}
-
-func getConfig(ctx context.Context, w http.ResponseWriter, cfgDB *configdb.Store, webServer config.WebServer) {
-	cfg, err := cfgDB.Load(ctx)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
-		return
-	}
-
-	// Overlay for display/context only — never persisted (see
-	// finishConfigSave).
-	cfg.WebServer = webServer
-	redactSecrets(cfg)
-
-	writeJSON(w, http.StatusOK, configGetResponse{Cfg: cfg})
-}
-
 const maxConfigBodyBytes = 1 << 20 // 1 MiB; config is never remotely this large
 
 // apiSectionRequest/databaseSectionRequest are the request/response bodies
 // for the API/Database section endpoints — each submits or returns only its
-// own tab's fields, unlike the whole-config GET /api/config bundle. GET
-// /api/config/{api,database} return the same shape their PUT counterpart
+// own tab's fields. GET /api/config/{api,database} return the same shape their PUT counterpart
 // expects (see getAPISectionHandler/getDatabaseSectionHandler below).
 type apiSectionRequest struct {
 	API config.API `json:"api"`
@@ -113,7 +83,7 @@ func getDatabaseSectionHandler(cfgDB *configdb.Store) http.HandlerFunc {
 // what it changed (see the diff* helpers in audit_diff.go), also recorded
 // there.
 func sectionSaveHandler(
-	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error, section string,
+	cfgDB *configdb.Store, reload func(context.Context) error, section string,
 	decode func(w http.ResponseWriter, r *http.Request) (merge func(cfg *config.Config) []string, err error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +93,7 @@ func sectionSaveHandler(
 			return
 		}
 
-		saveConfigSection(w, r, cfgDB, webServer, reload, section, merge)
+		saveConfigSection(w, r, cfgDB, reload, section, merge)
 	}
 }
 
@@ -133,10 +103,10 @@ func sectionSaveHandler(
 // returns the section's before value's diff against what it just wrote into
 // cfg.
 func decodeSectionHandler[T any](
-	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error, section string,
+	cfgDB *configdb.Store, reload func(context.Context) error, section string,
 	merge func(cfg *config.Config, req T) []string,
 ) http.HandlerFunc {
-	return sectionSaveHandler(cfgDB, webServer, reload, section, func(w http.ResponseWriter, r *http.Request) (func(*config.Config) []string, error) {
+	return sectionSaveHandler(cfgDB, reload, section, func(w http.ResponseWriter, r *http.Request) (func(*config.Config) []string, error) {
 		var req T
 		if err := decodeConfigBody(w, r, &req); err != nil {
 			return nil, err
@@ -150,9 +120,9 @@ func decodeSectionHandler[T any](
 // stored config, replaces just its API section with the request body, and
 // saves it. Requires edit_config_api (enforced at the route level).
 func saveAPISectionHandler(
-	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+	cfgDB *configdb.Store, reload func(context.Context) error,
 ) http.HandlerFunc {
-	return decodeSectionHandler(cfgDB, webServer, reload, "api",
+	return decodeSectionHandler(cfgDB, reload, "api",
 		func(cfg *config.Config, req apiSectionRequest) []string {
 			changes := diffAPI(cfg.API, req.API)
 			cfg.API = req.API
@@ -164,9 +134,9 @@ func saveAPISectionHandler(
 // saveDatabaseSectionHandler serves POST /api/config/database, the Database
 // analogue of saveAPISectionHandler. Requires edit_config_database.
 func saveDatabaseSectionHandler(
-	cfgDB *configdb.Store, webServer config.WebServer, reload func(context.Context) error,
+	cfgDB *configdb.Store, reload func(context.Context) error,
 ) http.HandlerFunc {
-	return decodeSectionHandler(cfgDB, webServer, reload, "database",
+	return decodeSectionHandler(cfgDB, reload, "database",
 		func(cfg *config.Config, req databaseSectionRequest) []string {
 			changes := diffDatabase(cfg.Database, req.Database)
 			cfg.Database = req.Database
@@ -187,9 +157,11 @@ func decodeConfigBody(w http.ResponseWriter, r *http.Request, v any) error {
 // overwrites just one section and reports what it changed), and hands off to
 // finishConfigSave. Loading first means every section untouched by merge
 // keeps its existing stored value, matching each tab's "save just this tab"
-// semantics.
+// semantics. The stored secrets are captured from that same load before
+// merge overwrites them, so finishConfigSave can restore a blank one without
+// loading the config a second time.
 func saveConfigSection(
-	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
+	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store,
 	reload func(context.Context) error, section string, merge func(cfg *config.Config) []string,
 ) {
 	cfg, err := cfgDB.Load(r.Context())
@@ -198,14 +170,14 @@ func saveConfigSection(
 		return
 	}
 
+	stored := storedSecrets{apiPassword: cfg.API.Password, databaseDSN: cfg.Database.DSN}
 	changes := merge(cfg)
-	finishConfigSave(w, r, cfgDB, webServer, reload, section, changes, cfg)
+	finishConfigSave(w, r, cfgDB, reload, section, changes, cfg, stored)
 }
 
-// finishConfigSave is the common tail shared by every section save:
-// discard/overwrite WebServer with the fixed bootstrap value, fill back in
-// any secret left blank (meaning "unchanged" — see
-// fillStoredSecrets), save, and apply the change live via reload.
+// finishConfigSave is the common tail shared by every section save: fill
+// back in any secret left blank (meaning "unchanged" — see storedSecrets),
+// save, and apply the change live via reload.
 //
 // Deliberately not gated on cfg.Validate(): Config.Validate requires the
 // *whole* config to be complete (api.baseUrl, api credentials, database.dsn —
@@ -219,24 +191,10 @@ func saveConfigSection(
 // valid-but-unreachable API/database), so each tab's edit is never lost
 // while the other tabs are still being filled in.
 func finishConfigSave(
-	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, webServer config.WebServer,
-	reload func(context.Context) error, section string, changes []string, cfg *config.Config,
+	w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store,
+	reload func(context.Context) error, section string, changes []string, cfg *config.Config, stored storedSecrets,
 ) {
-	// Discard whatever WebServer was submitted before saving, so a bad/
-	// irrelevant webServer value can never take effect — it's fixed by the
-	// bootstrap file.
-	cfg.WebServer = webServer
-
-	// The config page never shows stored secrets back to the browser (see
-	// getConfig/redactSecrets), so a blank password/DSN means "unchanged",
-	// not "clear it" — fill them back in from what's already stored before
-	// saving.
-	if cfg.API.Password == "" || cfg.Database.DSN == "" {
-		if err := fillStoredSecrets(r.Context(), cfgDB, cfg); err != nil {
-			writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
-			return
-		}
-	}
+	stored.fill(cfg)
 
 	if err := cfgDB.Save(r.Context(), cfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
@@ -263,7 +221,7 @@ func finishConfigSave(
 // redactSecrets clears cfg.API.Password and cfg.Database.DSN in place before
 // a *config.Config is sent to the browser, so stored secrets are never
 // echoed back into the config page — see configGetResponse and
-// fillStoredSecrets. DSN is included
+// storedSecrets. DSN is included
 // because it typically embeds the MariaDB username/password (e.g.
 // "user:pass@tcp(...)"), not just a host/database name.
 func redactSecrets(cfg *config.Config) {
@@ -271,28 +229,26 @@ func redactSecrets(cfg *config.Config) {
 	cfg.Database.DSN = ""
 }
 
-// fillStoredSecrets fills cfg.API.Password and/or cfg.Database.DSN in from
-// the currently stored config when a save request submits either blank,
-// since the config page never shows the real values back to the browser, so
-// leaving a field blank means "unchanged" (see finishConfigSave). A brand
-// new/unconfigured install has no stored values to fall back to, which is
-// fine: the field just stays empty, exactly as if the user had typed
-// nothing.
-func fillStoredSecrets(ctx context.Context, cfgDB *configdb.Store, cfg *config.Config) error {
-	stored, err := cfgDB.Load(ctx)
-	if err != nil {
-		return fmt.Errorf("load stored config: %w", err)
-	}
+// storedSecrets holds the API password and database DSN as stored before a
+// section save. The config page never shows the real values back to the
+// browser (see redactSecrets), so a blank field in a save request means
+// "unchanged", not "clear it". A brand new/unconfigured install has no stored
+// values to fall back to, which is fine: the field just stays empty, exactly
+// as if the user had typed nothing.
+type storedSecrets struct {
+	apiPassword string
+	databaseDSN string
+}
 
+// fill restores each secret cfg left blank from s.
+func (s storedSecrets) fill(cfg *config.Config) {
 	if cfg.API.Password == "" {
-		cfg.API.Password = stored.API.Password
+		cfg.API.Password = s.apiPassword
 	}
 
 	if cfg.Database.DSN == "" {
-		cfg.Database.DSN = stored.Database.DSN
+		cfg.Database.DSN = s.databaseDSN
 	}
-
-	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -42,16 +42,10 @@ export interface MapTarget {
   disabled: boolean
 }
 
-export interface WebServerSection {
-  enabled: boolean
-  address: string
-}
-
 export interface Config {
   api: ApiSection
   database: DatabaseSection
   maps: MapTarget[]
-  webServer: WebServerSection
 }
 
 export interface ConfigGetResponse {

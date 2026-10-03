@@ -143,14 +143,13 @@ func run(ctx context.Context, configPath string) error {
 
 	if boot.WebServer.Enabled {
 		stopWebServer := startWebServer(webserver.Options{
-			Addr:      boot.WebServer.Address,
-			Recorder:  rec,
-			ConfigDB:  cfgDB,
-			WebServer: boot.WebServer,
-			SSO:       boot.SSO,
-			Version:   version,
-			Commit:    commit,
-			Engine:    eng,
+			Addr:     boot.WebServer.Address,
+			Recorder: rec,
+			ConfigDB: cfgDB,
+			SSO:      boot.SSO,
+			Version:  version,
+			Commit:   commit,
+			Engine:   eng,
 		})
 		defer stopWebServer()
 

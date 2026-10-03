@@ -271,9 +271,22 @@ func (s *Store) upsertObjects(
 
 	rowWidth := len(accessors) + len(staticArgs)
 
+	// Every batch but (possibly) the last has exactly upsertBatchRows rows,
+	// so its statement is built once and reused; only a shorter final batch
+	// needs its own.
+	var fullBatchSQL string
+
 	for start := 0; start < len(objects); start += upsertBatchRows {
 		end := min(start+upsertBatchRows, len(objects))
 		batch := objects[start:end]
+
+		stmt := fullBatchSQL
+		if len(batch) < upsertBatchRows {
+			stmt = s.upsertSQL(cols, len(batch))
+		} else if stmt == "" {
+			fullBatchSQL = s.upsertSQL(cols, upsertBatchRows)
+			stmt = fullBatchSQL
+		}
 
 		args := make([]any, 0, rowWidth*len(batch))
 
@@ -285,7 +298,7 @@ func (s *Store) upsertObjects(
 			args = append(args, staticArgs...)
 		}
 
-		if _, err := tx.ExecContext(ctx, s.upsertSQL(cols, len(batch)), args...); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 			return fmt.Errorf("upsert geo objects %d-%d: %w", start, end-1, err)
 		}
 	}

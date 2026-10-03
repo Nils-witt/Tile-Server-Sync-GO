@@ -80,6 +80,26 @@ func (r *Recorder) RecordMapVersion(mapID, version string, synced int, err error
 	r.results[key] = res
 }
 
+// RemoveMap forgets every recorded map/version result for mapID, so a map
+// deleted from the config stops showing on the status page.
+func (r *Recorder) RemoveMap(mapID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	order := r.order[:0]
+
+	for _, key := range r.order {
+		if r.results[key].MapID == mapID {
+			delete(r.results, key)
+			continue
+		}
+
+		order = append(order, key)
+	}
+
+	r.order = order
+}
+
 // RecordRun records the completion of a full syncAll run: runErr is the
 // error returned by syncAll itself (nil on success), and totalSynced is the
 // number of objects synced across every map/version in the run.

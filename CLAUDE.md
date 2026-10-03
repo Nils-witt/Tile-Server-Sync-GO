@@ -58,12 +58,10 @@ other field of `config.Config` (`api`, `database`, `maps`) lives in a SQLite dat
 file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `oidc` (see "SSO" below).
 
 - **`internal/config`** — defines `Config` (`API`, `Database`, `[]MapTarget`, `WebServer`) and its
-  validation/defaulting (`Validate`, exported since callers other than `Parse` now assemble a
-  `*Config` themselves — see `configdb.Store.Load`/`syncer.Engine.Reload`). `Load`/`Parse` (YAML bytes →
-  validated `*Config`) still exist as a general-purpose YAML entry point, but nothing in this
-  repo calls them anymore — the web config editor now reads/writes structured JSON only (its
-  `raw` YAML view was removed; see the `internal/webserver` bullet below) and the bootstrap file
-  goes through the separate `LoadBootstrap`/`Bootstrap` type instead. `Bootstrap`
+  validation/defaulting (`Validate`, exported since callers assemble a `*Config` themselves — see
+  `configdb.Store.Load`/`syncer.Engine.Reload`). There is no YAML loader for `Config` itself (the
+  old `Load`/`Parse` were removed): the web config editor reads/writes structured JSON only and the
+  bootstrap file goes through the separate `LoadBootstrap`/`Bootstrap` type. `Bootstrap`
   (`bootstrap.go`) is the separate, minimal file-backed type — `LoadBootstrap` reads it, applies
   the same `webServer.enabled && address == ""` defaulting as `Validate` (shared via
   `WebServer.applyDefault`), defaults/validates `SSO` (`sso.go`: blank `scopes`/`buttonLabel` get
@@ -131,9 +129,9 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `schema.go`, added automatically by `AutoMigrate` — nothing enforced this before it became a
   per-map resource key) so `{id}`-addressed lookups are unambiguous. There are **no user tables**:
   every login is SSO and every permission comes from the token's groups (see "SSO" below), so
-  `migrate`'s first step, `removeLocalUserTables`, drops the `users`/`sessions`/`sso_identities`
-  tables an older database still has. The SSO *settings* live in the bootstrap file, not here
-  (older databases may still contain an unused `sso_config` table, which nothing drops). Finally it holds `security_log`
+  `migrate`'s first step, `removeObsoleteTables`, drops the `users`/`sessions`/`sso_identities`
+  tables an older database still has, plus `sso_config` — the SSO *settings* live in the bootstrap
+  file, not here. Finally it holds `security_log`
   (`internal/configdb/securitylog.go`), an append-only audit trail — see the security log bullet
   under "Authentication & permissions" below.
 - **`internal/tileserve`** — minimal synchronous HTTP client for tileserve-go. `Login()`
@@ -190,12 +188,13 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   file; anything else — `/`, `/config/maps`, a hard-reload on any client-side route — falls back to
   `index.html` so `react-router` (running client-side) can render it.
 
-  `GET /api/config` (`internal/webserver/config.go`) returns the whole stored config as a bundle
-  (`{config}`, secrets redacted — see `redactSecrets`), reading/writing a `*configdb.Store` instead
-  of a file path; an empty/unconfigured database is not an error, so the SPA's structured form
-  always has something to render (blank on a fresh install). The API and Database tabs are each
-  their own sub-resource — `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database`. A `PUT` loads the currently stored
-  config, replaces just that one section, and saves — deliberately *not* gated on `Config.Validate()`
+  The API and Database tabs are each their own sub-resource (`internal/webserver/config.go`) —
+  `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database` — reading/writing a
+  `*configdb.Store`, secrets redacted on the way out (see `redactSecrets`); an empty/unconfigured
+  database is not an error, so the SPA's structured form always has something to render (blank on
+  a fresh install). There is no whole-config `GET /api/config` bundle any more. A `PUT` loads the
+  currently stored config once (capturing the stored password/DSN, so a blank secret in the request
+  means "unchanged" — see `storedSecrets`), replaces just that one section, and saves — deliberately *not* gated on `Config.Validate()`
   passing for the whole merged config (see `finishConfigSave`'s doc comment in `config.go`), since
   that would make it impossible to ever save a single tab during initial setup (each tab alone is
   always "incomplete"). Instead every save calls `reload` (see below) immediately afterward and
@@ -206,8 +205,8 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   a process restart — see below.
 
   The Maps tab is not a config section at all but a first-class CRUD resource
-  (`internal/webserver/maps.go`): `GET`/`POST /api/maps` (collection) and `GET`/`PUT`/`DELETE
-  /api/maps/{id}` (one map), each independently addressable/mutable — adding, editing, or removing
+  (`internal/webserver/maps.go`): `GET`/`POST /api/maps` (collection) and `PUT`/`DELETE
+  /api/maps/{id}` (one map — there's no single-map `GET`; the SPA only uses the list), each independently addressable/mutable — adding, editing, or removing
   one map no longer means resubmitting every other configured map. `POST`/`PUT` validate the
   candidate map against the *rest* of the currently stored maps via the exported
   `config.Config.ValidateMaps()` (checking id/versions/interval/staticColumns, plus that no two

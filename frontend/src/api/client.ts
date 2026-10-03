@@ -1,5 +1,4 @@
 import type {
-  Config,
   ConfigGetResponse,
   DatabaseSection,
   ApiSection,
@@ -69,7 +68,6 @@ export const api = {
   status: () => apiFetch<StatusSnapshot>('/api/status'),
   syncMap: (id: string) => postJSON<SyncResponse>(`/api/maps/${encodeURIComponent(id)}/sync`, {}),
 
-  getConfig: () => apiFetch<ConfigGetResponse>('/api/config'),
   getAPISection: () => apiFetch<{ api: ApiSection }>('/api/config/api'),
   saveAPISection: (section: ApiSection) => putJSON<ConfigGetResponse>('/api/config/api', { api: section }),
   getDatabaseSection: () => apiFetch<{ database: DatabaseSection }>('/api/config/database'),
@@ -87,4 +85,3 @@ export const api = {
   securityLog: () => apiFetch<SecurityLogEntry[]>('/api/security-log'),
 }
 
-export type { Config }

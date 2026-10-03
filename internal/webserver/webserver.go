@@ -32,19 +32,17 @@ type Options struct {
 	Addr     string
 	Recorder *status.Recorder
 	ConfigDB *configdb.Store
-	// WebServer is the fixed, bootstrap-file-sourced value (see New).
-	WebServer config.WebServer
-	SSO       config.SSO
-	Version   string
-	Commit    string
-	Engine    Engine
+	SSO      config.SSO
+	Version  string
+	Commit   string
+	Engine   Engine
 }
 
 // New builds an *http.Server serving the built React SPA (see spa.go) for
 // every browser-navigated route ("/", "/config", "/security-log",
 // "/login", and any client-side sub-route of those), backed by a
 // JSON API under "/api/...": status (api/status), a config editor
-// (api/config and its per-section GET/PUT endpoints, plus the api/maps CRUD
+// (per-section GET/PUT endpoints under api/config, plus the api/maps CRUD
 // family for the Maps tab — see config.go and maps.go), and a
 // superuser-only audit trail (api/security-log, see security_log.go)
 // recording logins and config/map changes. Every API route is gated behind
@@ -56,13 +54,12 @@ type Options struct {
 //
 // A successful config save also calls Engine.Reload itself, so the running process
 // picks up the change immediately without a separate action — see
-// finishConfigSave in config.go. webServer is the fixed,
-// bootstrap-file-sourced WebServer value: the config editor always displays
-// it for context but can never change it, since applying a changed
-// webServer.enabled/address needs a process restart the server itself can't
-// safely trigger mid-request.
+// finishConfigSave in config.go. The bootstrap-file-sourced webServer
+// settings are deliberately not exposed or editable here, since applying a
+// changed webServer.enabled/address needs a process restart the server
+// itself can't safely trigger mid-request.
 func New(opts Options) *http.Server {
-	addr, rec, cfgDB, webServer, sso := opts.Addr, opts.Recorder, opts.ConfigDB, opts.WebServer, opts.SSO
+	addr, rec, cfgDB, sso := opts.Addr, opts.Recorder, opts.ConfigDB, opts.SSO
 	version, commit, eng := opts.Version, opts.Commit, opts.Engine
 	reload := eng.Reload
 
@@ -81,20 +78,19 @@ func New(opts Options) *http.Server {
 
 	mux.HandleFunc("GET /api/status", requirePermission(auth, permViewStatus)(statusAPIHandler(rec)))
 
-	// Config: GET /api/config is the whole-config bundle (api/database
-	// sections — the Maps tab is served by the /api/maps family below
-	// instead). Each section has its own GET (view_config) and PUT
+	// Config: the api/database sections (the Maps tab is served by the
+	// /api/maps family below instead). Each section has its own GET
+	// (view_config) and PUT
 	// (edit_config_{api,database}) registered separately, so the
 	// permission each method requires is visible right here rather than
 	// buried in a per-handler method switch.
-	mux.HandleFunc("GET /api/config", requirePermission(auth, permViewConfig)(configAPIHandler(cfgDB, webServer)))
 	mux.HandleFunc("GET /api/config/api", requirePermission(auth, permViewConfig)(getAPISectionHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/config/api",
-		requirePermission(auth, permEditConfigAPI)(saveAPISectionHandler(cfgDB, webServer, reload)))
+		requirePermission(auth, permEditConfigAPI)(saveAPISectionHandler(cfgDB, reload)))
 	mux.HandleFunc("GET /api/config/database",
 		requirePermission(auth, permViewConfig)(getDatabaseSectionHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/config/database",
-		requirePermission(auth, permEditConfigDatabase)(saveDatabaseSectionHandler(cfgDB, webServer, reload)))
+		requirePermission(auth, permEditConfigDatabase)(saveDatabaseSectionHandler(cfgDB, reload)))
 
 	// Maps: a first-class CRUD resource (see maps.go), not a config section —
 	// each map is independently addressable/mutable, so adding or editing one
@@ -102,7 +98,6 @@ func New(opts Options) *http.Server {
 	mux.HandleFunc("GET /api/maps", requirePermission(auth, permViewConfig)(listMapsAPIHandler(cfgDB)))
 	mux.HandleFunc("POST /api/maps",
 		requirePermission(auth, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload, eng.CreateMapOverlays)))
-	mux.HandleFunc("GET /api/maps/{id}", requirePermission(auth, permViewConfig)(getMapAPIHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/maps/{id}",
 		requirePermission(auth, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload, eng.UpdateMapOverlays)))
 	mux.HandleFunc("DELETE /api/maps/{id}",
