@@ -42,6 +42,14 @@ func spaHandler(distFS fs.FS) http.HandlerFunc {
 			return
 		}
 
+		// A missing hashed asset (e.g. a stale index.html referencing an old
+		// build) is a real 404, not a client-side route: answering it with the
+		// HTML shell only surfaces as a baffling "wrong MIME type" module error.
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			http.NotFound(w, r)
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 

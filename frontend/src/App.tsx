@@ -4,6 +4,8 @@ import { useAuth } from './auth/AuthContext'
 import { RequirePermission, RequireSuperuser } from './auth/guards'
 import { ProtectedLayout } from './components/ProtectedLayout'
 import { LoginPage } from './pages/LoginPage'
+import { SsoCallbackPage } from './pages/SsoCallbackPage'
+import { SSO_CALLBACK_PATH } from './auth/oidc'
 import { SetupPage } from './pages/SetupPage'
 import { StatusPage } from './pages/StatusPage'
 import { UsersPage } from './pages/UsersPage'
@@ -15,7 +17,8 @@ import { ConfigPage } from './pages/config/ConfigPage'
 // internal/webserver/auth.go): while setup hasn't happened yet, every route
 // but /setup bounces there; once it has, /setup bounces to /login;
 // unauthenticated access to anything but /login bounces to /login?next=...;
-// and being authenticated on /login or /setup bounces to /.
+// and being authenticated on /login or /setup bounces to /. The SSO callback
+// route is exempt from all of this (see SsoCallbackPage).
 function AuthGate() {
   const { ready, me, needsSetup } = useAuth()
   const location = useLocation()
@@ -25,6 +28,10 @@ function AuthGate() {
     if (!ready) return
 
     const path = location.pathname
+
+    // The SSO callback page finishes the provider's login and navigates on its
+    // own; redirecting away first would lose the authorization response.
+    if (path === SSO_CALLBACK_PATH) return
 
     if (needsSetup) {
       if (path !== '/setup') navigate('/setup', { replace: true })
@@ -54,6 +61,7 @@ function AuthGate() {
     <Routes>
       <Route path="/setup" element={<SetupPage />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path={SSO_CALLBACK_PATH} element={<SsoCallbackPage />} />
       <Route element={me ? <ProtectedLayout /> : <NullElement />}>
         <Route
           path="/"

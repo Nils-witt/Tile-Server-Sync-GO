@@ -13,7 +13,6 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': backend,
-      '/login/sso': backend,
     },
   },
   build: {

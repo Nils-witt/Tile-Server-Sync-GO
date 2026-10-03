@@ -2,7 +2,6 @@ import { Navigate, NavLink, Outlet, Route, Routes } from 'react-router-dom'
 import { ApiTab } from './ApiTab'
 import { DatabaseTab } from './DatabaseTab'
 import { MapsTab } from './MapsTab'
-import { SsoTab } from './SsoTab'
 
 function ConfigShell() {
   return (
@@ -24,9 +23,6 @@ function ConfigShell() {
         <NavLink to="maps" className="tab-btn" role="tab">
           Maps
         </NavLink>
-        <NavLink to="sso" className="tab-btn" role="tab">
-          SSO
-        </NavLink>
       </div>
 
       <Outlet />
@@ -42,7 +38,6 @@ export function ConfigPage() {
         <Route path="api" element={<ApiTab />} />
         <Route path="database" element={<DatabaseTab />} />
         <Route path="maps" element={<MapsTab />} />
-        <Route path="sso" element={<SsoTab />} />
       </Route>
     </Routes>
   )

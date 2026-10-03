@@ -10,13 +10,13 @@ import type {
   Permissions,
   SecurityLogEntry,
   SetupStatus,
-  SSOConfig,
   SSOStatus,
   StatusSnapshot,
   SyncResponse,
   User,
   VersionInfo,
 } from './types'
+import { getAccessToken, renewAccessToken } from '../auth/oidc'
 
 /** Thrown by apiFetch on a non-2xx response; message is the server's own {"error": "..."}. */
 export class ApiError extends Error {
@@ -29,10 +29,16 @@ export class ApiError extends Error {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: init?.body ? { 'Content-Type': 'application/json', ...init.headers } : init?.headers,
-  })
+  let token = await getAccessToken()
+  let res = await send(path, init, token)
+
+  // A rejected SSO token (expired, or revoked at the provider) gets one silent
+  // renewal attempt before the 401 is surfaced; a local session has nothing
+  // to renew.
+  if (res.status === 401 && token) {
+    token = await renewAccessToken()
+    if (token) res = await send(path, init, token)
+  }
 
   const body = await res.json().catch(() => ({}))
 
@@ -41,6 +47,14 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return body as T
+}
+
+function send(path: string, init: RequestInit | undefined, token: string | null): Promise<Response> {
+  const headers = new Headers(init?.headers)
+  if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+
+  return fetch(path, { ...init, headers })
 }
 
 function postJSON<T>(path: string, body: unknown): Promise<T> {
@@ -71,8 +85,6 @@ export const api = {
   saveDatabaseSection: (section: DatabaseSection) =>
     putJSON<ConfigGetResponse>('/api/config/database', { database: section }),
 
-  getSSOConfig: () => apiFetch<SSOConfig>('/api/config/sso'),
-  saveSSOConfig: (cfg: SSOConfig) => putJSON<SSOConfig>('/api/config/sso', cfg),
 
   listMaps: () => apiFetch<MapTarget[]>('/api/maps'),
   createMap: (m: MapTarget) => postJSON<MapSaveResponse>('/api/maps', m),

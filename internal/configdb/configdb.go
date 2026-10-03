@@ -55,11 +55,6 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := gdb.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
-	}
-
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("ping config database: %w", err)
@@ -67,9 +62,19 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	s := &Store{db: gdb}
 
+	// Foreign keys are only enforced after migrating: both AutoMigrate and
+	// rebuildLegacyUsersTable recreate tables (copy, drop, rename), and
+	// dropping users with enforcement on would cascade-delete every session
+	// and SSO link. PRAGMA foreign_keys is a no-op inside a transaction, so
+	// this can't be done per migration step instead.
 	if err := s.migrate(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
+	}
+
+	if err := gdb.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	return s, nil

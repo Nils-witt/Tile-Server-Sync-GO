@@ -47,10 +47,10 @@ config.LoadBootstrap()  →  configdb.Store  →  tileserve.Client  →  store.S
  (YAML → Bootstrap)        (SQLite → Config)   (HTTP API client)   (MariaDB upsert)
 ```
 
-`Bootstrap` (just `webServer` + `configDb`) comes from the small YAML file at `-config`; every
+`Bootstrap` (`webServer` + `configDb` + `oidc`) comes from the small YAML file at `-config`; every
 other field of `config.Config` (`api`, `database`, `maps`) lives in a SQLite database at
 `Bootstrap.ConfigDB` instead, edited through the `/config` web UI. `webServer` stays
-file/CLI-driven — see "why webServer isn't in SQLite" below.
+file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `oidc` (see "SSO" below).
 
 - **`internal/config`** — defines `Config` (`API`, `Database`, `[]MapTarget`, `WebServer`) and its
   validation/defaulting (`Validate`, exported since callers other than `Parse` now assemble a
@@ -61,8 +61,9 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   goes through the separate `LoadBootstrap`/`Bootstrap` type instead. `Bootstrap`
   (`bootstrap.go`) is the separate, minimal file-backed type — `LoadBootstrap` reads it, applies
   the same `webServer.enabled && address == ""` defaulting as `Validate` (shared via
-  `WebServer.applyDefault`), and resolves `ConfigDB` (default `"config.db"`) relative to the
-  bootstrap file's own directory. `Config.Maps` is a list of `{id, versions[], interval,
+  `WebServer.applyDefault`), defaults/validates `SSO` (`sso.go`: blank `scopes`/`buttonLabel` get
+  defaults; `issuerUrl`/`clientId` are required when `enabled`, failing startup otherwise), and
+  resolves `ConfigDB` (default `"config.db"`) relative to the bootstrap file's own directory. `Config.Maps` is a list of `{id, versions[], interval,
   staticColumns, disabled}` entries; a version string may be a real numeric version, the literal
   `"current"`, or a user-defined alias (see `PUT /maps/{id}/aliases/{alias}` in the tileserve-go
   API). Each map's own optional `interval` (a Go duration string, parsed by
@@ -105,6 +106,15 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   `migrate` works around it by first rewriting (`dropLegacyInlineUniqueConstraint`, with an
   explicit column list rather than `SELECT *`) any such table still on the old inline-constraint
   shape into one with a separate named unique index instead, before `AutoMigrate` ever touches it.
+  The underlying parser bug is broader: it treats a **tab** as a quote character, so any stored
+  `CREATE TABLE` text containing a tab gets misread. Every hand-written DDL statement is therefore
+  passed through `flatDDL` (whitespace collapsed to single spaces) before it's executed, and
+  `rebuildLegacyUsersTable` rebuilds a `users` table whose DDL still has a tab or whose
+  `created_at` is still `TEXT`. The sqlite driver only returns `time.Time` for date-typed columns,
+  so a `TEXT` `created_at` fails every user load with a Scan error. `Open` runs `migrate` *before*
+  enabling `PRAGMA foreign_keys`, because recreating a parent table (`users`) with enforcement on
+  would cascade-delete its sessions and SSO links. The pragma is a no-op inside a transaction, so
+  it can't be toggled per migration step.
   `AutoMigrate` itself is still what backfills a missing column/index on a database created by an
   older version of this schema (e.g. the old plain-`INTEGER` boolean/`TEXT` timestamp columns) —
   see `internal/configdb/legacy_migration_test.go` for a regression test that seeds a database
@@ -124,9 +134,10 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   `UserCount` are `users`' equivalents. Passwords are hashed with
   `golang.org/x/crypto/bcrypt`; a session's random token is only ever stored as its SHA-256 hash
   (`sessions.token_hash`) — the raw token lives solely in the browser's session cookie. The same
-  database also holds `sso_config` (a singleton settings row, `internal/configdb/sso.go`) and
-  `sso_identities` (linking a verified OIDC `(issuer, subject)` pair to a `users` row) backing
-  optional SSO login — see "Authentication & permissions" below. Finally it holds `security_log`
+  database also holds `sso_identities` (`internal/configdb/sso.go`, linking a verified OIDC
+  `(issuer, subject)` pair to a `users` row) backing optional SSO login — the SSO *settings*
+  themselves live in the bootstrap file, not here (older databases may still contain an unused
+  `sso_config` table and `users.perm_edit_config_sso` column, which `AutoMigrate` never drops) — see "Authentication & permissions" below. Finally it holds `security_log`
   (`internal/configdb/securitylog.go`), an append-only audit trail — see the security log bullet
   under "Authentication & permissions" below.
 - **`internal/tileserve`** — minimal synchronous HTTP client for tileserve-go. `Login()`
@@ -135,22 +146,25 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   (`GeoObject` struct mirrors the API's schema exactly — field-for-field, including JSON tags).
 - **`frontend`** — the UI: a Vite + React + TypeScript SPA (client-routed with `react-router-dom`),
   entirely separate from the root `package.json`/Husky setup (its own `frontend/package.json`,
-  `node_modules`, lockfile). Routes: `/` (status), `/config/{api,database,maps,sso}` (tabs, each its
+  `node_modules`, lockfile). Routes: `/` (status), `/config/{api,database,maps}` (tabs, each its
   own route rather than the old hash-fragment tab switcher), `/users`, `/security-log`, `/login`,
-  `/setup` — all in `frontend/src/pages`. `frontend/src/auth/AuthContext.tsx` fetches `GET
-  /api/me` + `GET /api/setup-status` once on load; `App.tsx`'s `AuthGate` is what the old server-side
+  `/login/sso/callback`, `/setup` — all in `frontend/src/pages`. `frontend/src/auth/AuthContext.tsx`
+  fetches `GET /api/sso/status` (to set up the browser-side OIDC client, see "SSO" below) and then
+  `GET /api/me` + `GET /api/setup-status` once on load; `App.tsx`'s `AuthGate` is what the old server-side
   `setupGate`/`requireUser(page=true)` redirects (see "Authentication & permissions" below) turned
   into — it client-side-redirects to `/setup`/`/login`/`/` based on those two calls plus the current
   route, instead of the server ever 302ing a page request. Per-route permission checks
   (`frontend/src/auth/guards.tsx`'s `RequirePermission`/`RequireSuperuser`) render a plain
   "forbidden" message in place of a page the logged-in user lacks the permission for — a UX nicety
   only; every actual enforcement is still the server's `requirePermission`/`requireSuperuser` on each
-  API call. `frontend/src/api/client.ts` + `types.ts` are the one place that knows every JSON DTO
+  API call. `frontend/src/api/client.ts`'s `apiFetch` attaches the SSO access token (if any) as
+  `Authorization: Bearer` to every call and retries once after a refresh-token renewal on a 401.
+  `frontend/src/api/client.ts` + `types.ts` are the one place that knows every JSON DTO
   shape `internal/webserver` sends/expects — keep them in sync by hand when a Go DTO's fields change,
   there's no code generation between them.
 
   Building it (`npm ci && npm run build` inside `frontend/`, or `npm run dev` for a live-reloading
-  dev server that proxies `/api` and `/login/sso` to a separately-running backend — see
+  dev server that proxies `/api` to a separately-running backend — see
   `vite.config.ts`'s `VITE_BACKEND` env var, default `http://localhost:8080`) produces
   `frontend/dist`, embedded into the Go binary by `frontend/embed.go`'s `//go:embed all:dist`
   (`frontend.Dist`) and served by `internal/webserver/spa.go` — see that bullet below. `frontend/dist`
@@ -171,13 +185,12 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   registered as `"GET /"` (a *method-qualified* catch-all, not a bare `"/"`) last, so every
   `/api/...` pattern above still wins for the paths it owns: a bare `"/"` would match every
   unmatched *method* on every other path too, silently suppressing the mux's automatic 405 for the
-  whole `/api/...` family. That same conflict rule is also why `/login/sso` and
-  `/login/sso/callback` (real browser redirects for the OIDC dance, not JSON — see "SSO" below) had
-  to move from a bare, all-methods pattern to `"GET /login/sso"`/`"GET /login/sso/callback"` once
-  `spaHandler`'s `"GET /"` catch-all existed: `net/http.ServeMux.HandleFunc` *panics* at
-  registration time on two patterns where neither dominates the other on both the method and path
-  dimensions (a bare pattern is broader on method but narrower on path than `"GET /"`, which is the
-  reverse) — see `webserver.go`'s comment at the `spaHandler` registration for the exact rule.
+  whole `/api/...` family. Any non-`/api` route registered later must therefore be method-qualified
+  too: `net/http.ServeMux.HandleFunc` *panics* at registration time on two patterns where neither
+  dominates the other on both the method and path dimensions (a bare pattern is broader on method
+  but narrower on path than `"GET /"`, which is the reverse) — see `webserver.go`'s comment at the
+  `spaHandler` registration for the exact rule. There are currently no such routes:
+  `/login/sso/callback` is a client-side route served by `spaHandler` like any other.
   `spaHandler` itself: a request naming a real file under the embedded `frontend/dist` (e.g.
   `/assets/index-<hash>.js`, long-cached since Vite content-hashes those names) is served as that
   file; anything else — `/`, `/config/maps`, a hard-reload on any client-side route — falls back to
@@ -187,8 +200,7 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
   (`{config}`, secrets redacted — see `redactSecrets`), reading/writing a `*configdb.Store` instead
   of a file path; an empty/unconfigured database is not an error, so the SPA's structured form
   always has something to render (blank on a fresh install). The API and Database tabs are each
-  their own sub-resource — `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database` — as is
-  SSO (`GET`/`PUT /api/config/sso`, `internal/webserver/sso.go`). A `PUT` loads the currently stored
+  their own sub-resource — `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database`. A `PUT` loads the currently stored
   config, replaces just that one section, and saves — deliberately *not* gated on `Config.Validate()`
   passing for the whole merged config (see `finishConfigSave`'s doc comment in `config.go`), since
   that would make it impossible to ever save a single tab during initial setup (each tab alone is
@@ -253,7 +265,8 @@ file/CLI-driven — see "why webServer isn't in SQLite" below.
 
 ### Authentication & permissions
 
-Every API route the web server serves requires a logged-in account — there is no public route
+Every API route the web server serves requires a logged-in account (a local session cookie or an
+SSO bearer token — see below) — there is no public route
 anymore, including status (`/api/status`). `internal/webserver/spa.go`'s static-file serving is the
 one exception (see the `internal/webserver` bullet above): the SPA shell itself is always served
 regardless of session, since it's the SPA's own `AuthGate` (see the `frontend` bullet above) that
@@ -261,19 +274,19 @@ now does what server-side page redirects used to. Accounts live in `configdb`'s 
 tables (see above) and are managed at `/users` (superuser-only, backed by `/api/users`,
 `/api/users/{id}`).
 
-Each account has seven independent boolean permissions (`configdb.Permissions`): `view_status`,
-`trigger_sync`, `view_config`, and four config-editing permissions — `edit_config_api`,
-`edit_config_database`, `edit_config_maps`, `edit_config_sso` — one per `/config` tab, enforced
+Each account has six independent boolean permissions (`configdb.Permissions`): `view_status`,
+`trigger_sync`, `view_config`, and three config-editing permissions — `edit_config_api`,
+`edit_config_database`, `edit_config_maps` — one per `/config` tab, enforced
 independently at each tab's own save endpoint (see the `internal/webserver` bullet above). There
 is deliberately no umbrella "edit config" flag. A separate `is_superuser` flag (not one of the
-seven) gates `/users` only — it's orthogonal to the seven feature permissions, not a superset of
+six) gates `/users` only — it's orthogonal to the six feature permissions, not a superset of
 them, so a superuser account with none of them still can't see the status page or `/config`, and a
 fully-permissioned non-superuser still can't reach `/users`.
 
 Every security-relevant action also appends a row to `configdb`'s append-only `security_log` table
 (`internal/configdb/securitylog.go`, `Store.LogSecurityEvent`/`Store.ListSecurityLog`) — local and
-SSO logins (success and failure), logouts, account creation/update/deletion, every config section
-save (`config_saved`, `section=api|database|sso`), and every map create/update/delete
+SSO logins (success and failure — see "SSO" below for when those are recorded), logouts, account creation/update/deletion, every config section
+save (`config_saved`, `section=api|database`), and every map create/update/delete
 (`map_created`/`map_updated`/`map_deleted`, distinct event types since maps are their own resource
 — see the `internal/webserver` bullet above), each with a timestamp, event type, the acting
 username (or attempted username, for a failed login), the request's `RemoteAddr`, and a short
@@ -282,9 +295,9 @@ For every change event (a config save, a map create/update/delete, or a user cre
 that detail also records what actually changed —
 built by the `diff*`/`changesDetail`/`grantedPermissions` helpers in
 `internal/webserver/audit_diff.go`, which compare the before/after `config.Config`/
-`config.MapTarget`/`configdb.SSOConfig`/`configdb.Permissions` field by field (e.g. `changed: baseUrl
+`config.MapTarget`/`configdb.Permissions` field by field (e.g. `changed: baseUrl
 "a"->"b", table changed`) — never in plaintext for a secret field (`API.Password`,
-`Database.DSN`, SSO `ClientSecret`, account passwords), which are only ever reported as changed.
+`Database.DSN`, account passwords), which are only ever reported as changed.
 Writing a log entry is
 best-effort — `internal/webserver/security_log.go`'s `logSecurityEvent` helper only logs a write
 failure to stderr, never blocks or fails the action that triggered it. `GET /security-log`
@@ -295,31 +308,56 @@ account-management detail and remote addresses not meant for every logged-in use
 ### SSO (OpenID Connect)
 
 Optional, in addition to local username/password accounts (which are never disabled and remain
-how the very first account is created at `/setup`). Configured on `/config`'s SSO tab
-(`internal/webserver/sso.go`, `GET`/`PUT /api/config/sso` gated by `view_config`/
-`edit_config_sso` respectively) and stored in `configdb`'s `sso_config` row — nothing about it is
-cached in the running process: `internal/webserver/sso_login.go` re-resolves the provider's OIDC
-discovery document (`github.com/coreos/go-oidc/v3/oidc`) and rebuilds the `oauth2.Config`
-(`golang.org/x/oauth2`) fresh on every `/login/sso` and `/login/sso/callback` request, unlike
-`runtime.reload`'s cached `{cfg, client, db}` — SSO logins are infrequent enough (interactive,
-human-driven) that the extra discovery round-trip per attempt is cheap, and this avoids a second
-live-reload path to maintain. The unauthenticated `GET /api/sso/status` tells
-`frontend/src/pages/LoginPage.tsx` whether to render an SSO button and with what label, without
-exposing provider details.
+how the very first account is created at `/setup`). Configured only in the bootstrap file's `oidc:`
+section (`config.SSO` — `enabled`, `issuerUrl`, `clientId`, `scopes`, `buttonLabel`,
+`defaultPermissions`; see `config.example.yaml`), passed from `run` through `startWebServer` into
+`webserver.New`, and fixed for the process's lifetime — changing it needs a restart, and there is no
+SSO tab or `edit_config_sso` permission in the web UI. There is no client secret.
 
-`GET /login/sso` starts the authorization-code-with-PKCE flow (state/nonce/verifier held in a
-short-lived `gso_sso_flow` cookie, mirroring the session cookie's `HttpOnly`/`SameSite=Lax`/
-conditional-`Secure` shape); `GET /login/sso/callback` verifies the ID token (audience, nonce) and
-resolves the verified `(issuer, subject)` to a local user via
-`configdb.Store.FindOrCreateSSOUser`: an existing link logs straight in; failing that, a local
-account already named the claimed username (email, else `preferred_username`, else the subject
-identifier) is linked to instead of duplicated; failing that, a new account is auto-provisioned
-with the permission set configured on the SSO tab (`sso_config`'s `default_*` columns) and a
-random, never-revealed password. An SSO-provisioned account is never a superuser automatically —
-that stays a manual grant via `/users`, exactly like every other account-creation path.
+The server takes no part in the login itself. The SPA is a **public OIDC client**:
+`frontend/src/auth/oidc.ts` wraps `oidc-client-ts`'s `UserManager`, built from the unauthenticated
+`GET /api/sso/status` (which returns `issuerUrl`/`clientId`/`scopes` while SSO is enabled — none
+secret). It runs authorization code + PKCE directly against the provider, with
+`<origin>/login/sso/callback` (`frontend/src/pages/SsoCallbackPage.tsx`) as the redirect URI. The
+provider must therefore register the client as public/SPA and allow this origin for CORS. Tokens
+live in `sessionStorage`. Renewal is deliberately **refresh-token only**: oidc-client-ts's
+`automaticSilentRenew` is off because, without a refresh token, it falls back to a hidden iframe,
+which providers sending `X-Frame-Options: deny` (e.g. Authentik) refuse. `oidc.ts`'s
+`renewAccessToken` runs on `accessTokenExpiring`, on an already-expired token, and on an API 401.
+Concurrent callers share one in-flight refresh, since rotated refresh tokens are single-use. It uses
+the refresh token if there is one (the `offline_access` scope, which must be in `oidc.scopes`);
+otherwise, or if the refresh fails, it drops the user. `AuthContext` listens for that
+(`onSsoSessionEnded`) and clears `me`, so `AuthGate` sends the browser back to `/login?next=...`.
 
-`internal/webserver/auth.go` implements this: `requireUser`/`requirePermission`/`requireSuperuser`
-are `http.HandlerFunc` wrappers that always write a JSON 401/403 (there's no more `page bool`
+The provider's **access token (a JWT)** is then the API credential: `client.ts` sends it as
+`Authorization: Bearer` on every `/api/...` call, and `requireUser` (`internal/webserver/auth.go`)
+checks for that header before the session cookie. If the header is present but invalid, the
+request fails with 401 — there is no fallback to the cookie. `internal/webserver/sso_bearer.go`'s
+`ssoBearerUser` verifies the token with a cached `go-oidc` verifier per
+issuer (`ssoVerifierCache`, built in `New` and handed to the auth wrappers via `authenticator`;
+the JWKS is cached by go-oidc's `RemoteKeySet`), checking signature, issuer and expiry, with
+`SkipClientIDCheck` because access-token `aud` is provider-specific. It then binds the token to
+the configured client itself (`tokenIssuedTo`: `azp` or `aud` must name the client ID).
+
+The verified `(issuer, subject)` is resolved to a local user via
+`configdb.Store.FindOrCreateSSOUser` on every request (a single indexed lookup once linked, so
+permission edits on `/users` apply to the next request): an existing link is used as-is; failing
+that, a local account already named the claimed username (email, else `preferred_username`, else
+the subject identifier) is linked to instead of duplicated; failing that, a new account is
+auto-provisioned with `oidc.defaultPermissions` (converted to `configdb.Permissions` by
+`ssoDefaultPermissions` in `internal/webserver/sso.go`) and a random, never-revealed password. An SSO-provisioned account is never a superuser
+automatically — that stays a manual grant via `/users`, exactly like every other account-creation
+path.
+
+Since there's no server-side login step, `sso_login` is recorded by `GET /api/me` whenever it's
+bearer-authenticated. The SPA calls it once right after the provider callback and once per page
+load, which avoids logging every API request. A rejected bearer token logs `sso_login_failed`,
+except plain expiry (routine for an idle tab), which only goes to stderr. Logout is client-side for
+SSO users: the token is dropped and, if the provider advertises an `end_session_endpoint`, the
+browser is redirected to it.
+
+`internal/webserver/auth.go` implements local accounts: `requireUser`/`requirePermission`/
+`requireSuperuser` (all taking the shared `*authenticator`) are `http.HandlerFunc` wrappers that always write a JSON 401/403 (there's no more `page bool`
 branch redirecting a browser request server-side — every route here is JSON-only now that the SPA
 owns all page routing; see the `frontend` bullet above). Sessions are a random token (in an
 `HttpOnly`, `SameSite=Lax` cookie — `Secure` only when the request arrived over TLS, since the

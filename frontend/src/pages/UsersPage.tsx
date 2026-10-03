@@ -10,7 +10,6 @@ const PERM_COLUMNS: { key: keyof Permissions; label: string }[] = [
   { key: 'editConfigAPI', label: 'Edit API' },
   { key: 'editConfigDatabase', label: 'Edit database' },
   { key: 'editConfigMaps', label: 'Edit maps' },
-  { key: 'editConfigSSO', label: 'Edit SSO' },
 ]
 
 const emptyPermissions: Permissions = {
@@ -20,7 +19,6 @@ const emptyPermissions: Permissions = {
   editConfigAPI: false,
   editConfigDatabase: false,
   editConfigMaps: false,
-  editConfigSSO: false,
 }
 
 export function UsersPage() {

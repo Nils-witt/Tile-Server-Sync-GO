@@ -166,7 +166,7 @@ func run(ctx context.Context, configPath string) error {
 		}
 
 		stopWebServer := startWebServer(
-			boot.WebServer.Address, rec, cfgDB, boot.WebServer, reload, syncMap, deleteMapObjects,
+			boot.WebServer.Address, rec, cfgDB, boot.WebServer, boot.SSO, reload, syncMap, deleteMapObjects,
 			createMapOverlays, updateMapOverlays, deleteMapOverlays,
 		)
 		defer stopWebServer()
@@ -230,7 +230,7 @@ func openLogFile(configPath string) (*os.File, error) {
 // logged rather than returned, since a status page failing to start
 // shouldn't stop the sync itself.
 func startWebServer(
-	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer,
+	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer, sso config.SSO,
 	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
 	deleteMapObjects func(context.Context, string) (int64, error),
 	createMapOverlays func(context.Context, config.MapTarget) error,
@@ -238,7 +238,7 @@ func startWebServer(
 	deleteMapOverlays func(context.Context, config.MapTarget) error,
 ) (stop func()) {
 	srv := webserver.New(
-		addr, rec, cfgDB, webServer, version, commit, reload, syncMap, deleteMapObjects,
+		addr, rec, cfgDB, webServer, sso, version, commit, reload, syncMap, deleteMapObjects,
 		createMapOverlays, updateMapOverlays, deleteMapOverlays,
 	)
 

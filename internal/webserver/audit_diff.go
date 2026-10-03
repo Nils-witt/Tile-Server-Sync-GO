@@ -107,47 +107,6 @@ func diffMapFields(old, updated config.MapTarget) []string {
 	return changes
 }
 
-// diffSSO compares two configdb.SSOConfig values field by field.
-// ClientSecret is only reported as changed, matching API.Password/
-// Database.DSN.
-func diffSSO(before, after *configdb.SSOConfig) []string {
-	var changes []string
-
-	if before.Enabled != after.Enabled {
-		changes = append(changes, fmt.Sprintf("enabled %v->%v", before.Enabled, after.Enabled))
-	}
-
-	if before.IssuerURL != after.IssuerURL {
-		changes = append(changes, fmt.Sprintf("issuerUrl %q->%q", before.IssuerURL, after.IssuerURL))
-	}
-
-	if before.ClientID != after.ClientID {
-		changes = append(changes, fmt.Sprintf("clientId %q->%q", before.ClientID, after.ClientID))
-	}
-
-	if before.ClientSecret != after.ClientSecret {
-		changes = append(changes, "clientSecret changed")
-	}
-
-	if before.Scopes != after.Scopes {
-		changes = append(changes, fmt.Sprintf("scopes %q->%q", before.Scopes, after.Scopes))
-	}
-
-	if before.ButtonLabel != after.ButtonLabel {
-		changes = append(changes, fmt.Sprintf("buttonLabel %q->%q", before.ButtonLabel, after.ButtonLabel))
-	}
-
-	if before.RedirectBaseURL != after.RedirectBaseURL {
-		changes = append(changes, fmt.Sprintf("redirectBaseUrl %q->%q", before.RedirectBaseURL, after.RedirectBaseURL))
-	}
-
-	if permChanges := diffPermissions(before.DefaultPermissions, after.DefaultPermissions); len(permChanges) > 0 {
-		changes = append(changes, "defaultPermissions: "+strings.Join(permChanges, ", "))
-	}
-
-	return changes
-}
-
 // permissionFields lists a configdb.Permissions' boolean fields alongside
 // the label used to describe each in a security_log detail string, shared by
 // diffPermissions and grantedPermissions.
@@ -161,7 +120,6 @@ var permissionFields = []struct {
 	{"editConfigApi", func(p configdb.Permissions) bool { return p.EditConfigAPI }},
 	{"editConfigDatabase", func(p configdb.Permissions) bool { return p.EditConfigDatabase }},
 	{"editConfigMaps", func(p configdb.Permissions) bool { return p.EditConfigMaps }},
-	{"editConfigSso", func(p configdb.Permissions) bool { return p.EditConfigSSO }},
 }
 
 // diffPermissions reports which individual permission bits flipped between

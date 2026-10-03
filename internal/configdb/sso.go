@@ -1,3 +1,8 @@
+// This file holds the SSO side of the users table: linking a verified OIDC
+// identity to a local account. The SSO settings themselves live in the
+// bootstrap file (config.SSO), not here; older databases may still contain
+// an unused sso_config table from when they did.
+
 package configdb
 
 import (
@@ -10,76 +15,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
-
-// SSOConfig is the stored OpenID Connect SSO configuration: whether it's
-// enabled, the provider's connection details, and the permission set
-// auto-granted to a newly provisioned SSO account (see FindOrCreateSSOUser).
-// is_superuser is deliberately not part of this: SSO-provisioned accounts
-// are never superusers automatically, matching every other account creation
-// path (see allPermissions in internal/webserver/auth.go for the one
-// exception, the very first account created at /setup). ID is always 1 (a
-// singleton row, like config_scalar) — set by SaveSSOConfig, never by
-// callers.
-type SSOConfig struct {
-	ID      int64 `gorm:"column:id;primaryKey;autoIncrement:false;check:sso_config_singleton,id = 1" json:"-"`
-	Enabled bool  `gorm:"column:enabled;not null;default:false"`
-	// IssuerURL is the OIDC provider's issuer, e.g.
-	// "https://accounts.example.com" — passed to oidc.NewProvider for
-	// discovery.
-	IssuerURL    string `gorm:"column:issuer_url;not null;default:''"`
-	ClientID     string `gorm:"column:client_id;not null;default:''"`
-	ClientSecret string `gorm:"column:client_secret;not null;default:''"`
-	// Scopes is a space-separated OAuth2 scope list, e.g.
-	// "openid profile email".
-	Scopes string `gorm:"column:scopes;not null;default:''"`
-	// ButtonLabel is the text shown on the login page's SSO button.
-	ButtonLabel string `gorm:"column:button_label;not null;default:''"`
-	// RedirectBaseURL, if set, is used (plus "/login/sso/callback") as the
-	// OAuth2 redirect URI instead of one derived from the incoming request's
-	// scheme/host — needed behind a reverse proxy or TLS terminator where
-	// the request seen by this process doesn't reflect the externally
-	// visible URL.
-	RedirectBaseURL    string      `gorm:"column:redirect_base_url;not null;default:''"`
-	DefaultPermissions Permissions `gorm:"embedded;embeddedPrefix:default_"`
-}
-
-// TableName pins this model to a singular name — GORM would otherwise
-// pluralize "SSOConfig" to "sso_configs".
-func (SSOConfig) TableName() string { return "sso_config" }
-
-// LoadSSOConfig loads the stored SSO settings. No row yet (a fresh install)
-// is not an error: it returns a zero-valued *SSOConfig (Enabled: false),
-// exactly as Store.Load does for an empty config_scalar table.
-func (s *Store) LoadSSOConfig(ctx context.Context) (*SSOConfig, error) {
-	var cfg SSOConfig
-
-	switch err := s.db.WithContext(ctx).First(&cfg, 1).Error; {
-	case errors.Is(err, gorm.ErrRecordNotFound):
-		return &SSOConfig{}, nil
-	case err != nil:
-		return nil, fmt.Errorf("load sso config: %w", err)
-	}
-
-	return &cfg, nil
-}
-
-// SaveSSOConfig replaces the stored SSO settings wholesale (single-row
-// upsert, matching config_scalar's).
-func (s *Store) SaveSSOConfig(ctx context.Context, cfg *SSOConfig) error {
-	cfg.ID = 1
-
-	err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "id"}},
-		UpdateAll: true,
-	}).Create(cfg).Error
-	if err != nil {
-		return fmt.Errorf("save sso config: %w", err)
-	}
-
-	return nil
-}
 
 // FindOrCreateSSOUser resolves a verified OIDC identity (issuer + subject,
 // from the ID token's iss/sub claims) to a local user, in three steps:

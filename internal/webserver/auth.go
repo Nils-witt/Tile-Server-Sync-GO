@@ -1,10 +1,12 @@
 package webserver
 
 import (
+	"Tile-Server-Sync-GO/internal/config"
 	"Tile-Server-Sync-GO/internal/configdb"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -20,7 +22,10 @@ const sessionTTL = 7 * 24 * time.Hour
 
 type contextKey int
 
-const userContextKey contextKey = 0
+const (
+	userContextKey contextKey = iota
+	bearerAuthContextKey
+)
 
 // currentUser returns the user attached to ctx by requireUser, if any.
 func currentUser(ctx context.Context) (*configdb.User, bool) {
@@ -28,22 +33,56 @@ func currentUser(ctx context.Context) (*configdb.User, bool) {
 	return u, ok
 }
 
-// requireUser resolves the session cookie to a user before calling next,
-// storing the user in the request context (see currentUser). Every route in
-// this package is JSON-only (the frontend is a client-routed SPA — see
-// spa.go — with no server-rendered page left to redirect), so a missing/
-// invalid session always gets a 401 JSON body; the SPA itself decides
-// whether to navigate to /login based on that.
-func requireUser(cfgDB *configdb.Store) func(http.HandlerFunc) http.HandlerFunc {
+// viaBearer reports whether requireUser authenticated this request with an
+// SSO bearer token rather than a session cookie.
+func viaBearer(ctx context.Context) bool {
+	b, _ := ctx.Value(bearerAuthContextKey).(bool)
+	return b
+}
+
+// authenticator bundles what requireUser needs to resolve a request to a
+// user: the configdb store (sessions, users), the bootstrap file's SSO
+// config, and the cache of OIDC verifiers for bearer tokens (see
+// sso_bearer.go). One is built per server in New and shared by every route.
+type authenticator struct {
+	cfgDB     *configdb.Store
+	sso       config.SSO
+	verifiers *ssoVerifierCache
+}
+
+// requireUser resolves the request to a user before calling next, storing
+// the user in the request context (see currentUser). Two credentials are
+// accepted: an "Authorization: Bearer" SSO access token (see
+// ssoBearerUser) — checked first, and with no fallback to the cookie if it
+// fails, so a stale token is never silently masked by an unrelated session —
+// or else the local-login session cookie. Every route in this package is
+// JSON-only (the frontend is a client-routed SPA — see spa.go — with no
+// server-rendered page left to redirect), so a missing/invalid credential
+// always gets a 401 JSON body; the SPA itself decides whether to navigate
+// to /login based on that.
+func requireUser(a *authenticator) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			if raw, ok := bearerToken(r); ok {
+				user, err := ssoBearerUser(r.Context(), a.cfgDB, a.sso, a.verifiers, raw)
+				if err != nil {
+					rejectBearer(w, r, a.cfgDB, err)
+					return
+				}
+
+				ctx := context.WithValue(r.Context(), userContextKey, user)
+				next(w, r.WithContext(context.WithValue(ctx, bearerAuthContextKey, true)))
+
+				return
+			}
+
 			cookie, err := r.Cookie(sessionCookieName)
 			if err != nil {
 				writeJSON(w, http.StatusUnauthorized, errorJSON("not logged in"))
 				return
 			}
 
-			user, err := cfgDB.SessionUser(r.Context(), cookie.Value)
+			user, err := a.cfgDB.SessionUser(r.Context(), cookie.Value)
 			if err != nil {
 				writeJSON(w, http.StatusUnauthorized, errorJSON("not logged in"))
 				return
@@ -54,13 +93,39 @@ func requireUser(cfgDB *configdb.Store) func(http.HandlerFunc) http.HandlerFunc 
 	}
 }
 
+// bearerToken extracts the token from an "Authorization: Bearer <token>"
+// header (scheme matched case-insensitively, per RFC 7235).
+func bearerToken(r *http.Request) (string, bool) {
+	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+		return "", false
+	}
+
+	return strings.TrimSpace(token), true
+}
+
+// rejectBearer answers a failed bearer check with a generic 401 — the
+// specific reason is only logged server-side. An expired token (a routine
+// event for an idle tab, which the SPA recovers from by renewing it) only
+// goes to stderr; anything else (bad signature, wrong issuer/client, SSO
+// disabled) is also recorded as sso_login_failed in the security log.
+func rejectBearer(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, err error) {
+	log.Printf("sso: bearer token rejected: %v", err)
+
+	if !isTokenExpired(err) {
+		logSecurityEvent(r, cfgDB, "sso_login_failed", "", err.Error())
+	}
+
+	writeJSON(w, http.StatusUnauthorized, errorJSON("invalid or expired token"))
+}
+
 // requirePermission composes requireUser with a check of the logged-in
 // user's Permissions, denying with a 403 JSON body if check returns false.
 func requirePermission(
-	cfgDB *configdb.Store, check func(configdb.Permissions) bool,
+	a *authenticator, check func(configdb.Permissions) bool,
 ) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
-		return requireUser(cfgDB)(func(w http.ResponseWriter, r *http.Request) {
+		return requireUser(a)(func(w http.ResponseWriter, r *http.Request) {
 			user, _ := currentUser(r.Context())
 			if !check(user.Permissions) {
 				writeJSON(w, http.StatusForbidden, errorJSON("forbidden"))
@@ -74,9 +139,9 @@ func requirePermission(
 
 // requireSuperuser composes requireUser with an IsSuperuser check, the same
 // way requirePermission checks a Permissions flag.
-func requireSuperuser(cfgDB *configdb.Store) func(http.HandlerFunc) http.HandlerFunc {
+func requireSuperuser(a *authenticator) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
-		return requireUser(cfgDB)(func(w http.ResponseWriter, r *http.Request) {
+		return requireUser(a)(func(w http.ResponseWriter, r *http.Request) {
 			user, _ := currentUser(r.Context())
 			if !user.IsSuperuser {
 				writeJSON(w, http.StatusForbidden, errorJSON("forbidden"))
@@ -174,20 +239,6 @@ func readLoginCredentials(w http.ResponseWriter, r *http.Request) (username, pas
 	return req.Username, req.Password, nil
 }
 
-// safeNext returns next if it's a same-site relative path (starts with "/"
-// but not "//", which browsers treat as protocol-relative and could send a
-// logged-in user off-site), or "/" otherwise. Only the SSO redirect flow
-// (sso_login.go) still needs this — the local-login path above no longer
-// carries a "next" through a redirect at all, since the SPA itself already
-// knows what page it was on.
-func safeNext(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return "/"
-	}
-
-	return next
-}
-
 // setSessionCookie and clearSessionCookie set Secure conditionally on
 // r.TLS rather than unconditionally true: this server is documented (see
 // webserver.go) as usable on a plain-HTTP trusted network, and a browser
@@ -260,7 +311,7 @@ func setupHandler(cfgDB *configdb.Store) http.HandlerFunc {
 func allPermissions() configdb.Permissions {
 	return configdb.Permissions{
 		ViewStatus: true, TriggerSync: true, ViewConfig: true,
-		EditConfigAPI: true, EditConfigDatabase: true, EditConfigMaps: true, EditConfigSSO: true,
+		EditConfigAPI: true, EditConfigDatabase: true, EditConfigMaps: true,
 	}
 }
 
@@ -316,21 +367,26 @@ type meResponse struct {
 	Permissions configdb.Permissions `json:"permissions"`
 }
 
-func meAPIHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+// meAPIHandler serves GET /api/me. It doubles as the audit point for SSO
+// logins: a bearer-authenticated request carries no login step of its own
+// on this server (the SPA talks to the provider directly), and logging every
+// bearer request would flood the security log, so sso_login is recorded
+// here instead — the SPA calls /api/me exactly once right after completing
+// the provider's login, and once per page load.
+func meAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, ok := currentUser(r.Context())
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, errorJSON("not logged in"))
+			return
+		}
 
-		return
+		if viaBearer(r.Context()) {
+			logSecurityEvent(r, cfgDB, "sso_login", user.Username, "")
+		}
+
+		writeJSON(w, http.StatusOK, meResponse{
+			Username: user.Username, IsSuperuser: user.IsSuperuser, Permissions: user.Permissions,
+		})
 	}
-
-	user, ok := currentUser(r.Context())
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, errorJSON("not logged in"))
-		return
-	}
-
-	writeJSON(w, http.StatusOK, meResponse{
-		Username: user.Username, IsSuperuser: user.IsSuperuser, Permissions: user.Permissions,
-	})
 }

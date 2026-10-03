@@ -9,7 +9,6 @@ export interface Permissions {
   editConfigAPI: boolean
   editConfigDatabase: boolean
   editConfigMaps: boolean
-  editConfigSSO: boolean
 }
 
 export interface Me {
@@ -85,20 +84,13 @@ export interface SyncResponse {
   error?: string
 }
 
-export interface SSOConfig {
-  enabled: boolean
-  issuerUrl: string
-  clientId: string
-  clientSecret: string
-  scopes: string
-  buttonLabel: string
-  redirectBaseUrl: string
-  defaultPermissions: Permissions
-}
-
+/** Public SSO settings; the provider fields are only present while SSO is enabled. */
 export interface SSOStatus {
   enabled: boolean
   buttonLabel: string
+  issuerUrl?: string
+  clientId?: string
+  scopes?: string
 }
 
 export interface User {

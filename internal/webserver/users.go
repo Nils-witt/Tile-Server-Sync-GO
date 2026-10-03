@@ -33,7 +33,7 @@ func toUserDTO(u configdb.User) userDTO {
 
 // listUsersAPIHandler serves GET /api/users: listing every account.
 // Requires superuser (enforced by the route-level requireSuperuser wrapper
-// in webserver.go), not any of the seven feature permissions.
+// in webserver.go), not any of the six feature permissions.
 func listUsersAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) { listUsers(w, r, cfgDB) }
 }

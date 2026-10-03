@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
+import { startLogin } from '../auth/oidc'
 import { Banner, type BannerState } from '../components/Banner'
 import { Footer } from '../components/Footer'
 import { ThemeToggle } from '../components/ThemeToggle'
@@ -50,8 +51,12 @@ export function LoginPage() {
     }
   }
 
-  function handleSSOLogin() {
-    window.location.href = `/login/sso?next=${encodeURIComponent(next)}`
+  async function handleSSOLogin() {
+    try {
+      await startLogin(next)
+    } catch (err) {
+      setBanner({ ok: false, text: `SSO sign-in failed: ${err instanceof Error ? err.message : err}` })
+    }
   }
 
   return (

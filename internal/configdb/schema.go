@@ -222,16 +222,92 @@ func (s *Store) dropLegacyInlineUniqueConstraint(ctx context.Context, table, cre
 
 	return db.Transaction(func(tx *gorm.DB) error {
 		for _, stmt := range []string{
-			"PRAGMA foreign_keys = OFF",
 			"DROP TABLE IF EXISTS " + tmpTable,
-			strings.Replace(createSQL, table, tmpTable, 1),
+			flatDDL(strings.Replace(createSQL, table, tmpTable, 1)),
 			fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", tmpTable, columns, columns, table),
 			"DROP TABLE " + table,
 			"ALTER TABLE " + tmpTable + " RENAME TO " + table,
-			"PRAGMA foreign_keys = ON",
 		} {
 			if err := tx.Exec(stmt).Error; err != nil {
 				return fmt.Errorf("rewrite legacy table %q: %w", table, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// flatDDL collapses a hand-written statement's whitespace to single spaces
+// before it's executed. SQLite stores CREATE TABLE text verbatim, and
+// glebarez/sqlite's DDL parser (used by AutoMigrate to diff and recreate a
+// table) treats a tab as a quote character, so tab-indented DDL makes it
+// misread every column after the first tab: it then skips type changes or
+// corrupts the column list when copying rows into a recreated table.
+func flatDDL(stmt string) string {
+	return strings.Join(strings.Fields(stmt), " ")
+}
+
+// usersRebuildColumns is every users column the User model maps, in
+// rebuildLegacyUsersTable's copy order.
+const usersRebuildColumns = "id, username, password_hash, is_superuser, perm_view_status, perm_trigger_sync, " +
+	"perm_view_config, perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, created_at"
+
+// rebuildLegacyUsersTable recreates users when its created_at column is
+// still declared TEXT. The sqlite driver only returns time.Time for
+// date-typed columns, so a TEXT one fails every user load with a Scan
+// error. AutoMigrate normally widens it, but not when the stored DDL still
+// contains a tab (see flatDDL) — e.g. the old tab-indented CREATE TABLE
+// with a column later appended by ALTER TABLE ADD COLUMN — in which case it
+// misreads created_at's type and silently skips it. A users table whose DDL
+// still has a tab is rebuilt too, so later AutoMigrate runs can parse it.
+// Columns the model no longer maps (perm_edit_config_sso) are dropped.
+//
+// users is the parent of sessions and sso_identities; this relies on
+// migrate running before Open enforces foreign keys, so DROP TABLE doesn't
+// cascade to them. They reference users by name and resolve to the
+// rebuilt table once it is renamed.
+func (s *Store) rebuildLegacyUsersTable(ctx context.Context) error {
+	db := s.db.WithContext(ctx)
+
+	var colType, ddl string
+	if err := db.Raw(
+		`SELECT type FROM pragma_table_info('users') WHERE name = 'created_at'`,
+	).Scan(&colType).Error; err != nil {
+		return fmt.Errorf("inspect users table: %w", err)
+	}
+
+	if err := db.Raw(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'`,
+	).Scan(&ddl).Error; err != nil {
+		return fmt.Errorf("inspect users table: %w", err)
+	}
+
+	if colType == "" || (strings.EqualFold(colType, "datetime") && !strings.Contains(ddl, "\t")) {
+		return nil
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, stmt := range []string{
+			"DROP TABLE IF EXISTS users__rebuild",
+			`CREATE TABLE users__rebuild (
+				id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+				username                  TEXT NOT NULL,
+				password_hash             TEXT NOT NULL,
+				is_superuser              numeric NOT NULL DEFAULT false,
+				perm_view_status          numeric,
+				perm_trigger_sync         numeric,
+				perm_view_config          numeric,
+				perm_edit_config_api      numeric,
+				perm_edit_config_database numeric,
+				perm_edit_config_maps     numeric,
+				created_at                datetime NOT NULL
+			)`,
+			"INSERT INTO users__rebuild (" + usersRebuildColumns + ") SELECT " + usersRebuildColumns + " FROM users",
+			"DROP TABLE users",
+			"ALTER TABLE users__rebuild RENAME TO users",
+		} {
+			if err := tx.Exec(flatDDL(stmt)).Error; err != nil {
+				return fmt.Errorf("rebuild users table: %w", err)
 			}
 		}
 
@@ -256,6 +332,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate config schema: %w", err)
 	}
 
+	if err := s.rebuildLegacyUsersTable(ctx); err != nil {
+		return fmt.Errorf("migrate config schema: %w", err)
+	}
+
 	for _, t := range legacyInlineUniqueTables {
 		if err := s.dropLegacyInlineUniqueConstraint(ctx, t.table, t.createSQL, t.columns); err != nil {
 			return fmt.Errorf("migrate config schema: %w", err)
@@ -263,7 +343,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 
 	for _, stmt := range fkTableStatements {
-		if err := db.Exec(stmt).Error; err != nil {
+		if err := db.Exec(flatDDL(stmt)).Error; err != nil {
 			return fmt.Errorf("migrate config schema: %w", err)
 		}
 	}
@@ -276,7 +356,6 @@ func (s *Store) migrate(ctx context.Context) error {
 		&mapStaticColumn{},
 		&User{},
 		&session{},
-		&SSOConfig{},
 		&ssoIdentity{},
 		&SecurityLogEntry{},
 	); err != nil {

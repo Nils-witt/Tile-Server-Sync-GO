@@ -12,7 +12,7 @@ import (
 
 // tableColumns returns a table's column names via PRAGMA table_info, used
 // to verify the embedded-Permissions naming-strategy assumptions documented
-// on User/SSOConfig in users.go/sso.go.
+// on User in users.go.
 func tableColumns(t *testing.T, s *Store, table string) []string {
 	t.Helper()
 
@@ -85,12 +85,7 @@ func TestEmbeddedPermissionColumnNames(t *testing.T) {
 
 	assertContainsAll(t, "users", tableColumns(t, s, "users"), []string{
 		"perm_view_status", "perm_trigger_sync", "perm_view_config",
-		"perm_edit_config_api", "perm_edit_config_database", "perm_edit_config_maps", "perm_edit_config_sso",
-	})
-
-	assertContainsAll(t, "sso_config", tableColumns(t, s, "sso_config"), []string{
-		"default_view_status", "default_trigger_sync", "default_view_config",
-		"default_edit_config_api", "default_edit_config_database", "default_edit_config_maps", "default_edit_config_sso",
+		"perm_edit_config_api", "perm_edit_config_database", "perm_edit_config_maps",
 	})
 }
 
@@ -100,12 +95,12 @@ func TestUserSessionRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTestStore(t)
 
-	u, err := s.CreateUser(ctx, "alice", "hunter2", Permissions{ViewStatus: true, EditConfigSSO: true}, true)
+	u, err := s.CreateUser(ctx, "alice", "hunter2", Permissions{ViewStatus: true, EditConfigMaps: true}, true)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	if !u.Permissions.ViewStatus || !u.Permissions.EditConfigSSO || !u.IsSuperuser {
+	if !u.Permissions.ViewStatus || !u.Permissions.EditConfigMaps || !u.IsSuperuser {
 		t.Errorf("permissions not roundtripped: %+v", u)
 	}
 
@@ -314,26 +309,5 @@ func TestSecurityLogRoundtrip(t *testing.T) {
 
 	if entries[0].At.IsZero() {
 		t.Errorf("timestamp not parsed back: %+v", entries[0])
-	}
-}
-
-func TestSSOConfigRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	s, _ := openTestStore(t)
-
-	cfg := &SSOConfig{Enabled: true, IssuerURL: "https://issuer", DefaultPermissions: Permissions{ViewStatus: true}}
-	if err := s.SaveSSOConfig(ctx, cfg); err != nil {
-		t.Fatalf("save sso: %v", err)
-	}
-
-	loaded, err := s.LoadSSOConfig(ctx)
-	if err != nil {
-		t.Fatalf("load sso: %v", err)
-	}
-
-	if !loaded.Enabled || loaded.IssuerURL != "https://issuer" || !loaded.DefaultPermissions.ViewStatus {
-		t.Errorf("sso mismatch: %+v", loaded)
 	}
 }

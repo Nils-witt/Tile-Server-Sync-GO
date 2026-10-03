@@ -34,7 +34,6 @@ type Permissions struct {
 	EditConfigAPI      bool `json:"editConfigAPI"`
 	EditConfigDatabase bool `json:"editConfigDatabase"`
 	EditConfigMaps     bool `json:"editConfigMaps"`
-	EditConfigSSO      bool `json:"editConfigSSO"`
 }
 
 // User is a stored account. PasswordHash is exported only because GORM
@@ -44,9 +43,10 @@ type Permissions struct {
 // hand-built DTO instead, e.g. internal/webserver/users.go's userDTO).
 // IsSuperuser is orthogonal to Permissions: it only gates user management
 // (see internal/webserver/users.go), and is not implied by, nor implies,
-// any of the seven feature permissions. Permissions is embedded with the
-// "perm_" column prefix — see schema.go's migrate and SSOConfig's
-// DefaultPermissions for the "default_"-prefixed counterpart.
+// any of the six feature permissions. Permissions is embedded with the
+// "perm_" column prefix — see schema.go's migrate. Older databases also have
+// an unused, nullable perm_edit_config_sso column from when SSO settings
+// were editable in the web UI; AutoMigrate never drops it.
 type User struct {
 	ID           int64       `gorm:"column:id;primaryKey;autoIncrement"        json:"-"`
 	Username     string      `gorm:"column:username;not null;uniqueIndex"      json:"-"`
@@ -157,7 +157,6 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, perms Permissions, isS
 		"perm_edit_config_api":      perms.EditConfigAPI,
 		"perm_edit_config_database": perms.EditConfigDatabase,
 		"perm_edit_config_maps":     perms.EditConfigMaps,
-		"perm_edit_config_sso":      perms.EditConfigSSO,
 	}
 
 	if newPassword != "" {
