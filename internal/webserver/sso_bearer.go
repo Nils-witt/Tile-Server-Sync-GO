@@ -14,6 +14,7 @@ import (
 	"Tile-Server-Sync-GO/internal/config"
 	"Tile-Server-Sync-GO/internal/configdb"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -98,7 +99,9 @@ type bearerClaims struct {
 // and resolves it to a local user, auto-provisioning one on first sight (see
 // configdb.Store.FindOrCreateSSOUser). Called on every bearer-authenticated
 // request, so a permission change made on /users takes effect on the very
-// next request.
+// next request. The returned user's Permissions and IsSuperuser also include
+// whatever the token's groups grant via oidc.groupPermissions (see
+// groupGrants); that addition is never written back to the database.
 func ssoBearerUser(
 	ctx context.Context, cfgDB *configdb.Store, ssoCfg config.SSO, cache *ssoVerifierCache, rawToken string,
 ) (*configdb.User, error) {
@@ -134,7 +137,70 @@ func ssoBearerUser(
 		return nil, fmt.Errorf("resolve sso user: %w", err)
 	}
 
+	if len(ssoCfg.GroupPermissions) > 0 {
+		var all map[string]json.RawMessage
+		if err := token.Claims(&all); err != nil {
+			return nil, fmt.Errorf("decode claims: %w", err)
+		}
+
+		perms, superuser := groupGrants(ssoCfg.GroupPermissions, groupsFromClaim(all[ssoCfg.GroupsClaim]))
+		user.Permissions = unionPermissions(user.Permissions, perms)
+		user.IsSuperuser = user.IsSuperuser || superuser
+	}
+
 	return user, nil
+}
+
+// groupsFromClaim decodes a groups claim, which providers send either as a
+// string array or, for a single group, as a plain string. A missing or
+// differently shaped claim means no groups.
+func groupsFromClaim(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	var groups []string
+	if err := json.Unmarshal(raw, &groups); err == nil {
+		return groups
+	}
+
+	var group string
+	if err := json.Unmarshal(raw, &group); err == nil && group != "" {
+		return []string{group}
+	}
+
+	return nil
+}
+
+// groupGrants is the union of what every group in groups is mapped to: the
+// permissions, and whether any of them grants superuser. Groups without an
+// entry grant nothing.
+func groupGrants(mapping map[string]config.SSOGroupGrant, groups []string) (configdb.Permissions, bool) {
+	var (
+		granted   configdb.Permissions
+		superuser bool
+	)
+
+	for _, g := range groups {
+		if grant, ok := mapping[g]; ok {
+			granted = unionPermissions(granted, ssoDefaultPermissions(grant.SSOPermissions))
+			superuser = superuser || grant.Superuser
+		}
+	}
+
+	return granted, superuser
+}
+
+// unionPermissions grants every permission either a or b grants.
+func unionPermissions(a, b configdb.Permissions) configdb.Permissions {
+	return configdb.Permissions{
+		ViewStatus:         a.ViewStatus || b.ViewStatus,
+		TriggerSync:        a.TriggerSync || b.TriggerSync,
+		ViewConfig:         a.ViewConfig || b.ViewConfig,
+		EditConfigAPI:      a.EditConfigAPI || b.EditConfigAPI,
+		EditConfigDatabase: a.EditConfigDatabase || b.EditConfigDatabase,
+		EditConfigMaps:     a.EditConfigMaps || b.EditConfigMaps,
+	}
 }
 
 // tokenIssuedTo reports whether a token belongs to clientID: either its

@@ -310,7 +310,7 @@ account-management detail and remote addresses not meant for every logged-in use
 Optional, in addition to local username/password accounts (which are never disabled and remain
 how the very first account is created at `/setup`). Configured only in the bootstrap file's `oidc:`
 section (`config.SSO` — `enabled`, `issuerUrl`, `clientId`, `scopes`, `buttonLabel`,
-`defaultPermissions`; see `config.example.yaml`), passed from `run` through `startWebServer` into
+`defaultPermissions`, `groupsClaim`, `groupPermissions`; see `config.example.yaml`), passed from `run` through `startWebServer` into
 `webserver.New`, and fixed for the process's lifetime — changing it needs a restart, and there is no
 SSO tab or `edit_config_sso` permission in the web UI. There is no client secret.
 
@@ -345,9 +345,21 @@ permission edits on `/users` apply to the next request): an existing link is use
 that, a local account already named the claimed username (email, else `preferred_username`, else
 the subject identifier) is linked to instead of duplicated; failing that, a new account is
 auto-provisioned with `oidc.defaultPermissions` (converted to `configdb.Permissions` by
-`ssoDefaultPermissions` in `internal/webserver/sso.go`) and a random, never-revealed password. An SSO-provisioned account is never a superuser
+`ssoDefaultPermissions` in `internal/webserver/sso.go`) and a random, never-revealed password. An SSO-provisioned account is never *stored* as a superuser
 automatically — that stays a manual grant via `/users`, exactly like every other account-creation
-path.
+path (a group can still grant it per request, see below).
+
+`oidc.groupPermissions` (group name → `config.SSOGroupGrant`: the six permissions inline plus an
+optional `superuser`) adds per-group grants on top of that. On
+every bearer request, `ssoBearerUser` reads the token's `oidc.groupsClaim` claim (default `groups`,
+a string array or a single string; see `groupsFromClaim`). It ORs every matching group's
+permissions into the loaded user's `Permissions`, and any group's `superuser` into its
+`IsSuperuser` (`groupGrants`/`unionPermissions` in `sso_bearer.go`). The result is never written back, so `/users` shows only the stored grants, while
+`/api/me` and every permission check see the merged set. Removing someone from a group at the
+provider therefore revokes its grants on their next request. `ensureNotLastSuperuser` (`users.go`)
+still counts only *stored* superusers, so a group-granted superuser never lets the last stored one
+be demoted or deleted. `defaultPermissions` stays a plain `SSOPermissions` with no superuser field,
+so auto-provisioning can never create a superuser.
 
 Since there's no server-side login step, `sso_login` is recorded by `GET /api/me` whenever it's
 bearer-authenticated. The SPA calls it once right after the provider callback and once per page

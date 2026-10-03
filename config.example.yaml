@@ -66,3 +66,24 @@ oidc:
     editConfigApi: false
     editConfigDatabase: false
     editConfigMaps: false
+  # Extra permissions per provider group, on top of the account's own (the
+  # ones above for a new account, plus anything granted on /users). Worked
+  # out from the access token on every request and never saved, so changing
+  # someone's groups at the provider takes effect on their next request.
+  # "superuser: true" also grants superuser (user management and the
+  # security log) to the group's members. The token must carry the groups
+  # claim (Authentik's "profile" scope does; Keycloak needs a "groups" mapper
+  # that adds it to the access token).
+  # groupsClaim: "groups"   # default
+  # groupPermissions:
+  #   tile-operators:
+  #     viewStatus: true
+  #     triggerSync: true
+  #   tile-admins:
+  #     superuser: true
+  #     viewStatus: true
+  #     triggerSync: true
+  #     viewConfig: true
+  #     editConfigApi: true
+  #     editConfigDatabase: true
+  #     editConfigMaps: true

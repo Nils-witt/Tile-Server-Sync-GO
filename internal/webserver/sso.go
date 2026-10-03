@@ -38,8 +38,9 @@ func ssoStatusAPIHandler(sso config.SSO) http.HandlerFunc {
 	}
 }
 
-// ssoDefaultPermissions converts the bootstrap file's default permission set
-// for auto-provisioned SSO accounts into configdb's own type.
+// ssoDefaultPermissions converts one of the bootstrap file's SSO permission
+// sets (defaultPermissions, or a groupPermissions entry) into configdb's own
+// type.
 func ssoDefaultPermissions(p config.SSOPermissions) configdb.Permissions {
 	return configdb.Permissions{
 		ViewStatus: p.ViewStatus, TriggerSync: p.TriggerSync, ViewConfig: p.ViewConfig,

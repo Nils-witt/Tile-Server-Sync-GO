@@ -7,6 +7,8 @@ const (
 	DefaultSSOScopes = "openid profile email"
 	// DefaultSSOButtonLabel is used when oidc.buttonLabel is left empty.
 	DefaultSSOButtonLabel = "Sign in with SSO"
+	// DefaultSSOGroupsClaim is used when oidc.groupsClaim is left empty.
+	DefaultSSOGroupsClaim = "groups"
 )
 
 // SSO is the optional OpenID Connect single sign-on configuration, read from
@@ -33,6 +35,16 @@ type SSO struct {
 	// auto-provisioned account gets. An SSO account is never made a superuser
 	// automatically.
 	DefaultPermissions SSOPermissions `yaml:"defaultPermissions" json:"defaultPermissions"`
+	// GroupsClaim names the access-token claim listing the user's groups
+	// (a string array, or a single string). Defaults to DefaultSSOGroupsClaim.
+	GroupsClaim string `yaml:"groupsClaim" json:"groupsClaim"`
+	// GroupPermissions maps a group name (as it appears in GroupsClaim) to
+	// the permissions (and optionally superuser) its members get. They are
+	// worked out from the token on every request and added to the account's
+	// stored ones, never saved, so a group change at the provider applies on
+	// the next request and removing someone from a group revokes what it
+	// granted.
+	GroupPermissions map[string]SSOGroupGrant `yaml:"groupPermissions" json:"groupPermissions"`
 }
 
 // SSOPermissions mirrors configdb.Permissions field for field (this package
@@ -47,8 +59,21 @@ type SSOPermissions struct {
 	EditConfigMaps     bool `yaml:"editConfigMaps" json:"editConfigMaps"`
 }
 
-// applyDefaults fills in a blank Scopes/ButtonLabel.
+// SSOGroupGrant is one oidc.groupPermissions entry: the six permissions,
+// written inline next to an optional superuser flag. Superuser lives here
+// rather than in SSOPermissions so defaultPermissions can't auto-provision
+// every SSO account as a superuser.
+type SSOGroupGrant struct {
+	SSOPermissions `yaml:",inline"`
+	Superuser      bool `yaml:"superuser" json:"superuser"`
+}
+
+// applyDefaults fills in a blank Scopes/ButtonLabel/GroupsClaim.
 func (s *SSO) applyDefaults() {
+	if s.GroupsClaim == "" {
+		s.GroupsClaim = DefaultSSOGroupsClaim
+	}
+
 	if s.Scopes == "" {
 		s.Scopes = DefaultSSOScopes
 	}
@@ -72,6 +97,12 @@ func (s *SSO) validate() error {
 
 	if s.ClientID == "" {
 		errs = append(errs, errors.New("oidc.clientId is required when oidc.enabled is true"))
+	}
+
+	for group := range s.GroupPermissions {
+		if group == "" {
+			errs = append(errs, errors.New("oidc.groupPermissions: group name must not be empty"))
+		}
 	}
 
 	return errors.Join(errs...)
