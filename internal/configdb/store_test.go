@@ -1,11 +1,12 @@
 package configdb
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
 	"context"
 	"errors"
 	"path/filepath"
 	"testing"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 )
 
 func openTestStore(t *testing.T) (*Store, string) {

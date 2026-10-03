@@ -1,14 +1,15 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
 )
 
 const maxMapBodyBytes = 1 << 16

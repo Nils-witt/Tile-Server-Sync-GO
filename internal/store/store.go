@@ -3,14 +3,15 @@
 package store
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/tileserve"
 	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"strings"
 	"time"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/tileserve"
 
 	// Registers the "mysql" driver with database/sql; never referenced
 	// directly, only through sql.Open.

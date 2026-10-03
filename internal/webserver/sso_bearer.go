@@ -14,7 +14,6 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,6 +22,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )

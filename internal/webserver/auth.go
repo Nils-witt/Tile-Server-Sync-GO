@@ -1,13 +1,14 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
 )
 
 type contextKey int

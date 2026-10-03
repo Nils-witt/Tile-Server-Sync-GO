@@ -1,11 +1,12 @@
 package configdb
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 
 	"gorm.io/gorm"
 )

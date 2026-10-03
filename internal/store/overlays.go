@@ -1,7 +1,6 @@
 package store
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
 	"context"
 	"database/sql"
 	"errors"
@@ -9,6 +8,8 @@ import (
 	"log"
 	"regexp"
 	"strings"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 )
 
 // map_src_overlays is an external application's (EDP) overlay table this

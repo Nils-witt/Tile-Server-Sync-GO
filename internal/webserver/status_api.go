@@ -1,9 +1,10 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/status"
 	"net/http"
 	"time"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/status"
 )
 
 // mapVersionResultDTO is a status.MapVersionResult as sent to the JSON API.

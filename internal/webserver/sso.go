@@ -1,8 +1,9 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
 	"net/http"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 )
 
 // ssoStatusResponse is what the public GET /api/sso/status returns: what the

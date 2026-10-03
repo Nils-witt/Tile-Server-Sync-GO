@@ -1,4 +1,4 @@
-module Tile-Server-Sync-GO
+module github.com/Nils-witt/Tile-Server-Sync-GO
 
 go 1.27
 

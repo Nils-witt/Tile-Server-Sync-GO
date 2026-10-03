@@ -117,7 +117,8 @@ existing rows rather than duplicating them.
 
 ## Layout
 
-- `cmd/Tile-Server-Sync-GO/main.go` — CLI entry point / orchestration.
+- `cmd/Tile-Server-Sync-GO/main.go` — CLI entry point: flags, logging, wiring.
+- `internal/syncer` — sync engine: live-reloadable config/client/database, per-map scheduler, fetch-and-upsert.
 - `cmd/Tile-Server-Sync-GO/service_windows.go` / `service_other.go` — Windows service install/start/stop/uninstall (`-service ...`); no-op stubs on non-Windows builds.
 - `internal/config` — YAML config loading and validation.
 - `internal/tileserve` — minimal tileserve-go API client (login + geo-objects fetch).

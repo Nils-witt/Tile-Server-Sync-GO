@@ -1,10 +1,11 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/frontend"
 	"io/fs"
 	"net/http"
 	"strings"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/frontend"
 )
 
 // spaFS is the embedded Vite build (frontend.Dist) rooted at its "dist"

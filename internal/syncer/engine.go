@@ -1,93 +1,100 @@
-package main
+// Package syncer is the sync engine: it holds the reloadable config/client/
+// database triple, schedules each configured map on its own interval, and
+// runs the fetch-and-upsert passes against tileserve-go and MariaDB.
+package syncer
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
-	"Tile-Server-Sync-GO/internal/status"
-	"Tile-Server-Sync-GO/internal/store"
-	"Tile-Server-Sync-GO/internal/tileserve"
 	"context"
 	"errors"
 	"fmt"
 	"log"
 	"sync"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/status"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/store"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/tileserve"
 )
 
-// runtime holds the reloadable pieces of a sync run — the parsed config, the
+// Engine holds the reloadable pieces of a sync run — the parsed config, the
 // tileserve client built from it, and the database connection built from
 // it — behind a mutex, so saving a config change through the config web UI
 // can swap in a freshly loaded config without restarting the process.
-// current() is called
-// once per sync (by runSync, right before calling syncAll) rather than held
+// Current() is called
+// once per sync (by RunSync, right before calling syncAll) rather than held
 // for a run's whole lifetime, so a reload between syncs takes effect on the
 // very next one. cfg/client/db start nil and stay nil until the first
-// successful reload — see current() — since the SQLite-backed config may
+// successful reload — see Current() — since the SQLite-backed config may
 // start out empty on a fresh install. cfgDB and webServer are fixed for the
 // process's lifetime: webServer settings are deliberately not reloadable
 // (the server a reload request arrives on can't safely restart itself mid
 // request, so applying a changed webServer.enabled/address still requires a
 // process restart), and cfgDB's path is bootstrap-fixed too.
-type runtime struct {
+type Engine struct {
 	mu     sync.RWMutex
 	cfg    *config.Config
 	client *tileserve.Client
 	db     *store.Store
 
-	// syncMu serializes calls to syncAll made through runSync, so a manual
+	// syncMu serializes calls to syncAll made through RunSync, so a manual
 	// "sync now" request from the web UI can't run concurrently with a
-	// scheduled runLoop tick (or another manual request): two overlapping
+	// scheduled RunLoop tick (or another manual request): two overlapping
 	// syncs of the same map/version could race on pruneMissing deleting rows
 	// the other's insert just wrote.
 	syncMu sync.Mutex
 
 	cfgDB     *configdb.Store
 	webServer config.WebServer
+	rec       *status.Recorder
 
-	// wake is pinged by reload() after a successful config swap, so runLoop
+	// wake is pinged by Reload() after a successful config swap, so RunLoop
 	// (which otherwise sleeps for up to scheduleTick's computed duration)
 	// can react immediately — e.g. syncing a newly added map right away instead
 	// of waiting out whatever sleep duration was already in flight. Buffered
 	// size 1 and sent to non-blockingly: at most one pending wake needs to be
-	// coalesced, since runLoop just re-reads rt.current() from scratch on
+	// coalesced, since RunLoop just re-reads e.Current() from scratch on
 	// every tick regardless of why it woke up.
 	wake chan struct{}
 }
 
-func newRuntime(cfgDB *configdb.Store, webServer config.WebServer) *runtime {
-	return &runtime{cfgDB: cfgDB, webServer: webServer, wake: make(chan struct{}, 1)}
+// New returns an unconfigured Engine; call Reload to load and apply the
+// stored config. rec receives every sync's outcome for the status page.
+func New(cfgDB *configdb.Store, webServer config.WebServer, rec *status.Recorder) *Engine {
+	return &Engine{cfgDB: cfgDB, webServer: webServer, rec: rec, wake: make(chan struct{}, 1)}
 }
 
-// current returns the runtime's current config, client, and database. Any
-// of the three may be nil if the runtime has never had a successful reload
-// — check db specifically (as runLoop does) to tell whether the runtime is
+// Current returns the engine's current config, client, and database. Any
+// of the three may be nil if the engine has never had a successful reload
+// — check db specifically (as RunLoop does) to tell whether the engine is
 // configured yet, rather than adding a second locked call for that: false
-// only until the first successful reload() call against a valid config,
+// only until the first successful Reload() call against a valid config,
 // normal (not an error) right after a fresh install with an empty
 // SQLite-backed config.
-func (rt *runtime) current() (*config.Config, *tileserve.Client, *store.Store) {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
+func (e *Engine) Current() (*config.Config, *tileserve.Client, *store.Store) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 
-	return rt.cfg, rt.client, rt.db
+	return e.cfg, e.client, e.db
 }
 
-// errNotConfigured is returned by runSync/runSyncMaps when no successful
+// ErrNotConfigured is returned by RunSync/runSyncMaps when no successful
 // reload has happened yet.
-var errNotConfigured = errors.New("not configured yet: use /config to enter and save configuration")
+var ErrNotConfigured = errors.New("not configured yet: use /config to enter and save configuration")
 
-// runSync runs syncAll once against every enabled map in the runtime's
+// RunSync runs syncAll once against every enabled map in the engine's
 // current config (a Disabled map is skipped, the same way scheduleTick skips
-// it for runLoop), serialized against any other call to runSync/runSyncMaps
+// it for RunLoop), serialized against any other call to RunSync/runSyncMaps
 // via syncMu. It is what both the run-once path (no interval configured on
 // any map) and the web UI's manual "sync now" request go through.
-func (rt *runtime) runSync(ctx context.Context, rec *status.Recorder) (int, error) {
-	rt.syncMu.Lock()
-	defer rt.syncMu.Unlock()
+func (e *Engine) RunSync(ctx context.Context) (int, error) {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 
-	cfg, client, db := rt.current()
+	cfg, client, db := e.Current()
 	if db == nil {
-		rec.RecordRun(0, errNotConfigured)
-		return 0, errNotConfigured
+		e.rec.RecordRun(0, ErrNotConfigured)
+		return 0, ErrNotConfigured
 	}
 
 	enabled := make([]config.MapTarget, 0, len(cfg.Maps))
@@ -98,29 +105,47 @@ func (rt *runtime) runSync(ctx context.Context, rec *status.Recorder) (int, erro
 		}
 	}
 
-	return syncAll(ctx, enabled, client, db, rec)
+	return syncAll(ctx, enabled, client, db, e.rec)
 }
 
-// runSyncMaps runs syncAll against just the maps in the runtime's current
-// config whose ID is in ids, serialized the same way runSync is. It's what
-// runLoop's per-map interval scheduler calls with the set of currently-due
+// SyncMap syncs the single map mapID immediately, regardless of its own
+// schedule or Disabled flag — what the status page's per-map "Sync" button
+// calls (see runSyncMaps).
+func (e *Engine) SyncMap(ctx context.Context, mapID string) (int, error) {
+	return e.runSyncMaps(ctx, map[string]struct{}{mapID: {}})
+}
+
+// Close closes the current database connection, if any. Call it once the
+// engine is no longer in use (RunLoop/RunSync have returned).
+func (e *Engine) Close() error {
+	_, _, db := e.Current()
+	if db == nil {
+		return nil
+	}
+
+	return db.Close()
+}
+
+// runSyncMaps runs syncAll against just the maps in the engine's current
+// config whose ID is in ids, serialized the same way RunSync is. It's what
+// RunLoop's per-map interval scheduler calls with the set of currently-due
 // map IDs (scheduleTick already excludes disabled maps from that set), and
 // what the status page's per-map "Sync" button calls with a single explicit
 // ID — unlike the scheduler, that explicit request is honored regardless of
 // Disabled, since a user clicking "Sync" on a specific map is an intentional
 // override of the map's own automatic-scheduling opt-out, not something
-// scheduling decided. It re-reads rt.current() itself (rather than trusting
+// scheduling decided. It re-reads e.Current() itself (rather than trusting
 // maps handed to it earlier) so it always syncs each map's latest
 // configured versions/staticColumns, even if a reload landed between
-// runLoop computing ids and this call acquiring syncMu.
-func (rt *runtime) runSyncMaps(ctx context.Context, rec *status.Recorder, ids map[string]struct{}) (int, error) {
-	rt.syncMu.Lock()
-	defer rt.syncMu.Unlock()
+// RunLoop computing ids and this call acquiring syncMu.
+func (e *Engine) runSyncMaps(ctx context.Context, ids map[string]struct{}) (int, error) {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 
-	cfg, client, db := rt.current()
+	cfg, client, db := e.Current()
 	if db == nil {
-		rec.RecordRun(0, errNotConfigured)
-		return 0, errNotConfigured
+		e.rec.RecordRun(0, ErrNotConfigured)
+		return 0, ErrNotConfigured
 	}
 
 	due := make([]config.MapTarget, 0, len(ids))
@@ -135,20 +160,20 @@ func (rt *runtime) runSyncMaps(ctx context.Context, rec *status.Recorder, ids ma
 		return 0, nil
 	}
 
-	return syncAll(ctx, due, client, db, rec)
+	return syncAll(ctx, due, client, db, e.rec)
 }
 
-// deleteMapObjects deletes every previously-synced geo_objects row for
+// DeleteMapObjects deletes every previously-synced geo_objects row for
 // mapID's map_uuid scope (across all versions), serialized against
-// runSync/runSyncMaps via syncMu for the same reason those two are
+// RunSync/runSyncMaps via syncMu for the same reason those two are
 // serialized against each other: a concurrent sync of that map could
 // otherwise race on inserting rows this delete is in the middle of removing.
-// It's a no-op (0, nil) if the runtime has no successful reload yet — a map
+// It's a no-op (0, nil) if the engine has no successful reload yet — a map
 // deleted before any sync ever ran has nothing to clean up.
 //
-// It also strips mapID from the runtime's currently active config here,
+// It also strips mapID from the engine's currently active config here,
 // still under syncMu, via removeMap. This matters because the caller
-// (deleteMapAPIHandler) always follows this call with reload(), and reload()
+// (deleteMapAPIHandler) always follows this call with Reload(), and Reload()
 // only swaps in the freshly loaded (mapID-less) config if the *whole*
 // config still validates and the API/database it describes are still
 // reachable — e.g. a login failure or an unrelated validation error at the
@@ -157,63 +182,63 @@ func (rt *runtime) runSyncMaps(ctx context.Context, rec *status.Recorder, ids ma
 // containing the deleted map — active, so a later scheduled or manual sync
 // would keep re-syncing it and re-inserting the very rows just purged
 // above, with nothing left to prune them afterward.
-func (rt *runtime) deleteMapObjects(ctx context.Context, mapID string) (int64, error) {
-	rt.syncMu.Lock()
-	defer rt.syncMu.Unlock()
+func (e *Engine) DeleteMapObjects(ctx context.Context, mapID string) (int64, error) {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 
-	_, _, db := rt.current()
+	_, _, db := e.Current()
 	if db == nil {
 		return 0, nil
 	}
 
 	deleted, err := db.DeleteMapObjects(ctx, mapID)
 
-	rt.removeMap(mapID)
+	e.removeMap(mapID)
 
 	return deleted, err
 }
 
-// removeMap removes mapID from the runtime's currently active config's Maps
+// removeMap removes mapID from the engine's currently active config's Maps
 // slice, if present, by swapping in a new *config.Config value with a
-// filtered Maps slice rather than mutating rt.cfg.Maps in place — current()
-// callers may be reading the slice they were handed without rt.mu held, so
-// an in-place mutation would race with them. A no-op if the runtime has no
-// config yet or mapID isn't in it. See deleteMapObjects for why this exists
-// alongside reload().
-func (rt *runtime) removeMap(mapID string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
+// filtered Maps slice rather than mutating e.cfg.Maps in place — Current()
+// callers may be reading the slice they were handed without e.mu held, so
+// an in-place mutation would race with them. A no-op if the engine has no
+// config yet or mapID isn't in it. See DeleteMapObjects for why this exists
+// alongside Reload().
+func (e *Engine) removeMap(mapID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	if rt.cfg == nil {
+	if e.cfg == nil {
 		return
 	}
 
-	maps := make([]config.MapTarget, 0, len(rt.cfg.Maps))
+	maps := make([]config.MapTarget, 0, len(e.cfg.Maps))
 
-	for _, m := range rt.cfg.Maps {
+	for _, m := range e.cfg.Maps {
 		if m.ID != mapID {
 			maps = append(maps, m)
 		}
 	}
 
-	if len(maps) == len(rt.cfg.Maps) {
+	if len(maps) == len(e.cfg.Maps) {
 		return
 	}
 
-	newCfg := *rt.cfg
+	newCfg := *e.cfg
 	newCfg.Maps = maps
-	rt.cfg = &newCfg
+	e.cfg = &newCfg
 }
 
-// createMapOverlays keeps the EDP map_src_overlays table (see
+// CreateMapOverlays keeps the EDP map_src_overlays table (see
 // internal/store's CreateMapOverlays) in sync with a just-created map,
-// serialized against runSync/runSyncMaps via syncMu for the same reason
-// deleteMapObjects is. A no-op if the runtime has no successful reload yet.
-func (rt *runtime) createMapOverlays(ctx context.Context, m config.MapTarget) error {
-	rt.syncMu.Lock()
-	defer rt.syncMu.Unlock()
+// serialized against RunSync/runSyncMaps via syncMu for the same reason
+// DeleteMapObjects is. A no-op if the engine has no successful reload yet.
+func (e *Engine) CreateMapOverlays(ctx context.Context, m config.MapTarget) error {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 
-	cfg, _, db := rt.current()
+	cfg, _, db := e.Current()
 	if db == nil {
 		return nil
 	}
@@ -221,14 +246,14 @@ func (rt *runtime) createMapOverlays(ctx context.Context, m config.MapTarget) er
 	return db.CreateMapOverlays(ctx, cfg.API.BaseURL, m)
 }
 
-// updateMapOverlays keeps map_src_overlays in sync with an edited map (see
+// UpdateMapOverlays keeps map_src_overlays in sync with an edited map (see
 // internal/store's UpdateMapOverlays), serialized the same way
-// createMapOverlays is. A no-op if the runtime has no successful reload yet.
-func (rt *runtime) updateMapOverlays(ctx context.Context, before, after config.MapTarget) error {
-	rt.syncMu.Lock()
-	defer rt.syncMu.Unlock()
+// CreateMapOverlays is. A no-op if the engine has no successful reload yet.
+func (e *Engine) UpdateMapOverlays(ctx context.Context, before, after config.MapTarget) error {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 
-	cfg, _, db := rt.current()
+	cfg, _, db := e.Current()
 	if db == nil {
 		return nil
 	}
@@ -236,14 +261,14 @@ func (rt *runtime) updateMapOverlays(ctx context.Context, before, after config.M
 	return db.UpdateMapOverlays(ctx, cfg.API.BaseURL, before, after)
 }
 
-// deleteMapOverlays removes m's map_src_overlays rows (see internal/store's
-// DeleteMapOverlays), serialized the same way createMapOverlays is. A no-op
-// if the runtime has no successful reload yet.
-func (rt *runtime) deleteMapOverlays(ctx context.Context, m config.MapTarget) error {
-	rt.syncMu.Lock()
-	defer rt.syncMu.Unlock()
+// DeleteMapOverlays removes m's map_src_overlays rows (see internal/store's
+// DeleteMapOverlays), serialized the same way CreateMapOverlays is. A no-op
+// if the engine has no successful reload yet.
+func (e *Engine) DeleteMapOverlays(ctx context.Context, m config.MapTarget) error {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 
-	cfg, _, db := rt.current()
+	cfg, _, db := e.Current()
 	if db == nil {
 		return nil
 	}
@@ -251,7 +276,7 @@ func (rt *runtime) deleteMapOverlays(ctx context.Context, m config.MapTarget) er
 	return db.DeleteMapOverlays(ctx, cfg.API.BaseURL, m)
 }
 
-// reload loads the current configdb-backed config, overlays the fixed
+// Reload loads the current configdb-backed config, overlays the fixed
 // bootstrap WebServer, validates it, and — only if that succeeds — builds a
 // fresh client (logging in again unless a token is configured) and database
 // connection, then swaps them in. On any failure — an invalid config, a
@@ -260,20 +285,20 @@ func (rt *runtime) deleteMapOverlays(ctx context.Context, m config.MapTarget) er
 // so a bad edit doesn't take down an otherwise-running sync.
 //
 // The previous database connection is closed only after the swap, once it's
-// no longer reachable via current() (nil on the very first successful
+// no longer reachable via Current() (nil on the very first successful
 // reload from an empty state). A sync already in flight at the moment of
 // the swap keeps using the connection it already fetched and may see it
 // close out from under it; that sync just fails and logs an error,
 // self-correcting on the next iteration with the new state. That's an
 // acceptable tradeoff for a manually triggered, infrequent action, rather
 // than adding reference counting around every database use.
-func (rt *runtime) reload(ctx context.Context) error {
-	cfg, err := rt.cfgDB.Load(ctx)
+func (e *Engine) Reload(ctx context.Context) error {
+	cfg, err := e.cfgDB.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	cfg.WebServer = rt.webServer
+	cfg.WebServer = e.webServer
 
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
@@ -289,10 +314,10 @@ func (rt *runtime) reload(ctx context.Context) error {
 		return err
 	}
 
-	rt.mu.Lock()
-	oldDB := rt.db
-	rt.cfg, rt.client, rt.db = cfg, client, db
-	rt.mu.Unlock()
+	e.mu.Lock()
+	oldDB := e.db
+	e.cfg, e.client, e.db = cfg, client, db
+	e.mu.Unlock()
 
 	if oldDB != nil {
 		if closeErr := oldDB.Close(); closeErr != nil {
@@ -303,7 +328,7 @@ func (rt *runtime) reload(ctx context.Context) error {
 	log.Print("config reloaded")
 
 	select {
-	case rt.wake <- struct{}{}:
+	case e.wake <- struct{}{}:
 	default:
 	}
 

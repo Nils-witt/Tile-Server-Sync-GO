@@ -4,13 +4,41 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
-	"Tile-Server-Sync-GO/internal/status"
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/status"
 )
+
+// Engine is what the web server needs from the sync engine (implemented by
+// internal/syncer's *Engine): applying a saved config live, triggering a
+// single map's sync, and the per-map cleanup/overlay side effects of map
+// CRUD. Declared here, at the consumer, so this package doesn't depend on
+// internal/syncer.
+type Engine interface {
+	Reload(ctx context.Context) error
+	SyncMap(ctx context.Context, mapID string) (int, error)
+	DeleteMapObjects(ctx context.Context, mapID string) (int64, error)
+	CreateMapOverlays(ctx context.Context, m config.MapTarget) error
+	UpdateMapOverlays(ctx context.Context, before, after config.MapTarget) error
+	DeleteMapOverlays(ctx context.Context, m config.MapTarget) error
+}
+
+// Options configures New.
+type Options struct {
+	Addr     string
+	Recorder *status.Recorder
+	ConfigDB *configdb.Store
+	// WebServer is the fixed, bootstrap-file-sourced value (see New).
+	WebServer config.WebServer
+	SSO       config.SSO
+	Version   string
+	Commit    string
+	Engine    Engine
+}
 
 // New builds an *http.Server serving the built React SPA (see spa.go) for
 // every browser-navigated route ("/", "/config", "/security-log",
@@ -26,22 +54,18 @@ import (
 // 401/403. It does not start
 // listening; call ListenAndServe (typically in a goroutine).
 //
-// A successful config save also calls reload itself, so the running process
+// A successful config save also calls Engine.Reload itself, so the running process
 // picks up the change immediately without a separate action — see
 // finishConfigSave in config.go. webServer is the fixed,
 // bootstrap-file-sourced WebServer value: the config editor always displays
 // it for context but can never change it, since applying a changed
 // webServer.enabled/address needs a process restart the server itself can't
 // safely trigger mid-request.
-func New(
-	addr string, rec *status.Recorder, cfgDB *configdb.Store, webServer config.WebServer, sso config.SSO,
-	version, commit string,
-	reload func(context.Context) error, syncMap func(context.Context, string) (int, error),
-	deleteMapObjects func(context.Context, string) (int64, error),
-	createMapOverlays func(context.Context, config.MapTarget) error,
-	updateMapOverlays func(context.Context, config.MapTarget, config.MapTarget) error,
-	deleteMapOverlays func(context.Context, config.MapTarget) error,
-) *http.Server {
+func New(opts Options) *http.Server {
+	addr, rec, cfgDB, webServer, sso := opts.Addr, opts.Recorder, opts.ConfigDB, opts.WebServer, opts.SSO
+	version, commit, eng := opts.Version, opts.Commit, opts.Engine
+	reload := eng.Reload
+
 	mux := http.NewServeMux()
 	auth := &authenticator{cfgDB: cfgDB, sso: sso, verifiers: newSSOVerifierCache()}
 
@@ -77,16 +101,16 @@ func New(
 	// map no longer requires resubmitting every other configured map.
 	mux.HandleFunc("GET /api/maps", requirePermission(auth, permViewConfig)(listMapsAPIHandler(cfgDB)))
 	mux.HandleFunc("POST /api/maps",
-		requirePermission(auth, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload, createMapOverlays)))
+		requirePermission(auth, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload, eng.CreateMapOverlays)))
 	mux.HandleFunc("GET /api/maps/{id}", requirePermission(auth, permViewConfig)(getMapAPIHandler(cfgDB)))
 	mux.HandleFunc("PUT /api/maps/{id}",
-		requirePermission(auth, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload, updateMapOverlays)))
+		requirePermission(auth, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload, eng.UpdateMapOverlays)))
 	mux.HandleFunc("DELETE /api/maps/{id}",
 		requirePermission(auth, permEditConfigMaps)(
-			deleteMapAPIHandler(cfgDB, reload, deleteMapObjects, deleteMapOverlays),
+			deleteMapAPIHandler(cfgDB, reload, eng.DeleteMapObjects, eng.DeleteMapOverlays),
 		))
 	mux.HandleFunc("POST /api/maps/{id}/sync",
-		requirePermission(auth, permTriggerSync)(syncMapAPIHandler(syncMap)))
+		requirePermission(auth, permTriggerSync)(syncMapAPIHandler(eng.SyncMap)))
 
 	mux.HandleFunc("GET /api/security-log", requireSuperuser(auth)(securityLogAPIHandler(cfgDB)))
 

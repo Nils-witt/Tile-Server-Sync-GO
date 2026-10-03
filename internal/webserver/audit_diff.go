@@ -1,11 +1,12 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 )
 
 // changesDetail joins a list of per-field change descriptions (as built by

@@ -1,10 +1,11 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
 	"encoding/json"
 	"slices"
 	"testing"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 )
 
 func TestGroupsFromClaim(t *testing.T) {

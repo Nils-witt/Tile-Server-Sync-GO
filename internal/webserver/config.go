@@ -1,12 +1,13 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
 )
 
 // configGetResponse is what GET /api/config returns, and (with Applied/

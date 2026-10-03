@@ -1,11 +1,12 @@
 package webserver
 
 import (
-	"Tile-Server-Sync-GO/internal/configdb"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
 )
 
 // logSecurityEvent appends one row to the security log (see
