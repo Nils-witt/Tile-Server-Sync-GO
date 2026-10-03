@@ -2,7 +2,6 @@ package webserver
 
 import (
 	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
 	"net/http"
 )
 
@@ -23,7 +22,7 @@ type ssoStatusResponse struct {
 // SSO section (config.SSO — already defaulted and validated by
 // config.LoadBootstrap). Deliberately not gated behind requireUser/
 // requirePermission: the login page needs this before any credential
-// exists, same as /api/login itself.
+// exists.
 func ssoStatusAPIHandler(sso config.SSO) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		if !sso.Enabled {
@@ -35,15 +34,5 @@ func ssoStatusAPIHandler(sso config.SSO) http.HandlerFunc {
 			Enabled: true, ButtonLabel: sso.ButtonLabel, IssuerURL: sso.IssuerURL, ClientID: sso.ClientID,
 			Scopes: sso.Scopes,
 		})
-	}
-}
-
-// ssoDefaultPermissions converts one of the bootstrap file's SSO permission
-// sets (defaultPermissions, or a groupPermissions entry) into configdb's own
-// type.
-func ssoDefaultPermissions(p config.SSOPermissions) configdb.Permissions {
-	return configdb.Permissions{
-		ViewStatus: p.ViewStatus, TriggerSync: p.TriggerSync, ViewConfig: p.ViewConfig,
-		EditConfigAPI: p.EditConfigAPI, EditConfigDatabase: p.EditConfigDatabase, EditConfigMaps: p.EditConfigMaps,
 	}
 }

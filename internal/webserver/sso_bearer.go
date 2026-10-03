@@ -5,14 +5,16 @@
 // process never takes part in the provider's redirect flow, never sees an
 // authorization code, and never holds a client secret — it only verifies
 // each token it's handed (signature against the provider's JWKS, issuer,
-// expiry, and that it was issued to the configured client) and resolves it
-// to a local user, see requireUser in auth.go.
+// expiry, and that it was issued to the configured client) and turns it into
+// a principal whose permissions come solely from the bootstrap file's
+// oidc.defaultPermissions plus the token's groups (see
+// oidc.groupPermissions), see requireUser in auth.go. Nothing about a user is
+// stored locally.
 
 package webserver
 
 import (
 	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
 	"context"
 	"encoding/json"
 	"errors"
@@ -96,15 +98,14 @@ type bearerClaims struct {
 }
 
 // ssoBearerUser verifies rawToken against the bootstrap file's SSO config
-// and resolves it to a local user, auto-provisioning one on first sight (see
-// configdb.Store.FindOrCreateSSOUser). Called on every bearer-authenticated
-// request, so a permission change made on /users takes effect on the very
-// next request. The returned user's Permissions and IsSuperuser also include
-// whatever the token's groups grant via oidc.groupPermissions (see
-// groupGrants); that addition is never written back to the database.
+// and returns the principal it identifies. Its permissions are
+// oidc.defaultPermissions plus whatever the token's groups are mapped to in
+// oidc.groupPermissions, and its superuser flag comes from those groups alone
+// (see groupGrants) — worked out afresh on every request and never stored, so
+// a group change at the provider applies on the user's next request.
 func ssoBearerUser(
-	ctx context.Context, cfgDB *configdb.Store, ssoCfg config.SSO, cache *ssoVerifierCache, rawToken string,
-) (*configdb.User, error) {
+	ctx context.Context, ssoCfg config.SSO, cache *ssoVerifierCache, rawToken string,
+) (*principal, error) {
 	if !ssoCfg.Enabled {
 		return nil, errSSODisabled
 	}
@@ -128,27 +129,18 @@ func ssoBearerUser(
 		return nil, errors.New("token was not issued to the configured client")
 	}
 
-	username := usernameFromClaims(claims.Email, claims.PreferredUsername, token.Subject)
-
-	user, err := cfgDB.FindOrCreateSSOUser(
-		ctx, token.Issuer, token.Subject, username, ssoDefaultPermissions(ssoCfg.DefaultPermissions),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("resolve sso user: %w", err)
+	var all map[string]json.RawMessage
+	if err := token.Claims(&all); err != nil {
+		return nil, fmt.Errorf("decode claims: %w", err)
 	}
 
-	if len(ssoCfg.GroupPermissions) > 0 {
-		var all map[string]json.RawMessage
-		if err := token.Claims(&all); err != nil {
-			return nil, fmt.Errorf("decode claims: %w", err)
-		}
+	perms, superuser := groupGrants(ssoCfg.GroupPermissions, groupsFromClaim(all[ssoCfg.GroupsClaim]))
 
-		perms, superuser := groupGrants(ssoCfg.GroupPermissions, groupsFromClaim(all[ssoCfg.GroupsClaim]))
-		user.Permissions = unionPermissions(user.Permissions, perms)
-		user.IsSuperuser = user.IsSuperuser || superuser
-	}
-
-	return user, nil
+	return &principal{
+		Username:    usernameFromClaims(claims.Email, claims.PreferredUsername, token.Subject),
+		IsSuperuser: superuser,
+		Permissions: unionPermissions(ssoCfg.DefaultPermissions, perms),
+	}, nil
 }
 
 // groupsFromClaim decodes a groups claim, which providers send either as a
@@ -175,15 +167,15 @@ func groupsFromClaim(raw json.RawMessage) []string {
 // groupGrants is the union of what every group in groups is mapped to: the
 // permissions, and whether any of them grants superuser. Groups without an
 // entry grant nothing.
-func groupGrants(mapping map[string]config.SSOGroupGrant, groups []string) (configdb.Permissions, bool) {
+func groupGrants(mapping map[string]config.SSOGroupGrant, groups []string) (config.SSOPermissions, bool) {
 	var (
-		granted   configdb.Permissions
+		granted   config.SSOPermissions
 		superuser bool
 	)
 
 	for _, g := range groups {
 		if grant, ok := mapping[g]; ok {
-			granted = unionPermissions(granted, ssoDefaultPermissions(grant.SSOPermissions))
+			granted = unionPermissions(granted, grant.SSOPermissions)
 			superuser = superuser || grant.Superuser
 		}
 	}
@@ -192,8 +184,8 @@ func groupGrants(mapping map[string]config.SSOGroupGrant, groups []string) (conf
 }
 
 // unionPermissions grants every permission either a or b grants.
-func unionPermissions(a, b configdb.Permissions) configdb.Permissions {
-	return configdb.Permissions{
+func unionPermissions(a, b config.SSOPermissions) config.SSOPermissions {
+	return config.SSOPermissions{
 		ViewStatus:         a.ViewStatus || b.ViewStatus,
 		TriggerSync:        a.TriggerSync || b.TriggerSync,
 		ViewConfig:         a.ViewConfig || b.ViewConfig,
@@ -219,11 +211,9 @@ func isTokenExpired(err error) bool {
 	return errors.As(err, &expired)
 }
 
-// usernameFromClaims picks the local username a newly provisioned SSO
-// account is created with (see configdb.Store.FindOrCreateSSOUser step 2:
-// this is also what an admin should pre-create a placeholder account as, to
-// have it linked instead of auto-provisioned): the email claim if present,
-// else preferred_username, else the subject identifier itself.
+// usernameFromClaims picks the name a principal is shown and audited as:
+// preferred_username if present, else the email claim, else the subject
+// identifier itself.
 func usernameFromClaims(email, preferredUsername, subject string) string {
 	switch {
 	case preferredUsername != "":

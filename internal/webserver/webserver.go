@@ -1,4 +1,4 @@
-// Package webserver exposes a JSON API (status, config, maps, users,
+// Package webserver exposes a JSON API (status, config, maps,
 // security log, auth) consumed by the frontend package's embedded React SPA
 // (see spa.go), backed by an internal/status.Recorder.
 package webserver
@@ -13,17 +13,17 @@ import (
 )
 
 // New builds an *http.Server serving the built React SPA (see spa.go) for
-// every browser-navigated route ("/", "/config", "/users", "/security-log",
-// "/login", "/setup", and any client-side sub-route of those), backed by a
+// every browser-navigated route ("/", "/config", "/security-log",
+// "/login", and any client-side sub-route of those), backed by a
 // JSON API under "/api/...": status (api/status), a config editor
 // (api/config and its per-section GET/PUT endpoints, plus the api/maps CRUD
-// family for the Maps tab — see config.go and maps.go), user management
-// (api/users), and a superuser-only audit trail (api/security-log, see
-// security_log.go) recording logins, logouts, user-account changes, and
-// config saves. Every API route is gated behind a login — a local session
-// cookie or an SSO bearer token (see auth.go) — and the user's permissions (see configdb.Permissions);
-// the SPA itself decides what to render based on GET /api/me, GET
-// /api/setup-status, and each request's own 401/403. It does not start
+// family for the Maps tab — see config.go and maps.go), and a
+// superuser-only audit trail (api/security-log, see security_log.go)
+// recording logins and config/map changes. Every API route is gated behind
+// an SSO bearer token (see auth.go) and the permissions its groups grant
+// (see config.SSOPermissions and oidc.groupPermissions); the SPA itself
+// decides what to render based on GET /api/me and each request's own
+// 401/403. It does not start
 // listening; call ListenAndServe (typically in a goroutine).
 //
 // A successful config save also calls reload itself, so the running process
@@ -45,14 +45,10 @@ func New(
 	mux := http.NewServeMux()
 	auth := &authenticator{cfgDB: cfgDB, sso: sso, verifiers: newSSOVerifierCache()}
 
-	mux.HandleFunc("POST /api/setup", setupHandler(cfgDB))
-	mux.HandleFunc("GET /api/setup-status", setupStatusAPIHandler(cfgDB))
-	mux.HandleFunc("POST /api/login", loginHandler(cfgDB))
-	mux.HandleFunc("POST /api/logout", logoutHandler(cfgDB))
 	mux.HandleFunc("GET /api/me", requireUser(auth)(meAPIHandler(cfgDB)))
 	mux.HandleFunc("GET /api/version", versionAPIHandler(version, commit))
 
-	// Unauthenticated, like /api/login: the login page needs it before any
+	// Unauthenticated: the login page needs it before any
 	// credential exists, to decide whether (and how) to start the SPA's own
 	// OIDC flow — see sso.go and sso_bearer.go. There is no server-side SSO
 	// login route at all: the SPA talks to the provider directly and then
@@ -92,12 +88,6 @@ func New(
 	mux.HandleFunc("POST /api/maps/{id}/sync",
 		requirePermission(auth, permTriggerSync)(syncMapAPIHandler(syncMap)))
 
-	mux.HandleFunc("GET /api/users", requireSuperuser(auth)(listUsersAPIHandler(cfgDB)))
-	mux.HandleFunc("POST /api/users", requireSuperuser(auth)(createUserAPIHandler(cfgDB)))
-	mux.HandleFunc("GET /api/users/{id}", requireSuperuser(auth)(getUserAPIHandler(cfgDB)))
-	mux.HandleFunc("PUT /api/users/{id}", requireSuperuser(auth)(updateUserAPIHandler(cfgDB)))
-	mux.HandleFunc("PATCH /api/users/{id}", requireSuperuser(auth)(updateUserAPIHandler(cfgDB)))
-	mux.HandleFunc("DELETE /api/users/{id}", requireSuperuser(auth)(deleteUserAPIHandler(cfgDB)))
 	mux.HandleFunc("GET /api/security-log", requireSuperuser(auth)(securityLogAPIHandler(cfgDB)))
 
 	// The SPA shell: registered last (net/http's ServeMux resolves by
@@ -125,12 +115,12 @@ func New(
 	}
 }
 
-// permViewStatus and friends adapt configdb.Permissions' fields to the
-// func(configdb.Permissions) bool shape requirePermission expects.
-func permViewStatus(p configdb.Permissions) bool    { return p.ViewStatus }
-func permTriggerSync(p configdb.Permissions) bool   { return p.TriggerSync }
-func permViewConfig(p configdb.Permissions) bool    { return p.ViewConfig }
-func permEditConfigAPI(p configdb.Permissions) bool { return p.EditConfigAPI }
+// permViewStatus and friends adapt config.SSOPermissions' fields to the
+// func(config.SSOPermissions) bool shape requirePermission expects.
+func permViewStatus(p config.SSOPermissions) bool    { return p.ViewStatus }
+func permTriggerSync(p config.SSOPermissions) bool   { return p.TriggerSync }
+func permViewConfig(p config.SSOPermissions) bool    { return p.ViewConfig }
+func permEditConfigAPI(p config.SSOPermissions) bool { return p.EditConfigAPI }
 
-func permEditConfigDatabase(p configdb.Permissions) bool { return p.EditConfigDatabase }
-func permEditConfigMaps(p configdb.Permissions) bool     { return p.EditConfigMaps }
+func permEditConfigDatabase(p config.SSOPermissions) bool { return p.EditConfigDatabase }
+func permEditConfigMaps(p config.SSOPermissions) bool     { return p.EditConfigMaps }

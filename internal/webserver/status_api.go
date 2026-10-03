@@ -75,8 +75,8 @@ type versionResponse struct {
 }
 
 // versionAPIHandler serves GET /api/version, deliberately unauthenticated
-// (like /api/sso/status and /api/setup-status) since the footer it feeds is
-// shown on /login and /setup too, before any session exists.
+// (like /api/sso/status) since the footer it feeds is shown on /login too,
+// before anyone has signed in.
 func versionAPIHandler(version, commit string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

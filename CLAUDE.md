@@ -94,50 +94,41 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `PRAGMA foreign_keys = ON` reliably applies — SQLite pragmas are per-connection, and
   `database/sql`'s pool would otherwise silently hand out a fresh, pragma-less one — and still runs
   its own schema/migration step (`schema.go`'s `migrate`) rather than relying purely on GORM's
-  `AutoMigrate`: the four tables that need a real `ON DELETE CASCADE` foreign key
-  (`map_versions`/`map_static_columns` → `maps`, `sessions`/`sso_identities` → `users`) are created
+  `AutoMigrate`: the two tables that need a real `ON DELETE CASCADE` foreign key
+  (`map_versions`/`map_static_columns` → `maps`) are created
   via raw `CREATE TABLE IF NOT EXISTS` SQL with every Go-side association tagged `constraint:-` to
   keep GORM from ever trying to manage that FK itself. That's not just style: SQLite can only
   declare a foreign key at `CREATE TABLE` time (no `ALTER TABLE ADD CONSTRAINT`), so letting GORM
   reconcile one on a database created by the old raw-SQL schema makes it recreate the table, and
   `glebarez/sqlite`'s recreate-table DDL parser (as of v1.11.0) corrupts the column list when a
   table also has a composite inline `UNIQUE(a, b)` constraint next to a column literally named
-  `column` (a SQL reserved word) — exactly `map_static_columns`' and `sso_identities`' shape.
+  `column` (a SQL reserved word) — exactly `map_static_columns`' shape.
   `migrate` works around it by first rewriting (`dropLegacyInlineUniqueConstraint`, with an
   explicit column list rather than `SELECT *`) any such table still on the old inline-constraint
   shape into one with a separate named unique index instead, before `AutoMigrate` ever touches it.
   The underlying parser bug is broader: it treats a **tab** as a quote character, so any stored
   `CREATE TABLE` text containing a tab gets misread. Every hand-written DDL statement is therefore
-  passed through `flatDDL` (whitespace collapsed to single spaces) before it's executed, and
-  `rebuildLegacyUsersTable` rebuilds a `users` table whose DDL still has a tab or whose
-  `created_at` is still `TEXT`. The sqlite driver only returns `time.Time` for date-typed columns,
-  so a `TEXT` `created_at` fails every user load with a Scan error. `Open` runs `migrate` *before*
-  enabling `PRAGMA foreign_keys`, because recreating a parent table (`users`) with enforcement on
-  would cascade-delete its sessions and SSO links. The pragma is a no-op inside a transaction, so
+  passed through `flatDDL` (whitespace collapsed to single spaces) before it's executed. `Open`
+  runs `migrate` *before* enabling `PRAGMA foreign_keys`, because recreating a parent table
+  (`maps`) with enforcement on would cascade-delete its children. The pragma is a no-op inside a transaction, so
   it can't be toggled per migration step.
   `AutoMigrate` itself is still what backfills a missing column/index on a database created by an
   older version of this schema (e.g. the old plain-`INTEGER` boolean/`TEXT` timestamp columns) —
   see `internal/configdb/legacy_migration_test.go` for a regression test that seeds a database
   using the old hand-written schema and asserts `Open` migrates it (including cascade deletes)
   without losing data. Unrelated to `internal/store` (MariaDB geo-object storage); no shared code.
-  The same database also holds `users` and `sessions` tables (`internal/configdb/users.go`),
-  backing the web server's authentication — see the `internal/webserver` bullet below. Unlike
-  `api`/`database`, `users` and (`internal/configdb/maps.go`) `maps` get real per-row CRUD methods
+  Unlike `api`/`database`, (`internal/configdb/maps.go`) `maps` get real per-row CRUD methods
   instead of only going through the whole-graph `Load`/`Save` above: `ListMaps`/`GetMap`/
-  `CreateMap`/`UpdateMap`/`DeleteMap` (returning `ErrMapNotFound`/`ErrMapIDTaken`, mirroring
-  `users`' `ErrUserNotFound`/`ErrUsernameTaken`) back the `/api/maps` REST family in
+  `CreateMap`/`UpdateMap`/`DeleteMap` (returning `ErrMapNotFound`/`ErrMapIDTaken`) back the
+  `/api/maps` REST family in
   `internal/webserver/maps.go` — each map is edited independently rather than resubmitting the
   whole `maps` array. `map_id` has a unique index (`mapRecord`'s `uniqueIndex` struct tag in
   `schema.go`, added automatically by `AutoMigrate` — nothing enforced this before it became a
-  per-map resource key) so `{id}`-addressed lookups are unambiguous; `CreateUser`, `VerifyPassword`, `ListUsers`,
-  `GetUser`, `UpdateUser`, `DeleteUser`, `CreateSession`, `SessionUser`, `DeleteSession`,
-  `UserCount` are `users`' equivalents. Passwords are hashed with
-  `golang.org/x/crypto/bcrypt`; a session's random token is only ever stored as its SHA-256 hash
-  (`sessions.token_hash`) — the raw token lives solely in the browser's session cookie. The same
-  database also holds `sso_identities` (`internal/configdb/sso.go`, linking a verified OIDC
-  `(issuer, subject)` pair to a `users` row) backing optional SSO login — the SSO *settings*
-  themselves live in the bootstrap file, not here (older databases may still contain an unused
-  `sso_config` table and `users.perm_edit_config_sso` column, which `AutoMigrate` never drops) — see "Authentication & permissions" below. Finally it holds `security_log`
+  per-map resource key) so `{id}`-addressed lookups are unambiguous. There are **no user tables**:
+  every login is SSO and every permission comes from the token's groups (see "SSO" below), so
+  `migrate`'s first step, `removeLocalUserTables`, drops the `users`/`sessions`/`sso_identities`
+  tables an older database still has. The SSO *settings* live in the bootstrap file, not here
+  (older databases may still contain an unused `sso_config` table, which nothing drops). Finally it holds `security_log`
   (`internal/configdb/securitylog.go`), an append-only audit trail — see the security log bullet
   under "Authentication & permissions" below.
 - **`internal/tileserve`** — minimal synchronous HTTP client for tileserve-go. `Login()`
@@ -147,13 +138,11 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
 - **`frontend`** — the UI: a Vite + React + TypeScript SPA (client-routed with `react-router-dom`),
   entirely separate from the root `package.json`/Husky setup (its own `frontend/package.json`,
   `node_modules`, lockfile). Routes: `/` (status), `/config/{api,database,maps}` (tabs, each its
-  own route rather than the old hash-fragment tab switcher), `/users`, `/security-log`, `/login`,
-  `/login/sso/callback`, `/setup` — all in `frontend/src/pages`. `frontend/src/auth/AuthContext.tsx`
+  own route rather than the old hash-fragment tab switcher), `/security-log`, `/login`,
+  `/login/sso/callback` — all in `frontend/src/pages`. `frontend/src/auth/AuthContext.tsx`
   fetches `GET /api/sso/status` (to set up the browser-side OIDC client, see "SSO" below) and then
-  `GET /api/me` + `GET /api/setup-status` once on load; `App.tsx`'s `AuthGate` is what the old server-side
-  `setupGate`/`requireUser(page=true)` redirects (see "Authentication & permissions" below) turned
-  into — it client-side-redirects to `/setup`/`/login`/`/` based on those two calls plus the current
-  route, instead of the server ever 302ing a page request. Per-route permission checks
+  `GET /api/me` once on load; `App.tsx`'s `AuthGate` client-side-redirects to `/login`/`/` based
+  on that plus the current route, instead of the server ever 302ing a page request. Per-route permission checks
   (`frontend/src/auth/guards.tsx`'s `RequirePermission`/`RequireSuperuser`) render a plain
   "forbidden" message in place of a page the logged-in user lacks the permission for — a UX nicety
   only; every actual enforcement is still the server's `requirePermission`/`requireSuperuser` on each
@@ -230,11 +219,10 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `status.Recorder.Snapshot()` (timestamps as RFC3339 strings), polled by the SPA every 10s to match
   the old server-rendered page's `<meta http-equiv="refresh" content="10">`. `GET /api/version`
   (also `status_api.go`, deliberately unauthenticated since the footer it feeds is shown on
-  `/login`/`/setup` too) replaces the old build-time-spliced `{{FOOTER}}` template marker with a
+  `/login` too) replaces the old build-time-spliced `{{FOOTER}}` template marker with a
   runtime call.
 
-  User management (`GET`/`POST /api/users`, `GET`/`PUT`/`PATCH`/`DELETE /api/users/{id}`, superuser
-  only) and the security log (`GET /api/security-log`, superuser only) are otherwise unchanged from
+  The security log (`GET /api/security-log`, superuser only) is otherwise unchanged from
   before the SPA rewrite — see "Authentication & permissions" below for how every route in this
   package is gated, and for the security log itself.
 - **`internal/store`** — owns the MariaDB schema (`EnsureSchema`, idempotent
@@ -265,50 +253,53 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
 
 ### Authentication & permissions
 
-Every API route the web server serves requires a logged-in account (a local session cookie or an
-SSO bearer token — see below) — there is no public route
+Every API route the web server serves requires a logged-in account (an SSO bearer token — see
+below; there are no local passwords or session cookies) — there is no public route
 anymore, including status (`/api/status`). `internal/webserver/spa.go`'s static-file serving is the
 one exception (see the `internal/webserver` bullet above): the SPA shell itself is always served
-regardless of session, since it's the SPA's own `AuthGate` (see the `frontend` bullet above) that
-now does what server-side page redirects used to. Accounts live in `configdb`'s `users`/`sessions`
-tables (see above) and are managed at `/users` (superuser-only, backed by `/api/users`,
-`/api/users/{id}`).
+regardless of login, since it's the SPA's own `AuthGate` (see the `frontend` bullet above) that
+now does what server-side page redirects used to. There are no local accounts: a request's
+identity (`principal` in `auth.go`) is built from its access token alone, and its permissions are
+`oidc.defaultPermissions` plus what the token's groups grant via `oidc.groupPermissions` (see "SSO"
+below).
 
-Each account has six independent boolean permissions (`configdb.Permissions`): `view_status`,
-`trigger_sync`, `view_config`, and three config-editing permissions — `edit_config_api`,
-`edit_config_database`, `edit_config_maps` — one per `/config` tab, enforced
+There are six independent boolean permissions (`config.SSOPermissions`): `viewStatus`,
+`triggerSync`, `viewConfig`, and three config-editing permissions — `editConfigApi`,
+`editConfigDatabase`, `editConfigMaps` — one per `/config` tab, enforced
 independently at each tab's own save endpoint (see the `internal/webserver` bullet above). There
-is deliberately no umbrella "edit config" flag. A separate `is_superuser` flag (not one of the
-six) gates `/users` only — it's orthogonal to the six feature permissions, not a superset of
-them, so a superuser account with none of them still can't see the status page or `/config`, and a
-fully-permissioned non-superuser still can't reach `/users`.
+is deliberately no umbrella "edit config" flag. A separate `superuser` grant (not one of the
+six) gates the security log only — it's orthogonal to the six feature permissions, not a superset
+of them, so a superuser with none of them still can't see the status page or `/config`, and a
+fully-permissioned non-superuser still can't reach `/security-log`.
 
 Every security-relevant action also appends a row to `configdb`'s append-only `security_log` table
-(`internal/configdb/securitylog.go`, `Store.LogSecurityEvent`/`Store.ListSecurityLog`) — local and
-SSO logins (success and failure — see "SSO" below for when those are recorded), logouts, account creation/update/deletion, every config section
+(`internal/configdb/securitylog.go`, `Store.LogSecurityEvent`/`Store.ListSecurityLog`) — SSO logins
+(success, with the permissions the groups granted, and failure — see "SSO" below for when those
+are recorded), every config section
 save (`config_saved`, `section=api|database`), and every map create/update/delete
 (`map_created`/`map_updated`/`map_deleted`, distinct event types since maps are their own resource
 — see the `internal/webserver` bullet above), each with a timestamp, event type, the acting
 username (or attempted username, for a failed login), the request's `RemoteAddr`, and a short
-free-form detail string (e.g. `section=api`, `target=<username>`, `map "town-centre" created`).
-For every change event (a config save, a map create/update/delete, or a user create/update/delete),
+free-form detail string (e.g. `section=api`, `map "town-centre" created`).
+For every change event (a config save or a map create/update/delete),
 that detail also records what actually changed —
 built by the `diff*`/`changesDetail`/`grantedPermissions` helpers in
 `internal/webserver/audit_diff.go`, which compare the before/after `config.Config`/
-`config.MapTarget`/`configdb.Permissions` field by field (e.g. `changed: baseUrl
+`config.MapTarget` field by field (e.g. `changed: baseUrl
 "a"->"b", table changed`) — never in plaintext for a secret field (`API.Password`,
-`Database.DSN`, account passwords), which are only ever reported as changed.
+`Database.DSN`), which are only ever reported as changed.
 Writing a log entry is
 best-effort — `internal/webserver/security_log.go`'s `logSecurityEvent` helper only logs a write
 failure to stderr, never blocks or fails the action that triggered it. `GET /security-log`
-(superuser-only, like `/users`) renders it via `GET /api/security-log?limit=N` (default 200, capped
+(superuser-only) renders it via `GET /api/security-log?limit=N` (default 200, capped
 at 1000, newest first) — there's no separate permission bit for it since the log can contain
-account-management detail and remote addresses not meant for every logged-in user.
+remote addresses and permission detail not meant for every logged-in user.
 
 ### SSO (OpenID Connect)
 
-Optional, in addition to local username/password accounts (which are never disabled and remain
-how the very first account is created at `/setup`). Configured only in the bootstrap file's `oidc:`
+The web server's only login method — there are no local username/password accounts any more, and
+`LoadBootstrap` fails startup if `webServer.enabled` is true while `oidc.enabled` is false.
+Configured only in the bootstrap file's `oidc:`
 section (`config.SSO` — `enabled`, `issuerUrl`, `clientId`, `scopes`, `buttonLabel`,
 `defaultPermissions`, `groupsClaim`, `groupPermissions`; see `config.example.yaml`), passed from `run` through `startWebServer` into
 `webserver.New`, and fixed for the process's lifetime — changing it needs a restart, and there is no
@@ -331,58 +322,34 @@ otherwise, or if the refresh fails, it drops the user. `AuthContext` listens for
 
 The provider's **access token (a JWT)** is then the API credential: `client.ts` sends it as
 `Authorization: Bearer` on every `/api/...` call, and `requireUser` (`internal/webserver/auth.go`)
-checks for that header before the session cookie. If the header is present but invalid, the
-request fails with 401 — there is no fallback to the cookie. `internal/webserver/sso_bearer.go`'s
+requires that header — a missing or invalid one fails with 401. `internal/webserver/sso_bearer.go`'s
 `ssoBearerUser` verifies the token with a cached `go-oidc` verifier per
 issuer (`ssoVerifierCache`, built in `New` and handed to the auth wrappers via `authenticator`;
 the JWKS is cached by go-oidc's `RemoteKeySet`), checking signature, issuer and expiry, with
 `SkipClientIDCheck` because access-token `aud` is provider-specific. It then binds the token to
 the configured client itself (`tokenIssuedTo`: `azp` or `aud` must name the client ID).
 
-The verified `(issuer, subject)` is resolved to a local user via
-`configdb.Store.FindOrCreateSSOUser` on every request (a single indexed lookup once linked, so
-permission edits on `/users` apply to the next request): an existing link is used as-is; failing
-that, a local account already named the claimed username (email, else `preferred_username`, else
-the subject identifier) is linked to instead of duplicated; failing that, a new account is
-auto-provisioned with `oidc.defaultPermissions` (converted to `configdb.Permissions` by
-`ssoDefaultPermissions` in `internal/webserver/sso.go`) and a random, never-revealed password. An SSO-provisioned account is never *stored* as a superuser
-automatically — that stays a manual grant via `/users`, exactly like every other account-creation
-path (a group can still grant it per request, see below).
+Permissions come solely from `oidc.defaultPermissions` (granted to every signed-in user; a plain
+`SSOPermissions` with no superuser field) plus `oidc.groupPermissions` (group name →
+`config.SSOGroupGrant`: the six permissions inline plus an optional `superuser`); nothing about
+users is stored, and there is no `/users` page. On every bearer request, `ssoBearerUser` reads the token's
+`oidc.groupsClaim` claim (default `groups`, a string array or a single string; see
+`groupsFromClaim`) and ORs every matching group's grants together (`groupGrants`/
+`unionPermissions` in `sso_bearer.go`) on top of `defaultPermissions` into the request's
+`principal`, named by `usernameFromClaims` (`preferred_username`, else email, else the subject).
+Superuser can only come from a group. Since nothing is cached, removing someone from a group at
+the provider revokes its grants on their next request.
 
-`oidc.groupPermissions` (group name → `config.SSOGroupGrant`: the six permissions inline plus an
-optional `superuser`) adds per-group grants on top of that. On
-every bearer request, `ssoBearerUser` reads the token's `oidc.groupsClaim` claim (default `groups`,
-a string array or a single string; see `groupsFromClaim`). It ORs every matching group's
-permissions into the loaded user's `Permissions`, and any group's `superuser` into its
-`IsSuperuser` (`groupGrants`/`unionPermissions` in `sso_bearer.go`). The result is never written back, so `/users` shows only the stored grants, while
-`/api/me` and every permission check see the merged set. Removing someone from a group at the
-provider therefore revokes its grants on their next request. `ensureNotLastSuperuser` (`users.go`)
-still counts only *stored* superusers, so a group-granted superuser never lets the last stored one
-be demoted or deleted. `defaultPermissions` stays a plain `SSOPermissions` with no superuser field,
-so auto-provisioning can never create a superuser.
-
-Since there's no server-side login step, `sso_login` is recorded by `GET /api/me` whenever it's
-bearer-authenticated. The SPA calls it once right after the provider callback and once per page
+Since there's no server-side login step, `sso_login` is recorded by every `GET /api/me`. The SPA calls it once right after the provider callback and once per page
 load, which avoids logging every API request. A rejected bearer token logs `sso_login_failed`,
-except plain expiry (routine for an idle tab), which only goes to stderr. Logout is client-side for
-SSO users: the token is dropped and, if the provider advertises an `end_session_endpoint`, the
+except plain expiry (routine for an idle tab), which only goes to stderr. Logout is client-side:
+the token is dropped and, if the provider advertises an `end_session_endpoint`, the
 browser is redirected to it.
 
-`internal/webserver/auth.go` implements local accounts: `requireUser`/`requirePermission`/
-`requireSuperuser` (all taking the shared `*authenticator`) are `http.HandlerFunc` wrappers that always write a JSON 401/403 (there's no more `page bool`
-branch redirecting a browser request server-side — every route here is JSON-only now that the SPA
-owns all page routing; see the `frontend` bullet above). Sessions are a random token (in an
-`HttpOnly`, `SameSite=Lax` cookie — `Secure` only when the request arrived over TLS, since the
-server is still meant to work unencrypted on a trusted network) resolved via
-`configdb.Store.SessionUser`, which only ever sees the token's SHA-256 hash.
-
-While the `users` table is empty (a fresh install), `GET /api/setup-status` reports `{needsSetup:
-true}` and the SPA's `AuthGate` routes to `/setup` instead of `/login`; the account created there
-(via `POST /api/setup`, which still re-checks `UserCount` itself to close the race between two
-browsers both loading `/setup` before either submits) always gets every permission plus superuser,
-since there's no one else yet to have granted anything more selectively. `POST /api/login` and
-`POST /api/setup` both return the same `meResponse` shape `GET /api/me` does, so the SPA doesn't
-need a separate round trip right after either succeeds. `/api/me` returns the logged-in user's
+`internal/webserver/auth.go`'s `requireUser`/`requirePermission`/`requireSuperuser` (all taking
+the shared `*authenticator`) are `http.HandlerFunc` wrappers that always write a JSON 401/403 —
+every route here is JSON-only now that the SPA owns all page routing; see the `frontend` bullet
+above. `/api/me` returns the logged-in user's
 username/permissions/superuser flag; `frontend/src/components/TopBar.tsx` is what the old shared
 `accountNavJS` inline script became — it renders the topbar's account/logout control and hides nav
 links the user can't use, purely a UX nicety, since every actual enforcement happens server-side

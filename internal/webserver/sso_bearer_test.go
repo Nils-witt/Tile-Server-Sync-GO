@@ -2,7 +2,6 @@ package webserver
 
 import (
 	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
 	"encoding/json"
 	"slices"
 	"testing"
@@ -38,9 +37,9 @@ func TestGroupGrantsUnion(t *testing.T) {
 	}
 
 	perms, superuser := groupGrants(mapping, []string{"ops", "config", "unmapped"})
-	got := unionPermissions(configdb.Permissions{EditConfigAPI: true}, perms)
+	got := unionPermissions(config.SSOPermissions{EditConfigAPI: true}, perms)
 
-	want := configdb.Permissions{
+	want := config.SSOPermissions{
 		ViewStatus: true, TriggerSync: true, ViewConfig: true, EditConfigAPI: true, EditConfigMaps: true,
 	}
 	if got != want || superuser {
@@ -51,7 +50,7 @@ func TestGroupGrantsUnion(t *testing.T) {
 		t.Error("admins group did not grant superuser")
 	}
 
-	if none, superuser := groupGrants(mapping, []string{"unmapped"}); none != (configdb.Permissions{}) || superuser {
+	if none, superuser := groupGrants(mapping, []string{"unmapped"}); none != (config.SSOPermissions{}) || superuser {
 		t.Errorf("unmapped group granted %+v superuser=%v", none, superuser)
 	}
 }

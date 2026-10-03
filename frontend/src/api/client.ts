@@ -7,13 +7,10 @@ import type {
   MapDeleteResponse,
   MapSaveResponse,
   MapTarget,
-  Permissions,
   SecurityLogEntry,
-  SetupStatus,
   SSOStatus,
   StatusSnapshot,
   SyncResponse,
-  User,
   VersionInfo,
 } from './types'
 import { getAccessToken, renewAccessToken } from '../auth/oidc'
@@ -33,8 +30,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   let res = await send(path, init, token)
 
   // A rejected SSO token (expired, or revoked at the provider) gets one silent
-  // renewal attempt before the 401 is surfaced; a local session has nothing
-  // to renew.
+  // renewal attempt before the 401 is surfaced.
   if (res.status === 401 && token) {
     token = await renewAccessToken()
     if (token) res = await send(path, init, token)
@@ -67,13 +63,8 @@ function putJSON<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   me: () => apiFetch<Me>('/api/me'),
-  setupStatus: () => apiFetch<SetupStatus>('/api/setup-status'),
   version: () => apiFetch<VersionInfo>('/api/version'),
   ssoStatus: () => apiFetch<SSOStatus>('/api/sso/status'),
-
-  login: (username: string, password: string) => postJSON<Me>('/api/login', { username, password }),
-  setup: (username: string, password: string) => postJSON<Me>('/api/setup', { username, password }),
-  logout: () => postJSON<{ ok: boolean }>('/api/logout', {}),
 
   status: () => apiFetch<StatusSnapshot>('/api/status'),
   syncMap: (id: string) => postJSON<SyncResponse>(`/api/maps/${encodeURIComponent(id)}/sync`, {}),
@@ -92,12 +83,6 @@ export const api = {
   deleteMap: (id: string) =>
     apiFetch<MapDeleteResponse>(`/api/maps/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-  listUsers: () => apiFetch<User[]>('/api/users'),
-  createUser: (u: { username: string; password: string; isSuperuser: boolean; permissions: Permissions }) =>
-    postJSON<User>('/api/users', u),
-  patchUser: (id: number, patch: { password: string; isSuperuser: boolean; permissions: Permissions }) =>
-    apiFetch<User>(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(patch), headers: { 'Content-Type': 'application/json' } }),
-  deleteUser: (id: number) => apiFetch<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
 
   securityLog: () => apiFetch<SecurityLogEntry[]>('/api/security-log'),
 }

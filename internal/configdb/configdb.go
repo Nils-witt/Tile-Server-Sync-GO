@@ -21,11 +21,10 @@ import (
 )
 
 // Store wraps a SQLite connection holding the config database. Its schema
-// (core config tables plus users/sso/security_log — see schema.go) and its
-// Load/Save methods (load.go/save.go) for the config.Config-shaped subset
-// live in their own files; per-row CRUD for maps/users/sso lives in
-// maps.go/users.go/sso.go instead of going through the whole-graph
-// Load/Save.
+// (core config tables plus security_log — see schema.go) and its Load/Save
+// methods (load.go/save.go) for the config.Config-shaped subset live in
+// their own files; per-row CRUD for maps lives in maps.go instead of going
+// through the whole-graph Load/Save.
 type Store struct {
 	db *gorm.DB
 }
@@ -62,10 +61,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	s := &Store{db: gdb}
 
-	// Foreign keys are only enforced after migrating: both AutoMigrate and
-	// rebuildLegacyUsersTable recreate tables (copy, drop, rename), and
-	// dropping users with enforcement on would cascade-delete every session
-	// and SSO link. PRAGMA foreign_keys is a no-op inside a transaction, so
+	// Foreign keys are only enforced after migrating: AutoMigrate and
+	// dropLegacyInlineUniqueConstraint recreate tables (copy, drop, rename),
+	// and dropping a parent table (maps) with enforcement on would
+	// cascade-delete its children. PRAGMA foreign_keys is a no-op inside a transaction, so
 	// this can't be done per migration step instead.
 	if err := s.migrate(ctx); err != nil {
 		_ = sqlDB.Close()

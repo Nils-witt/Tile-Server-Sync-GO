@@ -20,7 +20,6 @@ export function TopBar() {
           Status
         </NavLink>
         {me?.permissions.viewConfig && <NavLink to="/config">Config</NavLink>}
-        {me?.isSuperuser && <NavLink to="/users">Users</NavLink>}
         {me?.isSuperuser && <NavLink to="/security-log">Security log</NavLink>}
       </nav>
       <nav id="account-nav">

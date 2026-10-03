@@ -31,25 +31,28 @@ type SSO struct {
 	// ButtonLabel is the login page's SSO button text. Defaults to
 	// DefaultSSOButtonLabel.
 	ButtonLabel string `yaml:"buttonLabel" json:"buttonLabel"`
-	// DefaultPermissions is the permission set a first-time SSO login's
-	// auto-provisioned account gets. An SSO account is never made a superuser
-	// automatically.
+	// DefaultPermissions is granted to every signed-in SSO user, on top of
+	// whatever their groups grant (see GroupPermissions). It has no
+	// superuser field, so superuser can only ever come from a group.
 	DefaultPermissions SSOPermissions `yaml:"defaultPermissions" json:"defaultPermissions"`
 	// GroupsClaim names the access-token claim listing the user's groups
 	// (a string array, or a single string). Defaults to DefaultSSOGroupsClaim.
 	GroupsClaim string `yaml:"groupsClaim" json:"groupsClaim"`
 	// GroupPermissions maps a group name (as it appears in GroupsClaim) to
-	// the permissions (and optionally superuser) its members get. They are
-	// worked out from the token on every request and added to the account's
-	// stored ones, never saved, so a group change at the provider applies on
-	// the next request and removing someone from a group revokes what it
-	// granted.
+	// the permissions (and optionally superuser) its members get, on top of
+	// DefaultPermissions. Nothing about users is stored locally, so these two
+	// are the only source of permissions there is. They are
+	// worked out from the token on every request, so a group change at the
+	// provider applies on the next request and removing someone from a group
+	// revokes what it granted.
 	GroupPermissions map[string]SSOGroupGrant `yaml:"groupPermissions" json:"groupPermissions"`
 }
 
-// SSOPermissions mirrors configdb.Permissions field for field (this package
-// can't import configdb, which already imports it); internal/webserver
-// converts between the two.
+// SSOPermissions is the set of independently grantable feature permissions
+// defaultPermissions and each groupPermissions entry hand out, and what internal/webserver checks each
+// route against. It deliberately has no umbrella "edit config" flag: editing
+// is only ever granted per-section (API/Database/Maps), matching the
+// section-specific save endpoints.
 type SSOPermissions struct {
 	ViewStatus         bool `yaml:"viewStatus" json:"viewStatus"`
 	TriggerSync        bool `yaml:"triggerSync" json:"triggerSync"`
@@ -60,9 +63,8 @@ type SSOPermissions struct {
 }
 
 // SSOGroupGrant is one oidc.groupPermissions entry: the six permissions,
-// written inline next to an optional superuser flag. Superuser lives here
-// rather than in SSOPermissions so defaultPermissions can't auto-provision
-// every SSO account as a superuser.
+// written inline next to an optional superuser flag (which gates the
+// security log only).
 type SSOGroupGrant struct {
 	SSOPermissions `yaml:",inline"`
 	Superuser      bool `yaml:"superuser" json:"superuser"`

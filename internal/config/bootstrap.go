@@ -56,6 +56,12 @@ func LoadBootstrap(path string) (*Bootstrap, error) {
 		return nil, fmt.Errorf("bootstrap config %q: %w", path, err)
 	}
 
+	// SSO is the web server's only login method, so without it nobody could
+	// ever sign in.
+	if b.WebServer.Enabled && !b.SSO.Enabled {
+		return nil, fmt.Errorf("bootstrap config %q: oidc.enabled must be true when webServer.enabled is true", path)
+	}
+
 	if b.ConfigDB == "" {
 		b.ConfigDB = defaultConfigDBName
 	}

@@ -8,7 +8,7 @@ const empty: ApiSection = { baseUrl: '', username: '', password: '', token: '' }
 
 export function ApiTab() {
   const { me } = useAuth()
-  const disabled = !me?.permissions.editConfigAPI
+  const disabled = !me?.permissions.editConfigApi
   const [form, setForm] = useState<ApiSection>(empty)
   const [banner, setBanner] = useState<BannerState | null>(null)
   const [saving, setSaving] = useState(false)

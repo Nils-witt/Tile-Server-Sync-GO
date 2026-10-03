@@ -11,7 +11,7 @@ import (
 // logSecurityEvent appends one row to the security log (see
 // configdb.Store.LogSecurityEvent). Best-effort: a failure to write the log
 // entry is only logged to stderr, never returned to the caller — the audit
-// trail must not block or fail the login/save/user-edit action that
+// trail must not block or fail the login/save action that
 // triggered it.
 func logSecurityEvent(r *http.Request, cfgDB *configdb.Store, eventType, username, detail string) {
 	if err := cfgDB.LogSecurityEvent(r.Context(), eventType, username, r.RemoteAddr, detail); err != nil {

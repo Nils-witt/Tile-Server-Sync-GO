@@ -2,7 +2,6 @@ package webserver
 
 import (
 	"Tile-Server-Sync-GO/internal/config"
-	"Tile-Server-Sync-GO/internal/configdb"
 	"fmt"
 	"maps"
 	"slices"
@@ -11,7 +10,7 @@ import (
 
 // changesDetail joins a list of per-field change descriptions (as built by
 // the diff* helpers below) into the free-form detail string appended to a
-// security_log row, so every config/account change records not just that it
+// security_log row, so every config/map change records not just that it
 // happened but what changed. An empty change set (a save that touched no
 // field, e.g. re-submitting the same form) is reported explicitly rather
 // than left silent.
@@ -107,40 +106,24 @@ func diffMapFields(old, updated config.MapTarget) []string {
 	return changes
 }
 
-// permissionFields lists a configdb.Permissions' boolean fields alongside
-// the label used to describe each in a security_log detail string, shared by
-// diffPermissions and grantedPermissions.
+// permissionFields lists a config.SSOPermissions' boolean fields alongside
+// the label used to describe each in a security_log detail string (see
+// grantedPermissions).
 var permissionFields = []struct {
 	label string
-	get   func(configdb.Permissions) bool
+	get   func(config.SSOPermissions) bool
 }{
-	{"viewStatus", func(p configdb.Permissions) bool { return p.ViewStatus }},
-	{"triggerSync", func(p configdb.Permissions) bool { return p.TriggerSync }},
-	{"viewConfig", func(p configdb.Permissions) bool { return p.ViewConfig }},
-	{"editConfigApi", func(p configdb.Permissions) bool { return p.EditConfigAPI }},
-	{"editConfigDatabase", func(p configdb.Permissions) bool { return p.EditConfigDatabase }},
-	{"editConfigMaps", func(p configdb.Permissions) bool { return p.EditConfigMaps }},
-}
-
-// diffPermissions reports which individual permission bits flipped between
-// before and after, e.g. "editConfigApi: false->true".
-func diffPermissions(before, after configdb.Permissions) []string {
-	var changes []string
-
-	for _, f := range permissionFields {
-		b, a := f.get(before), f.get(after)
-		if b != a {
-			changes = append(changes, fmt.Sprintf("%s %v->%v", f.label, b, a))
-		}
-	}
-
-	return changes
+	{"viewStatus", func(p config.SSOPermissions) bool { return p.ViewStatus }},
+	{"triggerSync", func(p config.SSOPermissions) bool { return p.TriggerSync }},
+	{"viewConfig", func(p config.SSOPermissions) bool { return p.ViewConfig }},
+	{"editConfigApi", func(p config.SSOPermissions) bool { return p.EditConfigAPI }},
+	{"editConfigDatabase", func(p config.SSOPermissions) bool { return p.EditConfigDatabase }},
+	{"editConfigMaps", func(p config.SSOPermissions) bool { return p.EditConfigMaps }},
 }
 
 // grantedPermissions lists the permissions set to true in perms, for
-// recording the initial grant on account creation (there's no "before" to
-// diff against).
-func grantedPermissions(perms configdb.Permissions) []string {
+// recording what a login's groups granted (see meAPIHandler).
+func grantedPermissions(perms config.SSOPermissions) []string {
 	var granted []string
 
 	for _, f := range permissionFields {

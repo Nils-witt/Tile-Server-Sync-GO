@@ -1,12 +1,13 @@
 // These mirror the JSON DTOs defined in internal/webserver (Go) field for
-// field — see that package's config.go, maps.go, users.go, sso.go,
+// field — see that package's config.go, maps.go, sso.go,
 // security_log.go, status_api.go, and auth.go for the source of truth.
 
+/** Mirrors config.SSOPermissions — granted solely by the user's SSO groups. */
 export interface Permissions {
   viewStatus: boolean
   triggerSync: boolean
   viewConfig: boolean
-  editConfigAPI: boolean
+  editConfigApi: boolean
   editConfigDatabase: boolean
   editConfigMaps: boolean
 }
@@ -93,13 +94,6 @@ export interface SSOStatus {
   scopes?: string
 }
 
-export interface User {
-  id: number
-  username: string
-  isSuperuser: boolean
-  permissions: Permissions
-}
-
 export interface SecurityLogEntry {
   at: string
   eventType: string
@@ -131,6 +125,3 @@ export interface VersionInfo {
   commit: string
 }
 
-export interface SetupStatus {
-  needsSetup: boolean
-}

@@ -4,13 +4,13 @@ import type { Me } from '../api/types'
 import { initOidc, logoutOidc, onSsoSessionEnded } from './oidc'
 
 interface AuthContextValue {
-  /** true once the initial /api/me + /api/setup-status round trip has settled. */
+  /** true once the initial /api/sso/status + /api/me round trip has settled. */
   ready: boolean
   me: Me | null
-  needsSetup: boolean
+  /** The SSO login button's label, or null when SSO is unavailable (nobody can sign in). */
+  ssoLabel: string | null
   /** Reloads the current account; resolves to it, or null when not signed in. */
   refreshMe: () => Promise<Me | null>
-  refreshSetupStatus: () => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -19,7 +19,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [me, setMe] = useState<Me | null>(null)
-  const [needsSetup, setNeedsSetup] = useState(false)
+  const [ssoLabel, setSsoLabel] = useState<string | null>(null)
 
   const refreshMe = useCallback(async () => {
     try {
@@ -36,41 +36,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const refreshSetupStatus = useCallback(async () => {
-    const status = await api.setupStatus()
-    setNeedsSetup(status.needsSetup)
-  }, [])
-
   useEffect(() => {
     void (async () => {
       // SSO settings first: a token stored by an earlier page load must be
       // attached to the very first /api/me (see oidc.ts / client.ts).
       try {
-        initOidc(await api.ssoStatus())
+        const status = await api.ssoStatus()
+        initOidc(status)
+        if (status.enabled) setSsoLabel(status.buttonLabel || 'Sign in with SSO')
         // An SSO session that can't be renewed any more counts as logged
         // out: AuthGate then sends the user to /login?next=<current page>.
         onSsoSessionEnded(() => setMe(null))
       } catch {
-        /* SSO status unavailable: carry on with local login only. */
+        /* SSO status unavailable: the login page says so. */
       }
 
-      await Promise.all([refreshSetupStatus(), refreshMe()])
+      await refreshMe()
       setReady(true)
     })()
-    // Runs once on mount; refreshMe/refreshSetupStatus are stable (useCallback, no deps).
+    // Runs once on mount; refreshMe is stable (useCallback, no deps).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const logout = useCallback(async () => {
-    await api.logout()
     setMe(null)
-    // For an SSO user this may also navigate away, to the provider's logout.
+    // This may also navigate away, to the provider's logout.
     await logoutOidc()
   }, [])
 
   const value = useMemo(
-    () => ({ ready, me, needsSetup, refreshMe, refreshSetupStatus, logout }),
-    [ready, me, needsSetup, refreshMe, refreshSetupStatus, logout],
+    () => ({ ready, me, ssoLabel, refreshMe, logout }),
+    [ready, me, ssoLabel, refreshMe, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

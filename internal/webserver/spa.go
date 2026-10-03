@@ -23,7 +23,7 @@ func spaFS() (fs.FS, error) {
 // react-router (running client-side) can render it. There is deliberately no
 // server-side auth/permission gate here (unlike the old per-page handlers
 // this replaces): every route in the SPA renders the same bundle, which
-// itself calls GET /api/me and GET /api/setup-status to decide what to show,
+// itself calls GET /api/me to decide what to show,
 // exactly as the API's own 401/403 responses already gate every actual
 // action.
 func spaHandler(distFS fs.FS) http.HandlerFunc {

@@ -5,59 +5,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"slices"
 	"testing"
-	"time"
 )
-
-// tableColumns returns a table's column names via PRAGMA table_info, used
-// to verify the embedded-Permissions naming-strategy assumptions documented
-// on User in users.go.
-func tableColumns(t *testing.T, s *Store, table string) []string {
-	t.Helper()
-
-	rows, err := s.db.Raw("PRAGMA table_info(" + table + ")").Rows()
-	if err != nil {
-		t.Fatalf("pragma table_info(%s): %v", table, err)
-	}
-	defer func() {
-		if err := rows.Close(); err != nil {
-			t.Fatalf("close rows: %v", err)
-		}
-	}()
-
-	var cols []string
-
-	for rows.Next() {
-		var (
-			cid         int
-			name, ctype string
-			notnull, pk int
-			dflt        any
-		)
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-
-		cols = append(cols, name)
-	}
-
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate rows: %v", err)
-	}
-
-	return cols
-}
-
-func assertContainsAll(t *testing.T, table string, got, want []string) {
-	t.Helper()
-
-	for _, w := range want {
-		if !slices.Contains(got, w) {
-			t.Errorf("missing expected column %q in %s, got %v", w, table, got)
-		}
-	}
-}
 
 func openTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
@@ -76,89 +25,6 @@ func openTestStore(t *testing.T) (*Store, string) {
 	})
 
 	return s, dbPath
-}
-
-func TestEmbeddedPermissionColumnNames(t *testing.T) {
-	t.Parallel()
-
-	s, _ := openTestStore(t)
-
-	assertContainsAll(t, "users", tableColumns(t, s, "users"), []string{
-		"perm_view_status", "perm_trigger_sync", "perm_view_config",
-		"perm_edit_config_api", "perm_edit_config_database", "perm_edit_config_maps",
-	})
-}
-
-func TestUserSessionRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	s, _ := openTestStore(t)
-
-	u, err := s.CreateUser(ctx, "alice", "hunter2", Permissions{ViewStatus: true, EditConfigMaps: true}, true)
-	if err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-
-	if !u.Permissions.ViewStatus || !u.Permissions.EditConfigMaps || !u.IsSuperuser {
-		t.Errorf("permissions not roundtripped: %+v", u)
-	}
-
-	got, err := s.VerifyPassword(ctx, "alice", "hunter2")
-	if err != nil {
-		t.Fatalf("verify password: %v", err)
-	}
-
-	if got.ID != u.ID {
-		t.Errorf("id mismatch")
-	}
-
-	if _, err := s.VerifyPassword(ctx, "alice", "wrong"); !errors.Is(err, ErrInvalidCredentials) {
-		t.Errorf("expected ErrInvalidCredentials, got %v", err)
-	}
-
-	token, exp, err := s.CreateSession(ctx, u.ID, time.Hour)
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-
-	if token == "" || exp.Before(time.Now()) {
-		t.Errorf("bad session")
-	}
-
-	su, err := s.SessionUser(ctx, token)
-	if err != nil {
-		t.Fatalf("session user: %v", err)
-	}
-
-	if su.ID != u.ID {
-		t.Errorf("session user mismatch")
-	}
-}
-
-func TestDeleteUserCascadesSessions(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	s, _ := openTestStore(t)
-
-	bob, err := s.CreateUser(ctx, "bob", "hunter2", Permissions{}, false)
-	if err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-
-	token, _, err := s.CreateSession(ctx, bob.ID, time.Hour)
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-
-	if err := s.DeleteUser(ctx, bob.ID); err != nil {
-		t.Fatalf("delete user: %v", err)
-	}
-
-	if _, err := s.SessionUser(ctx, token); !errors.Is(err, ErrSessionInvalid) {
-		t.Errorf("sessions did not cascade-delete on fresh install: %v", err)
-	}
 }
 
 func TestMapCRUD(t *testing.T) {

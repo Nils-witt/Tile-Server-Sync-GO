@@ -26,15 +26,15 @@
 # restart, and its "Sync now" button runs a sync immediately instead of
 # waiting for the next interval tick. Changing webServer.enabled/address
 # itself always needs a process restart — the editor shows these two values
-# read-only for that reason. None of this has authentication, so only
-# enable it on a trusted network.
+# read-only for that reason. Signing in is only possible via SSO (see "oidc"
+# below), so oidc.enabled must be true whenever webServer.enabled is.
 webServer:
   enabled: true
   address: ":8080"
 
-# Optional OpenID Connect single sign-on for the web server, in addition to
-# local username/password accounts (which always keep working). Changing
-# anything here needs a restart.
+# OpenID Connect single sign-on: the web server's only login method (there
+# are no local username/password accounts), so it's required whenever
+# webServer.enabled is true. Changing anything here needs a restart.
 #
 # The browser runs the login itself, as a public client (authorization code
 # + PKCE, no client secret), and then sends the provider's access token with
@@ -44,12 +44,10 @@ webServer:
 #   - web origin (CORS) allowed: <this server's external URL>
 #   - access tokens issued as JWTs whose "azp" or "aud" claim is clientId
 #
-# A first SSO login links to an existing local account with the same username
-# (email, else preferred_username, else the subject ID), or otherwise creates
-# one with defaultPermissions. SSO accounts are never made superusers
-# automatically; grant that on the /users page.
+# Permissions come solely from defaultPermissions plus the provider's groups
+# (groupPermissions below); nothing about users is stored locally.
 oidc:
-  enabled: false
+  enabled: true
   issuerUrl: "https://accounts.example.com/realms/example"
   clientId: "tile-server-sync"
   # scopes: "openid profile email"   # default
@@ -59,6 +57,8 @@ oidc:
   # never uses a hidden iframe, which many providers block.
   # scopes: "openid profile email offline_access"
   # buttonLabel: "Sign in with SSO"  # default
+  # Granted to every signed-in user, on top of their groups' permissions.
+  # There's no superuser here; that can only come from a group.
   defaultPermissions:
     viewStatus: true
     triggerSync: false
@@ -66,24 +66,25 @@ oidc:
     editConfigApi: false
     editConfigDatabase: false
     editConfigMaps: false
-  # Extra permissions per provider group, on top of the account's own (the
-  # ones above for a new account, plus anything granted on /users). Worked
-  # out from the access token on every request and never saved, so changing
-  # someone's groups at the provider takes effect on their next request.
-  # "superuser: true" also grants superuser (user management and the
-  # security log) to the group's members. The token must carry the groups
-  # claim (Authentik's "profile" scope does; Keycloak needs a "groups" mapper
-  # that adds it to the access token).
+  # Permissions per provider group, on top of defaultPermissions; a user gets
+  # the union of every listed group they're in. Worked out from the access token on every request and
+  # never saved, so changing someone's groups at the provider takes effect
+  # on their next request. "superuser: true" also grants access to the
+  # security log. The token must carry the groups claim (Authentik's
+  # "profile" scope does; Keycloak needs a "groups" mapper that adds it to
+  # the access token).
   # groupsClaim: "groups"   # default
-  # groupPermissions:
-  #   tile-operators:
-  #     viewStatus: true
-  #     triggerSync: true
-  #   tile-admins:
-  #     superuser: true
-  #     viewStatus: true
-  #     triggerSync: true
-  #     viewConfig: true
-  #     editConfigApi: true
-  #     editConfigDatabase: true
-  #     editConfigMaps: true
+  groupPermissions:
+    tile-viewers:
+      viewStatus: true
+    tile-operators:
+      viewStatus: true
+      triggerSync: true
+    tile-admins:
+      superuser: true
+      viewStatus: true
+      triggerSync: true
+      viewConfig: true
+      editConfigApi: true
+      editConfigDatabase: true
+      editConfigMaps: true

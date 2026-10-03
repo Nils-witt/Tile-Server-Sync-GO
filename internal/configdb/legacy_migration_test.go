@@ -3,7 +3,6 @@ package configdb
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -109,7 +108,7 @@ var legacySchema = []string{
 // database/sql, no GORM involved) and inserts one row of sample data per
 // table that Store.migrate needs to evolve, returning legacy-map's
 // autoincrement row id for the caller to check cascade deletes against.
-func seedLegacyDatabase(ctx context.Context, t *testing.T, dbPath string) (createdAt string, mapRowID int64) {
+func seedLegacyDatabase(ctx context.Context, t *testing.T, dbPath string) (mapRowID int64) {
 	t.Helper()
 
 	raw, err := sql.Open("sqlite", dbPath)
@@ -132,7 +131,7 @@ func seedLegacyDatabase(ctx context.Context, t *testing.T, dbPath string) (creat
 		}
 	}
 
-	createdAt = time.Now().UTC().Format(time.RFC3339Nano)
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
 
 	_, err = raw.ExecContext(ctx, `INSERT INTO config_scalar (id, api_base_url, api_token, db_dsn, db_table, db_prune_missing)
 		VALUES (1, 'https://legacy.example', 'tok123', 'user:pass@/db', 'geo_objects', 1)`)
@@ -170,7 +169,7 @@ func seedLegacyDatabase(ctx context.Context, t *testing.T, dbPath string) (creat
 		t.Fatalf("insert security_log: %v", err)
 	}
 
-	return createdAt, mapRowID
+	return mapRowID
 }
 
 func assertLegacyConfigIntact(ctx context.Context, t *testing.T, s *Store) {
@@ -190,19 +189,16 @@ func assertLegacyConfigIntact(ctx context.Context, t *testing.T, s *Store) {
 	}
 }
 
-func assertLegacyUserIntact(ctx context.Context, t *testing.T, s *Store) *User {
+// assertLegacyUserTablesDropped checks that migrate removed the old
+// local-account tables (see removeLocalUserTables).
+func assertLegacyUserTablesDropped(ctx context.Context, t *testing.T, s *Store) {
 	t.Helper()
 
-	u, err := s.GetUser(ctx, 1)
-	if err != nil {
-		t.Fatalf("get legacy user: %v", err)
+	for _, table := range []string{"users", "sessions", "sso_identities"} {
+		if s.db.WithContext(ctx).Migrator().HasTable(table) {
+			t.Errorf("legacy %s table was not dropped", table)
+		}
 	}
-
-	if u.Username != "legacy-admin" || !u.IsSuperuser || !u.Permissions.ViewStatus || !u.Permissions.EditConfigMaps {
-		t.Errorf("legacy user lost: %+v", u)
-	}
-
-	return u
 }
 
 func assertLegacySecurityLogIntact(ctx context.Context, t *testing.T, s *Store) {
@@ -227,7 +223,7 @@ func TestLegacyUpgrade(t *testing.T) {
 
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
-	_, mapRowID := seedLegacyDatabase(ctx, t, dbPath)
+	mapRowID := seedLegacyDatabase(ctx, t, dbPath)
 
 	// Opening with the new GORM-backed Store must migrate the legacy schema
 	// in place without losing any of the data seeded above.
@@ -242,9 +238,9 @@ func TestLegacyUpgrade(t *testing.T) {
 	}()
 
 	assertLegacyConfigIntact(ctx, t, s)
-	u := assertLegacyUserIntact(ctx, t, s)
+	assertLegacyUserTablesDropped(ctx, t, s)
 	assertLegacySecurityLogIntact(ctx, t, s)
-	assertLegacyCascadeDeletes(ctx, t, s, u, mapRowID)
+	assertLegacyCascadeDeletes(ctx, t, s, mapRowID)
 
 	// Re-open again to make sure the migration is stable (idempotent) once
 	// the schema has already been upgraded.
@@ -267,21 +263,12 @@ func TestLegacyUpgrade(t *testing.T) {
 	}
 }
 
-// assertLegacyCascadeDeletes checks that deleting a map/user on a database
-// upgraded from the legacy schema still cascades to their child rows —
+// assertLegacyCascadeDeletes checks that deleting a map on a database
+// upgraded from the legacy schema still cascades to its child rows —
 // fkTableStatements' real FK, not GORM's own constraint management, is what
 // has to keep this working (see schema.go).
-func assertLegacyCascadeDeletes(ctx context.Context, t *testing.T, s *Store, u *User, mapRowID int64) {
+func assertLegacyCascadeDeletes(ctx context.Context, t *testing.T, s *Store, mapRowID int64) {
 	t.Helper()
-
-	token, _, err := s.CreateSession(ctx, u.ID, time.Hour)
-	if err != nil {
-		t.Fatalf("create session on upgraded db: %v", err)
-	}
-
-	if _, err := s.SessionUser(ctx, token); err != nil {
-		t.Fatalf("session user on upgraded db: %v", err)
-	}
 
 	if err := s.DeleteMap(ctx, "legacy-map"); err != nil {
 		t.Fatalf("delete legacy map: %v", err)
@@ -294,89 +281,5 @@ func assertLegacyCascadeDeletes(ctx context.Context, t *testing.T, s *Store, u *
 
 	if orphanVersions != 0 {
 		t.Errorf("map_versions did not cascade-delete: %d rows left", orphanVersions)
-	}
-
-	if err := s.DeleteUser(ctx, u.ID); err != nil {
-		t.Fatalf("delete legacy user: %v", err)
-	}
-
-	if _, err := s.SessionUser(ctx, token); !errors.Is(err, ErrSessionInvalid) {
-		t.Errorf("sessions did not cascade-delete: SessionUser returned %v", err)
-	}
-}
-
-// appendLegacyUserColumnAndLinks appends a column to the seeded users table
-// the way the old raw-SQL migrations did, and adds a session and an SSO
-// identity referencing user 1 that must survive migrate's users rebuild.
-func appendLegacyUserColumnAndLinks(ctx context.Context, t *testing.T, dbPath, createdAt string) {
-	t.Helper()
-
-	raw, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open raw: %v", err)
-	}
-
-	for _, stmt := range []string{
-		`ALTER TABLE users ADD COLUMN legacy_extra INTEGER NOT NULL DEFAULT 0`,
-		`INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ('h', 1, '` + createdAt + `', '` + createdAt + `')`,
-		`INSERT INTO sso_identities (issuer, subject, user_id, created_at) VALUES ('https://idp', 'sub-1', 1, '` + createdAt + `')`,
-	} {
-		if _, err := raw.ExecContext(ctx, stmt); err != nil {
-			t.Fatalf("seed: %v\n%s", err, stmt)
-		}
-	}
-
-	if err := raw.Close(); err != nil {
-		t.Fatalf("close raw: %v", err)
-	}
-}
-
-// TestLegacyUsersWithAppendedColumn covers a legacy users table that later
-// grew a column via ALTER TABLE ADD COLUMN (as the old raw-SQL migrations
-// did for perm_edit_config_sso). SQLite stores that DDL with a newline
-// before the appended column, which glebarez/sqlite's DDL parser can't
-// read, so AutoMigrate never converted created_at from TEXT to datetime and
-// every user load failed to scan it. migrate must rebuild the table without
-// losing the rows that reference it.
-func TestLegacyUsersWithAppendedColumn(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "legacy.db")
-	createdAt, _ := seedLegacyDatabase(ctx, t, dbPath)
-
-	appendLegacyUserColumnAndLinks(ctx, t, dbPath, createdAt)
-
-	s, err := Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("open upgraded: %v", err)
-	}
-	defer func() {
-		if err := s.Close(); err != nil {
-			t.Fatalf("close: %v", err)
-		}
-	}()
-
-	u := assertLegacyUserIntact(ctx, t, s)
-	if u.CreatedAt.IsZero() {
-		t.Errorf("legacy created_at did not parse: %+v", u)
-	}
-
-	got, err := s.FindOrCreateSSOUser(ctx, "https://idp", "sub-1", "someone-else", Permissions{})
-	if err != nil || got.ID != u.ID {
-		t.Fatalf("sso identity lost in users rebuild: %+v %v", got, err)
-	}
-
-	var sessions int64
-	if err := s.db.WithContext(ctx).Model(&session{}).Count(&sessions).Error; err != nil || sessions != 1 {
-		t.Fatalf("session lost in users rebuild: %d %v", sessions, err)
-	}
-
-	if err := s.DeleteUser(ctx, u.ID); err != nil {
-		t.Fatalf("delete user: %v", err)
-	}
-
-	if err := s.db.WithContext(ctx).Model(&session{}).Count(&sessions).Error; err != nil || sessions != 0 {
-		t.Errorf("sessions no longer cascade-delete after users rebuild: %d %v", sessions, err)
 	}
 }

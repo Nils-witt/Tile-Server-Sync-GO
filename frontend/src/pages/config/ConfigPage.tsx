@@ -14,13 +14,13 @@ function ConfigShell() {
       </p>
 
       <div className="tabs" role="tablist">
-        <NavLink to="api" className="tab-btn" role="tab">
+        <NavLink to="/config/api" className="tab-btn" role="tab">
           API
         </NavLink>
-        <NavLink to="database" className="tab-btn" role="tab">
+        <NavLink to="/config/database" className="tab-btn" role="tab">
           Database
         </NavLink>
-        <NavLink to="maps" className="tab-btn" role="tab">
+        <NavLink to="/config/maps" className="tab-btn" role="tab">
           Maps
         </NavLink>
       </div>

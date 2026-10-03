@@ -6,21 +6,16 @@ import { ProtectedLayout } from './components/ProtectedLayout'
 import { LoginPage } from './pages/LoginPage'
 import { SsoCallbackPage } from './pages/SsoCallbackPage'
 import { SSO_CALLBACK_PATH } from './auth/oidc'
-import { SetupPage } from './pages/SetupPage'
 import { StatusPage } from './pages/StatusPage'
-import { UsersPage } from './pages/UsersPage'
 import { SecurityLogPage } from './pages/SecurityLogPage'
 import { ConfigPage } from './pages/config/ConfigPage'
 
-// AuthGate holds the redirect rules the old server enforced with real HTTP
-// 302s (setupGate/requireUser's page=true branch in the pre-SPA
-// internal/webserver/auth.go): while setup hasn't happened yet, every route
-// but /setup bounces there; once it has, /setup bounces to /login;
-// unauthenticated access to anything but /login bounces to /login?next=...;
-// and being authenticated on /login or /setup bounces to /. The SSO callback
-// route is exempt from all of this (see SsoCallbackPage).
+// AuthGate holds the client-side redirect rules: unauthenticated access to
+// anything but /login bounces to /login?next=..., and being authenticated on
+// /login bounces to /. The SSO callback route is exempt from all of this
+// (see SsoCallbackPage).
 function AuthGate() {
-  const { ready, me, needsSetup } = useAuth()
+  const { ready, me } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
 
@@ -33,16 +28,6 @@ function AuthGate() {
     // own; redirecting away first would lose the authorization response.
     if (path === SSO_CALLBACK_PATH) return
 
-    if (needsSetup) {
-      if (path !== '/setup') navigate('/setup', { replace: true })
-      return
-    }
-
-    if (path === '/setup') {
-      navigate('/login', { replace: true })
-      return
-    }
-
     if (!me) {
       if (path !== '/login') {
         navigate(`/login?next=${encodeURIComponent(path + location.search)}`, { replace: true })
@@ -53,13 +38,12 @@ function AuthGate() {
     if (path === '/login') {
       navigate('/', { replace: true })
     }
-  }, [ready, me, needsSetup, location.pathname, location.search, navigate])
+  }, [ready, me, location.pathname, location.search, navigate])
 
   if (!ready) return null
 
   return (
     <Routes>
-      <Route path="/setup" element={<SetupPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path={SSO_CALLBACK_PATH} element={<SsoCallbackPage />} />
       <Route element={me ? <ProtectedLayout /> : <NullElement />}>
@@ -77,14 +61,6 @@ function AuthGate() {
             <RequirePermission perm="viewConfig">
               <ConfigPage />
             </RequirePermission>
-          }
-        />
-        <Route
-          path="/users"
-          element={
-            <RequireSuperuser>
-              <UsersPage />
-            </RequireSuperuser>
           }
         />
         <Route

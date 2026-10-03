@@ -10,8 +10,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// Sentinel errors returned by the per-map methods below, following
-// ErrUsernameTaken/ErrUserNotFound's shape.
+// Sentinel errors returned by the per-map methods below.
 var (
 	ErrMapIDTaken  = errors.New("map id already taken")
 	ErrMapNotFound = errors.New("map not found")

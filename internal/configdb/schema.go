@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"gorm.io/gorm"
 )
@@ -80,39 +79,9 @@ type mapStaticColumn struct {
 
 func (mapStaticColumn) TableName() string { return "map_static_columns" }
 
-// session is one issued login session (see users.go's CreateSession/
-// SessionUser). User is a pointer purely so Preload could populate it if
-// ever needed; it's never actually populated or read — every session row is
-// created/queried by UserID/TokenHash directly. Its "constraint:-" opts it
-// out of GORM's own foreign-key management, same as mapRecord's
-// associations above.
-type session struct {
-	TokenHash string    `gorm:"column:token_hash;primaryKey"`
-	UserID    int64     `gorm:"column:user_id;not null;index:idx_sessions_user_id"`
-	User      *User     `gorm:"constraint:-"`
-	CreatedAt time.Time `gorm:"column:created_at;not null"`
-	ExpiresAt time.Time `gorm:"column:expires_at;not null"`
-}
-
-func (session) TableName() string { return "sessions" }
-
-// ssoIdentity links a verified OIDC (issuer, subject) pair to a local user
-// (see sso.go's FindOrCreateSSOUser). User is a pointer for the same reason
-// as session.User above.
-type ssoIdentity struct {
-	ID        int64     `gorm:"column:id;primaryKey;autoIncrement"`
-	Issuer    string    `gorm:"column:issuer;not null;uniqueIndex:idx_sso_identities_unique"`
-	Subject   string    `gorm:"column:subject;not null;uniqueIndex:idx_sso_identities_unique"`
-	UserID    int64     `gorm:"column:user_id;not null;index:idx_sso_identities_user_id"`
-	User      *User     `gorm:"constraint:-"`
-	CreatedAt time.Time `gorm:"column:created_at;not null"`
-}
-
-func (ssoIdentity) TableName() string { return "sso_identities" }
-
-// fkTableStatements creates the four tables above that need a real,
+// fkTableStatements creates the two tables above that need a real,
 // DB-enforced foreign key with ON DELETE CASCADE (map_versions/
-// map_static_columns -> maps, sessions/sso_identities -> users). SQLite can
+// map_static_columns -> maps). SQLite can
 // only declare a foreign key at CREATE TABLE time — ALTER TABLE ADD
 // CONSTRAINT isn't supported — so these are created directly via raw SQL
 // (CREATE TABLE IF NOT EXISTS, a no-op after the first run) rather than
@@ -126,7 +95,7 @@ func (ssoIdentity) TableName() string { return "sso_identities" }
 // driver's table-recreate DDL parser mishandles map_static_columns'
 // composite UNIQUE(map_id, column) table constraint together with its
 // "column" column (a SQL reserved word), corrupting the copy. Owning these
-// four CREATE TABLEs ourselves sidesteps that recreate path entirely, on
+// two CREATE TABLEs ourselves sidesteps that recreate path entirely, on
 // both a fresh install and an upgrade from the old schema. AutoMigrate (see
 // migrate below) still runs over them afterward to backfill any missing
 // column/index — safe operations that never require a recreate.
@@ -143,25 +112,12 @@ var fkTableStatements = []string{
 		column TEXT NOT NULL,
 		value  TEXT NOT NULL
 	)`,
-	`CREATE TABLE IF NOT EXISTS sessions (
-		token_hash TEXT PRIMARY KEY,
-		user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-		created_at TEXT NOT NULL,
-		expires_at TEXT NOT NULL
-	)`,
-	`CREATE TABLE IF NOT EXISTS sso_identities (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		issuer     TEXT NOT NULL,
-		subject    TEXT NOT NULL,
-		user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-		created_at TEXT NOT NULL
-	)`,
 }
 
 // legacyInlineUniqueTables lists, for each table an older raw-SQL version of
 // this schema declared with an inline composite "UNIQUE(a, b)" table
 // constraint, the replacement CREATE TABLE (without that constraint — see
-// fkTableStatements, these are the same two tables) and the explicit column
+// fkTableStatements, this is one of the same tables) and the explicit column
 // list to carry over. dropLegacyInlineUniqueConstraint below only touches a
 // table whose stored DDL still contains that constraint, so this is a
 // no-op on a fresh install or an already-normalized database.
@@ -177,17 +133,6 @@ var legacyInlineUniqueTables = []struct {
 			value  TEXT NOT NULL
 		)`,
 		columns: "id, map_id, column, value",
-	},
-	{
-		table: "sso_identities",
-		createSQL: `CREATE TABLE sso_identities (
-			id         INTEGER PRIMARY KEY AUTOINCREMENT,
-			issuer     TEXT NOT NULL,
-			subject    TEXT NOT NULL,
-			user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			created_at TEXT NOT NULL
-		)`,
-		columns: "id, issuer, subject, user_id, created_at",
 	},
 }
 
@@ -247,77 +192,9 @@ func flatDDL(stmt string) string {
 	return strings.Join(strings.Fields(stmt), " ")
 }
 
-// usersRebuildColumns is every users column the User model maps, in
-// rebuildLegacyUsersTable's copy order.
-const usersRebuildColumns = "id, username, password_hash, is_superuser, perm_view_status, perm_trigger_sync, " +
-	"perm_view_config, perm_edit_config_api, perm_edit_config_database, perm_edit_config_maps, created_at"
-
-// rebuildLegacyUsersTable recreates users when its created_at column is
-// still declared TEXT. The sqlite driver only returns time.Time for
-// date-typed columns, so a TEXT one fails every user load with a Scan
-// error. AutoMigrate normally widens it, but not when the stored DDL still
-// contains a tab (see flatDDL) — e.g. the old tab-indented CREATE TABLE
-// with a column later appended by ALTER TABLE ADD COLUMN — in which case it
-// misreads created_at's type and silently skips it. A users table whose DDL
-// still has a tab is rebuilt too, so later AutoMigrate runs can parse it.
-// Columns the model no longer maps (perm_edit_config_sso) are dropped.
-//
-// users is the parent of sessions and sso_identities; this relies on
-// migrate running before Open enforces foreign keys, so DROP TABLE doesn't
-// cascade to them. They reference users by name and resolve to the
-// rebuilt table once it is renamed.
-func (s *Store) rebuildLegacyUsersTable(ctx context.Context) error {
-	db := s.db.WithContext(ctx)
-
-	var colType, ddl string
-	if err := db.Raw(
-		`SELECT type FROM pragma_table_info('users') WHERE name = 'created_at'`,
-	).Scan(&colType).Error; err != nil {
-		return fmt.Errorf("inspect users table: %w", err)
-	}
-
-	if err := db.Raw(
-		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'`,
-	).Scan(&ddl).Error; err != nil {
-		return fmt.Errorf("inspect users table: %w", err)
-	}
-
-	if colType == "" || (strings.EqualFold(colType, "datetime") && !strings.Contains(ddl, "\t")) {
-		return nil
-	}
-
-	return db.Transaction(func(tx *gorm.DB) error {
-		for _, stmt := range []string{
-			"DROP TABLE IF EXISTS users__rebuild",
-			`CREATE TABLE users__rebuild (
-				id                        INTEGER PRIMARY KEY AUTOINCREMENT,
-				username                  TEXT NOT NULL,
-				password_hash             TEXT NOT NULL,
-				is_superuser              numeric NOT NULL DEFAULT false,
-				perm_view_status          numeric,
-				perm_trigger_sync         numeric,
-				perm_view_config          numeric,
-				perm_edit_config_api      numeric,
-				perm_edit_config_database numeric,
-				perm_edit_config_maps     numeric,
-				created_at                datetime NOT NULL
-			)`,
-			"INSERT INTO users__rebuild (" + usersRebuildColumns + ") SELECT " + usersRebuildColumns + " FROM users",
-			"DROP TABLE users",
-			"ALTER TABLE users__rebuild RENAME TO users",
-		} {
-			if err := tx.Exec(flatDDL(stmt)).Error; err != nil {
-				return fmt.Errorf("rebuild users table: %w", err)
-			}
-		}
-
-		return nil
-	})
-}
-
-// migrate creates/updates every table this package owns. It runs in four
-// passes: the tables fkTableStatements' foreign keys point at must exist
-// first (maps, users); then legacyInlineUniqueTables' one-time rewrite (see
+// migrate creates/updates every table this package owns. It first drops
+// the old local-account tables (see removeLocalUserTables); the table
+// fkTableStatements' foreign keys point at must then exist first (maps); then legacyInlineUniqueTables' one-time rewrite (see
 // dropLegacyInlineUniqueConstraint); then fkTableStatements itself; then
 // GORM's AutoMigrate over every model, which is idempotent (safe on every
 // startup) and — for a database created by an older raw-SQL version of this
@@ -328,11 +205,11 @@ func (s *Store) rebuildLegacyUsersTable(ctx context.Context) error {
 func (s *Store) migrate(ctx context.Context) error {
 	db := s.db.WithContext(ctx)
 
-	if err := db.AutoMigrate(&mapRecord{}, &User{}); err != nil {
-		return fmt.Errorf("migrate config schema: %w", err)
+	if err := removeLocalUserTables(db); err != nil {
+		return err
 	}
 
-	if err := s.rebuildLegacyUsersTable(ctx); err != nil {
+	if err := db.AutoMigrate(&mapRecord{}); err != nil {
 		return fmt.Errorf("migrate config schema: %w", err)
 	}
 
@@ -354,12 +231,26 @@ func (s *Store) migrate(ctx context.Context) error {
 		&mapRecord{},
 		&mapVersion{},
 		&mapStaticColumn{},
-		&User{},
-		&session{},
-		&ssoIdentity{},
 		&SecurityLogEntry{},
 	); err != nil {
 		return fmt.Errorf("migrate config schema: %w", err)
+	}
+
+	return nil
+}
+
+// removeLocalUserTables drops the tables that held local accounts on an
+// older database: users (with their own permission grants and, before
+// that, password hashes), plus the sessions and sso_identities rows hanging
+// off it. Every login is SSO now and every permission comes from the
+// token's groups (see internal/webserver/sso_bearer.go), so none of it is
+// read any more. Children go first; this runs before Open enforces foreign
+// keys anyway. A no-op on a fresh or already-cleaned database.
+func removeLocalUserTables(db *gorm.DB) error {
+	for _, table := range []string{"sessions", "sso_identities", "users"} {
+		if err := db.Exec("DROP TABLE IF EXISTS " + table).Error; err != nil {
+			return fmt.Errorf("migrate config schema: drop %s: %w", table, err)
+		}
 	}
 
 	return nil

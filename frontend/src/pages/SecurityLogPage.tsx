@@ -26,7 +26,7 @@ export function SecurityLogPage() {
       <div className="card">
         <h2>Security log</h2>
         <p className="hint">
-          Logins (local and SSO, successful and failed), logouts, user-account changes, and config saves,
+          SSO logins (successful and failed, with the permissions their groups granted) and config/map changes,
           newest first. This is an audit trail, not a live view &mdash; use the Refresh button to see new
           entries.
         </p>
