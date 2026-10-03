@@ -5,9 +5,9 @@ import { completeLogin } from '../auth/oidc'
 
 // SsoCallbackPage is where the OIDC provider redirects back to (see oidc.ts):
 // oidc-client-ts exchanges the authorization code for tokens right here in
-// the browser, and the first /api/me with the new access token both loads
-// the account (auto-provisioning it on first login) and records the login in
-// the security log server-side.
+// the browser, and one POST /api/sso/login with the new access token both
+// loads the account and records the login in the security log server-side
+// (ordinary page loads use GET /api/me, which isn't logged).
 export function SsoCallbackPage() {
   const { refreshMe } = useAuth()
   const navigate = useNavigate()
@@ -25,7 +25,7 @@ export function SsoCallbackPage() {
 
         // The backend rejecting the fresh token (wrong client, SSO since
         // disabled, ...) is a failed login, not a silent bounce to /login.
-        if (!(await refreshMe())) throw new Error('token rejected')
+        if (!(await refreshMe(true))) throw new Error('token rejected')
         navigate(next, { replace: true })
       } catch {
         navigate('/login?ssoerror=1', { replace: true })

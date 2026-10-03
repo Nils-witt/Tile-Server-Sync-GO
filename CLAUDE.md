@@ -344,8 +344,10 @@ users is stored, and there is no `/users` page. On every bearer request, `ssoBea
 Superuser can only come from a group. Since nothing is cached, removing someone from a group at
 the provider revokes its grants on their next request.
 
-Since there's no server-side login step, `sso_login` is recorded by every `GET /api/me`. The SPA calls it once right after the provider callback and once per page
-load, which avoids logging every API request. A rejected bearer token logs `sso_login_failed`,
+Since there's no server-side login step, `sso_login` is recorded by `POST /api/sso/login`
+(`ssoLoginAPIHandler`), which `SsoCallbackPage` calls exactly once after the provider callback
+(`refreshMe(true)`); it returns the same body as `GET /api/me`. `GET /api/me` itself, called on every
+page load, logs nothing — so neither page loads nor ordinary API requests produce login events. A rejected bearer token logs `sso_login_failed`,
 except plain expiry (routine for an idle tab), which only goes to stderr. Logout is client-side:
 the token is dropped and, if the provider advertises an `end_session_endpoint`, the
 browser is redirected to it.

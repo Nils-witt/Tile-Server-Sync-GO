@@ -9,8 +9,12 @@ interface AuthContextValue {
   me: Me | null
   /** The SSO login button's label, or null when SSO is unavailable (nobody can sign in). */
   ssoLabel: string | null
-  /** Reloads the current account; resolves to it, or null when not signed in. */
-  refreshMe: () => Promise<Me | null>
+  /**
+   * Reloads the current account; resolves to it, or null when not signed in.
+   * Pass login=true only right after the provider callback, so the server
+   * records the sign-in once (a plain reload is not logged).
+   */
+  refreshMe: (login?: boolean) => Promise<Me | null>
   logout: () => Promise<void>
 }
 
@@ -21,9 +25,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null)
   const [ssoLabel, setSsoLabel] = useState<string | null>(null)
 
-  const refreshMe = useCallback(async () => {
+  const refreshMe = useCallback(async (login = false) => {
     try {
-      const current = await api.me()
+      const current = await (login ? api.ssoLogin() : api.me())
       setMe(current)
       return current
     } catch (err) {

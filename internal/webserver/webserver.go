@@ -66,7 +66,8 @@ func New(opts Options) *http.Server {
 	mux := http.NewServeMux()
 	auth := &authenticator{cfgDB: cfgDB, sso: sso, verifiers: newSSOVerifierCache()}
 
-	mux.HandleFunc("GET /api/me", requireUser(auth)(meAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/me", requireUser(auth)(meAPIHandler()))
+	mux.HandleFunc("POST /api/sso/login", requireUser(auth)(ssoLoginAPIHandler(cfgDB)))
 	mux.HandleFunc("GET /api/version", versionAPIHandler(version, commit))
 
 	// Unauthenticated: the login page needs it before any

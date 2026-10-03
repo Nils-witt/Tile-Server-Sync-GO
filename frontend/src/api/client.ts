@@ -62,6 +62,8 @@ function putJSON<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   me: () => apiFetch<Me>('/api/me'),
+  /** Records the just-completed SSO login in the security log; returns the account like me(). */
+  ssoLogin: () => postJSON<Me>('/api/sso/login', {}),
   version: () => apiFetch<VersionInfo>('/api/version'),
   ssoStatus: () => apiFetch<SSOStatus>('/api/sso/status'),
 

@@ -139,12 +139,28 @@ type meResponse struct {
 	Permissions config.SSOPermissions `json:"permissions"`
 }
 
-// meAPIHandler serves GET /api/me. It doubles as the audit point for SSO
-// logins: a request carries no login step of its own on this server (the
-// SPA talks to the provider directly), and logging every request would flood the security log, so sso_login is recorded
-// here instead — the SPA calls /api/me exactly once right after completing
-// the provider's login, and once per page load.
-func meAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+// meAPIHandler serves GET /api/me. It records nothing: the SPA calls it on
+// every page load, so it can't double as the login audit point — see
+// ssoLoginAPIHandler for that.
+func meAPIHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, ok := currentUser(r.Context())
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, errorJSON("not logged in"))
+			return
+		}
+
+		writeMe(w, user)
+	}
+}
+
+// ssoLoginAPIHandler serves POST /api/sso/login, the audit point for SSO
+// logins: this server takes no part in the login itself (the SPA talks to
+// the provider directly), so the SPA calls this exactly once, right after
+// completing the provider's login, to record sso_login. It returns the same
+// body as GET /api/me so the callback page can load the account in the
+// same round trip.
+func ssoLoginAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, ok := currentUser(r.Context())
 		if !ok {
@@ -155,8 +171,12 @@ func meAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 		logSecurityEvent(r, cfgDB, "sso_login", user.Username, fmt.Sprintf("isSuperuser=%v; permissions=%s",
 			user.IsSuperuser, strings.Join(grantedPermissions(user.Permissions), ",")))
 
-		writeJSON(w, http.StatusOK, meResponse{
-			Username: user.Username, IsSuperuser: user.IsSuperuser, Permissions: user.Permissions,
-		})
+		writeMe(w, user)
 	}
+}
+
+func writeMe(w http.ResponseWriter, user *principal) {
+	writeJSON(w, http.StatusOK, meResponse{
+		Username: user.Username, IsSuperuser: user.IsSuperuser, Permissions: user.Permissions,
+	})
 }
