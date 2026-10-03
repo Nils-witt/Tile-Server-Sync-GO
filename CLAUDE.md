@@ -463,4 +463,4 @@ SCM request.
 performance, security, SQL-resource-leak, and logging checks) and disables a curated set of
 noisy/opinionated ones — see the `disable:` block's inline comments for the reasoning on each.
 Notable enforced limits: `gocyclo` min-complexity 13, `funlen` 120 lines / 80 statements,
-`dupl` threshold 100 tokens. Formatting uses `gofmt` + `gofumpt` (with `extra-rules`).
+`dupl` threshold 100 tokens. Formatting uses `gofmt` + `gofumpt` (with `extra.group-params`).
