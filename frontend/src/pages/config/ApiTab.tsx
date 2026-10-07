@@ -12,6 +12,7 @@ export function ApiTab() {
   const [form, setForm] = useState<ApiSection>(empty)
   const [banner, setBanner] = useState<BannerState | null>(null)
   const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
 
   useEffect(() => {
     api
@@ -20,15 +21,36 @@ export function ApiTab() {
       .catch((err) => setBanner({ ok: false, text: `Failed to load config: ${err instanceof ApiError ? err.message : err}` }))
   }, [])
 
+  function trimmedForm(): ApiSection {
+    return { ...form, baseUrl: form.baseUrl.trim(), token: form.token.trim() }
+  }
+
+  async function handleTest() {
+    setTesting(true)
+
+    try {
+      const res = await api.testAPISection(trimmedForm())
+      if (res.ok) {
+        setBanner({ ok: true, text: 'Connection succeeded (not saved yet).' })
+      } else {
+        setBanner({ ok: false, text: `Connection failed: ${res.error}` })
+      }
+    } catch (err) {
+      setBanner({ ok: false, text: `Connection test failed: ${err instanceof ApiError ? err.message : err}` })
+    } finally {
+      setTesting(false)
+    }
+  }
+
   async function handleSave() {
     setSaving(true)
 
     try {
-      const res = await api.saveAPISection({ ...form, baseUrl: form.baseUrl.trim(), token: form.token.trim() })
+      const res = await api.saveAPISection(trimmedForm())
       if (res.applied) {
-        setBanner({ ok: true, text: 'Saved and applied to the running process.' })
+        setBanner({ ok: true, text: 'Connection tested, saved and applied to the running process.' })
       } else {
-        setBanner({ ok: false, text: `Saved, but failed to apply to the running process: ${res.applyError}` })
+        setBanner({ ok: false, text: `Connection tested and saved, but the full config could not be applied to the running process yet: ${res.applyError}` })
       }
       if (res.config) setForm({ ...res.config.api, password: '' })
     } catch (err) {
@@ -80,7 +102,10 @@ export function ApiTab() {
       />
       <div className="actions-row">
         <button type="button" className="primary" disabled={disabled || saving} onClick={handleSave}>
-          Save API section
+          {saving ? 'Testing & saving…' : 'Save API section'}
+        </button>
+        <button type="button" disabled={disabled || testing || saving} onClick={handleTest}>
+          {testing ? 'Testing…' : 'Test connection'}
         </button>
       </div>
     </section>

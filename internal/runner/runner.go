@@ -96,6 +96,9 @@ var (
 	ErrNotConfigured = errors.New("not configured yet: use /config to enter and save configuration")
 	// ErrInvalid wraps a validation failure of a requested change.
 	ErrInvalid = errors.New("invalid")
+	// ErrTestFailed wraps a failed connection test of a config section (the
+	// API login or database ping), on its own or before saving it.
+	ErrTestFailed = errors.New("connection test failed")
 	// ErrMapNotFound is returned by the map methods for an unknown map id.
 	ErrMapNotFound = configdb.ErrMapNotFound
 	// ErrMapIDTaken is returned by CreateMap for an id already in use.
@@ -181,7 +184,7 @@ func (r *Runner) apply(ctx context.Context) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	client, err := newClient(ctx, cfg)
+	client, err := newClient(ctx, cfg.API)
 	if err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
@@ -212,18 +215,18 @@ func (r *Runner) apply(ctx context.Context) error {
 	return nil
 }
 
-// newClient builds a tileserve client for cfg.API, logging in unless a
-// token is already configured.
-func newClient(ctx context.Context, cfg *config.Config) (*tileserve.Client, error) {
-	client := tileserve.New(cfg.API.BaseURL)
-	if cfg.API.Token != "" {
-		client.SetToken(cfg.API.Token)
+// newClient builds a tileserve client for api, logging in unless a token is
+// already configured.
+func newClient(ctx context.Context, api config.API) (*tileserve.Client, error) {
+	client := tileserve.New(api.BaseURL)
+	if api.Token != "" {
+		client.SetToken(api.Token)
 		return client, nil
 	}
 
-	log.Printf("logging in to %s as %s", cfg.API.BaseURL, cfg.API.Username)
+	log.Printf("logging in to %s as %s", api.BaseURL, api.Username)
 
-	if err := client.Login(ctx, cfg.API.Username, cfg.API.Password); err != nil {
+	if err := client.Login(ctx, api.Username, api.Password); err != nil {
 		return nil, err
 	}
 

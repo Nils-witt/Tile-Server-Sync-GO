@@ -1,6 +1,6 @@
 // Package tileserve is a minimal client for the tileserve-go HTTP API
 // (see https://github.com/Nils-witt/Tileserve-GO), covering just what's
-// needed to authenticate and fetch a map version's geo objects.
+// needed to authenticate, list maps, and fetch a map version's geo objects.
 package tileserve
 
 import (
@@ -43,6 +43,23 @@ func New(baseURL string) *Client {
 // Login. Useful when a token was obtained out of band.
 func (c *Client) SetToken(token string) {
 	c.token = token
+}
+
+// Ping checks that the base URL answers HTTP at all (any status code
+// counts), for testing connection settings when no login is involved, i.e.
+// when a token was configured directly.
+func (c *Client) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/", nil)
+	if err != nil {
+		return fmt.Errorf("build ping request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("ping request: %w", err)
+	}
+
+	return resp.Body.Close()
 }
 
 type loginRequest struct {
@@ -125,52 +142,81 @@ type GeoObject struct {
 // GET /maps/{id}/version/{version}/geo-objects. version may be a real
 // numeric version, the literal "current", or a user-defined alias.
 func (c *Client) GeoObjects(ctx context.Context, mapID, version string) ([]GeoObject, error) {
-	if c.token == "" {
-		return nil, errors.New("client is not authenticated: call Login or SetToken first")
-	}
-
-	body, status, err := c.geoObjectsOnce(ctx, mapID, version)
-	if err != nil {
-		return nil, err
-	}
-
-	if status == http.StatusUnauthorized && c.username != "" {
-		log.Printf("geo-objects request for map %s version %s got 401, re-authenticating", mapID, version)
-
-		if err := c.Login(ctx, c.username, c.password); err != nil {
-			return nil, fmt.Errorf("re-login after 401 for map %s version %s: %w", mapID, version, err)
-		}
-
-		body, status, err = c.geoObjectsOnce(ctx, mapID, version)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("geo-objects request for map %s version %s failed (%d): %s ",
-			mapID, version, status, strings.TrimSpace(string(body)))
-	}
+	path := fmt.Sprintf("/maps/%s/version/%s/geo-objects", url.PathEscape(mapID), url.PathEscape(version))
 
 	var objects []GeoObject
-	if err := json.Unmarshal(body, &objects); err != nil {
-		return nil, fmt.Errorf("decode geo-objects response: %w", err)
+	if err := c.getJSON(ctx, path, fmt.Sprintf("geo-objects request for map %s version %s", mapID, version),
+		&objects); err != nil {
+		return nil, err
 	}
 
 	return objects, nil
 }
 
-// geoObjectsOnce performs a single GET /maps/{id}/version/{version}/geo-objects
-// request and returns the raw response body and status code without
-// interpreting non-200 statuses, so the caller can decide whether to retry
-// (e.g. after a 401) before treating the status as an error.
-func (c *Client) geoObjectsOnce(ctx context.Context, mapID, version string) ([]byte, int, error) {
-	reqURL := fmt.Sprintf("%s/maps/%s/version/%s/geo-objects",
-		c.baseURL, url.PathEscape(mapID), url.PathEscape(version))
+// RemoteMap is the subset of openapi.yaml's Map schema this tool uses.
+type RemoteMap struct {
+	UUID           string `json:"uuid"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	CurrentVersion string `json:"currentVersion"`
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+// Maps lists every map the authenticated user may see via GET /maps.
+func (c *Client) Maps(ctx context.Context) ([]RemoteMap, error) {
+	var maps []RemoteMap
+	if err := c.getJSON(ctx, "/maps", "maps request", &maps); err != nil {
+		return nil, err
+	}
+
+	return maps, nil
+}
+
+// getJSON performs an authenticated GET of path and JSON-decodes a 200
+// response into out. A 401 triggers one transparent re-login and retry when
+// the client logged in with a username/password. desc names the request in
+// error messages.
+func (c *Client) getJSON(ctx context.Context, path, desc string, out any) error {
+	if c.token == "" {
+		return errors.New("client is not authenticated: call Login or SetToken first")
+	}
+
+	body, status, err := c.getOnce(ctx, path, desc)
 	if err != nil {
-		return nil, 0, fmt.Errorf("build geo-objects request: %w", err)
+		return err
+	}
+
+	if status == http.StatusUnauthorized && c.username != "" {
+		log.Printf("%s got 401, re-authenticating", desc)
+
+		if err := c.Login(ctx, c.username, c.password); err != nil {
+			return fmt.Errorf("re-login after 401 for %s: %w", desc, err)
+		}
+
+		body, status, err = c.getOnce(ctx, path, desc)
+		if err != nil {
+			return err
+		}
+	}
+
+	if status != http.StatusOK {
+		return fmt.Errorf("%s failed (%d): %s", desc, status, strings.TrimSpace(string(body)))
+	}
+
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode %s response: %w", desc, err)
+	}
+
+	return nil
+}
+
+// getOnce performs a single authenticated GET of path and returns the raw
+// response body and status code without interpreting non-200 statuses, so
+// the caller can decide whether to retry (e.g. after a 401) before treating
+// the status as an error.
+func (c *Client) getOnce(ctx context.Context, path, desc string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("build %s: %w", desc, err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.token)
@@ -178,13 +224,13 @@ func (c *Client) geoObjectsOnce(ctx context.Context, mapID, version string) ([]b
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("geo-objects request for map %s version %s: %w", mapID, version, err)
+		return nil, 0, fmt.Errorf("%s: %w", desc, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read geo-objects response: %w", err)
+		return nil, 0, fmt.Errorf("read %s response: %w", desc, err)
 	}
 
 	return body, resp.StatusCode, nil

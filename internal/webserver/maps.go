@@ -19,6 +19,51 @@ func listMapsAPIHandler(run Runner) http.HandlerFunc {
 	}
 }
 
+// remoteMapDTO is one entry of GET /api/remote-maps: a map tileserve-go
+// offers, and whether it is already configured here.
+type remoteMapDTO struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	CurrentVersion string `json:"currentVersion"`
+	Configured     bool   `json:"configured"`
+}
+
+// remoteMapsAPIHandler serves GET /api/remote-maps: the maps the configured
+// tileserve-go API exposes (see runner.Runner.RemoteMaps), for the Maps
+// tab's one-click add. An unconfigured API section is a 400, an unreachable
+// or failing API a 502. Requires edit_config_maps.
+func remoteMapsAPIHandler(run Runner) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		remote, err := run.RemoteMaps(r.Context())
+		if err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, runner.ErrInvalid) {
+				status = http.StatusBadRequest
+			}
+
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+
+			return
+		}
+
+		configured := make(map[string]bool)
+		for _, m := range run.Maps() {
+			configured[m.ID] = true
+		}
+
+		out := make([]remoteMapDTO, 0, len(remote))
+		for _, m := range remote {
+			out = append(out, remoteMapDTO{
+				ID: m.UUID, Name: m.Name, Description: m.Description,
+				CurrentVersion: m.CurrentVersion, Configured: configured[m.UUID],
+			})
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
 // mapSaveResponse is what POST /api/maps and PUT /api/maps/{id} return: the
 // saved map plus whether the change was also applied live (see
 // runner.ChangeResult).

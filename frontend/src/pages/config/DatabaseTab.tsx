@@ -75,9 +75,9 @@ export function DatabaseTab() {
     try {
       const res = await api.saveDatabaseSection(trimmedForm())
       if (res.applied) {
-        setBanner({ ok: true, text: 'Saved and applied to the running process.' })
+        setBanner({ ok: true, text: 'Connection tested, saved and applied to the running process.' })
       } else {
-        setBanner({ ok: false, text: `Saved, but failed to apply to the running process: ${res.applyError}` })
+        setBanner({ ok: false, text: `Connection tested and saved, but the full config could not be applied to the running process yet: ${res.applyError}` })
       }
       if (res.config) setForm({ ...res.config.database, password: '', columns: res.config.database.columns || {} })
     } catch (err) {
@@ -234,7 +234,7 @@ export function DatabaseTab() {
 
       <div className="actions-row">
         <button type="button" className="primary" disabled={disabled || saving} onClick={handleSave}>
-          Save database section
+          {saving ? 'Testing & saving…' : 'Save database section'}
         </button>
         <button type="button" disabled={disabled || testing || saving} onClick={handleTest}>
           {testing ? 'Testing…' : 'Test connection'}

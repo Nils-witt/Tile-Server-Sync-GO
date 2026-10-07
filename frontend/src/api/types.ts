@@ -56,13 +56,23 @@ export interface MapTarget {
   disabled: boolean
 }
 
+/** A map the configured tileserve-go API offers (GET /api/remote-maps). */
+export interface RemoteMap {
+  id: string
+  name: string
+  description: string
+  currentVersion: string
+  /** Whether a map with this id is already configured here. */
+  configured: boolean
+}
+
 export interface Config {
   api: ApiSection
   database: DatabaseSection
   maps: MapTarget[]
 }
 
-export interface DatabaseTestResponse {
+export interface SectionTestResponse {
   ok: boolean
   error?: string
 }

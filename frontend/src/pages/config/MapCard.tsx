@@ -23,16 +23,13 @@ function staticColumnsText(cols: Record<string, string>): string {
 
 interface Props {
   initial: MapTarget
-  persisted: boolean
-  openByDefault?: boolean
   disabled: boolean
   onRemoved: () => void
 }
 
-export function MapCard({ initial, persisted: initialPersisted, openByDefault, disabled, onRemoved }: Props) {
+export function MapCard({ initial, disabled, onRemoved }: Props) {
   const disabledCheckboxId = useId()
-  const [persisted, setPersisted] = useState(initialPersisted)
-  const [id, setId] = useState(initial.id)
+  const id = initial.id
   const [name, setName] = useState(initial.name)
   const [versionsText, setVersionsText] = useState((initial.versions || []).join(', '))
   const [interval, setInterval_] = useState(initial.interval)
@@ -47,14 +44,13 @@ export function MapCard({ initial, persisted: initialPersisted, openByDefault, d
     [versionsText],
   )
 
-  const summaryId = name.trim() || id.trim() || '(new map)'
+  const summaryId = name.trim() || id
   const summaryMeta = `${versions.length === 1 ? '1 version' : `${versions.length} versions`} · ${interval.trim() ? `every ${interval.trim()}` : 'one-shot'}${syncDisabled ? ' · sync disabled' : ''}`
 
   async function handleSave(e: React.MouseEvent) {
     e.preventDefault()
-    const trimmedID = id.trim()
     const payload: MapTarget = {
-      id: trimmedID,
+      id,
       name: name.trim(),
       versions,
       interval: interval.trim(),
@@ -65,10 +61,9 @@ export function MapCard({ initial, persisted: initialPersisted, openByDefault, d
     setSaving(true)
 
     try {
-      const res = persisted ? await api.updateMap(trimmedID, payload) : await api.createMap(payload)
+      const res = await api.updateMap(id, payload)
 
       if (res.map) {
-        setPersisted(true)
         if (!res.applied) {
           setBanner({ ok: false, text: `Saved, but failed to apply to the running process: ${res.applyError}` })
         } else if (res.overlayError) {
@@ -88,16 +83,10 @@ export function MapCard({ initial, persisted: initialPersisted, openByDefault, d
 
   async function handleRemove(e: React.MouseEvent) {
     e.preventDefault()
-
-    if (!persisted) {
-      onRemoved()
-      return
-    }
-
     setRemoving(true)
 
     try {
-      const res = await api.deleteMap(id.trim())
+      const res = await api.deleteMap(id)
       if (res.ok) {
         onRemoved()
       } else {
@@ -111,14 +100,14 @@ export function MapCard({ initial, persisted: initialPersisted, openByDefault, d
   }
 
   return (
-    <details className="map-card" open={openByDefault}>
+    <details className="map-card">
       <summary>
         <span className="map-summary-id">{summaryId}</span>
         <span className="map-summary-meta">{summaryMeta}</span>
       </summary>
       <div className="map-body">
         <label>Map ID</label>
-        <input type="text" value={id} disabled={persisted || disabled} onChange={(e) => setId(e.target.value)} />
+        <input type="text" value={id} disabled />
 
         <label>Name (human-readable; required to sync this map into EDP's overlay list)</label>
         <input type="text" value={name} disabled={disabled} onChange={(e) => setName(e.target.value)} />

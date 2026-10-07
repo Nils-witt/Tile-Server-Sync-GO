@@ -7,11 +7,39 @@ import (
 	"strings"
 
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/tileserve"
 )
 
 // Maps returns every stored map, in configured order.
 func (r *Runner) Maps() []config.MapTarget {
 	return r.storedCopy().Maps
+}
+
+// RemoteMaps lists the maps the stored API section's credentials can see on
+// tileserve-go, for the Maps tab's one-click add. It uses the stored (not
+// the active) API settings, so it works during initial setup before the
+// database is configured. An incomplete API section is reported wrapped in
+// ErrInvalid, a failed request wrapped in ErrTestFailed.
+func (r *Runner) RemoteMaps(ctx context.Context) ([]tileserve.RemoteMap, error) {
+	api := r.storedCopy().API
+	if err := api.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: configure the API tab first: %w", ErrInvalid, err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, connectionTestTimeout)
+	defer cancel()
+
+	client, err := newClient(reqCtx, api)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrTestFailed, err)
+	}
+
+	remote, err := client.Maps(reqCtx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrTestFailed, err)
+	}
+
+	return remote, nil
 }
 
 // CreateMap validates m against the other stored maps, persists it, keeps

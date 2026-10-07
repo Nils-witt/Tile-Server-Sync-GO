@@ -74,37 +74,54 @@ func saveDatabaseSectionHandler(run Runner) http.HandlerFunc {
 	})
 }
 
-// databaseTestResponse is POST /api/config/database/test's body: OK, or
-// why the connection attempt failed.
-type databaseTestResponse struct {
+// sectionTestResponse is the body of POST /api/config/{api,database}/test:
+// OK, or why the test failed.
+type sectionTestResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }
 
-// testDatabaseHandler serves POST /api/config/database/test: it tries the
-// submitted (unsaved) database section's connection settings. Invalid
-// settings are a 400; a failed connection is still a 200 with ok=false,
-// since the test itself ran fine. Requires edit_config_database.
+// testAPIHandler serves POST /api/config/api/test: it tests the submitted
+// (unsaved) API section. Requires edit_config_api.
+func testAPIHandler(run Runner) http.HandlerFunc {
+	return sectionTestHandler(func(ctx context.Context, actor runner.Actor, req apiSectionRequest) error {
+		return run.TestAPI(ctx, actor, req.API)
+	})
+}
+
+// testDatabaseHandler serves POST /api/config/database/test: it tests the
+// submitted (unsaved) database section. Requires edit_config_database.
 func testDatabaseHandler(run Runner) http.HandlerFunc {
+	return sectionTestHandler(func(ctx context.Context, actor runner.Actor, req databaseSectionRequest) error {
+		return run.TestDatabase(ctx, actor, req.Database)
+	})
+}
+
+// sectionTestHandler decodes the request body as a T and hands it to test.
+// Invalid settings are a 400; a failed connection is still a 200 with
+// ok=false, since the test itself ran fine.
+func sectionTestHandler[T any](test func(ctx context.Context, actor runner.Actor, req T) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req databaseSectionRequest
+		var req T
 		if err := decodeBody(w, r, maxConfigBodyBytes, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, databaseTestResponse{Error: err.Error()})
+			writeJSON(w, http.StatusBadRequest, sectionTestResponse{Error: err.Error()})
 			return
 		}
 
-		err := run.TestDatabase(r.Context(), actorOf(r), req.Database)
+		err := test(r.Context(), actorOf(r), req)
 		if errors.Is(err, runner.ErrInvalid) {
-			writeJSON(w, http.StatusBadRequest, databaseTestResponse{Error: err.Error()})
+			writeJSON(w, http.StatusBadRequest, sectionTestResponse{Error: err.Error()})
 			return
 		}
 
-		writeJSON(w, http.StatusOK, databaseTestResponse{OK: err == nil, Error: errorString(err)})
+		writeJSON(w, http.StatusOK, sectionTestResponse{OK: err == nil, Error: errorString(err)})
 	}
 }
 
 // sectionSaveHandler decodes the request body as a T and hands it to save,
-// translating the outcome into a configGetResponse.
+// translating the outcome into a configGetResponse. A section that fails
+// its pre-save test isn't saved: invalid settings are a 400, a failed
+// connection a 422.
 func sectionSaveHandler[T any](
 	save func(ctx context.Context, actor runner.Actor, req T) (config.Config, runner.ChangeResult, error),
 ) http.HandlerFunc {
@@ -116,7 +133,15 @@ func sectionSaveHandler[T any](
 		}
 
 		cfg, res, err := save(r.Context(), actorOf(r), req)
-		if err != nil {
+
+		switch {
+		case errors.Is(err, runner.ErrInvalid):
+			writeJSON(w, http.StatusBadRequest, configGetResponse{Error: err.Error()})
+			return
+		case errors.Is(err, runner.ErrTestFailed):
+			writeJSON(w, http.StatusUnprocessableEntity, configGetResponse{Error: err.Error()})
+			return
+		case err != nil:
 			writeJSON(w, http.StatusInternalServerError, configGetResponse{Error: err.Error()})
 			return
 		}

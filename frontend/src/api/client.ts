@@ -1,13 +1,14 @@
 import type {
   ConfigGetResponse,
   DatabaseSection,
-  DatabaseTestResponse,
   ApiSection,
   Me,
   MapDeleteResponse,
   MapSaveResponse,
   MapTarget,
+  RemoteMap,
   SecurityLogEntry,
+  SectionTestResponse,
   SSOStatus,
   StatusSnapshot,
   SyncResponse,
@@ -72,16 +73,23 @@ export const api = {
   syncMap: (id: string) => postJSON<SyncResponse>(`/api/maps/${encodeURIComponent(id)}/sync`, {}),
 
   getAPISection: () => apiFetch<{ api: ApiSection }>('/api/config/api'),
+  /** Tests, then saves (only if the test passed), then applies the API section. */
   saveAPISection: (section: ApiSection) => putJSON<ConfigGetResponse>('/api/config/api', { api: section }),
+  /** Tests the given (unsaved) API settings; a blank password means the stored one. */
+  testAPISection: (section: ApiSection) =>
+    postJSON<SectionTestResponse>('/api/config/api/test', { api: section }),
   getDatabaseSection: () => apiFetch<{ database: DatabaseSection }>('/api/config/database'),
+  /** Tests, then saves (only if the test passed), then applies the database section. */
   saveDatabaseSection: (section: DatabaseSection) =>
     putJSON<ConfigGetResponse>('/api/config/database', { database: section }),
   /** Tries the given (unsaved) connection settings; a blank password means the stored one. */
   testDatabaseSection: (section: DatabaseSection) =>
-    postJSON<DatabaseTestResponse>('/api/config/database/test', { database: section }),
+    postJSON<SectionTestResponse>('/api/config/database/test', { database: section }),
 
 
   listMaps: () => apiFetch<MapTarget[]>('/api/maps'),
+  /** The maps the configured tileserve-go API offers, for one-click adding. */
+  listRemoteMaps: () => apiFetch<RemoteMap[]>('/api/remote-maps'),
   createMap: (m: MapTarget) => postJSON<MapSaveResponse>('/api/maps', m),
   updateMap: (id: string, m: MapTarget) => putJSON<MapSaveResponse>(`/api/maps/${encodeURIComponent(id)}`, m),
   deleteMap: (id: string) =>

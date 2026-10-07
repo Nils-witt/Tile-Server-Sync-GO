@@ -160,6 +160,8 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   exchanges username/password for a bearer token; `SetToken()` bypasses login when a token is
   already known. `GeoObjects(mapID, version)` fetches and JSON-decodes one map/version's objects
   (`GeoObject` struct mirrors the API's schema exactly — field-for-field, including JSON tags).
+  `Maps()` lists the maps visible to the account (`GET /maps`, decoded into the `RemoteMap` subset
+  of the API's `Map` schema). Both go through `getJSON`, which re-logs-in once on a 401.
 - **`frontend`** — the UI: a Vite + React + TypeScript SPA (client-routed with `react-router-dom`),
   entirely separate from the root `package.json`/Husky setup (its own `frontend/package.json`,
   `node_modules`, lockfile). Routes: `/` (status), `/config/{api,database,maps}` (tabs, each its
@@ -222,13 +224,18 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   (secrets already redacted by the Runner) and `Runner.SaveAPI`/`SaveDatabase`. An
   empty/unconfigured database is not an error, so the SPA's structured form always has something
   to render (blank on a fresh install). There is no whole-config `GET /api/config` bundle. `POST
-  /api/config/database/test` (`edit_config_database`, `Runner.TestDatabase` → `store.Ping`) tries
-  the Database tab's *unsaved* connection settings (blank password = stored one, 10s timeout) for
-  its "Test connection" button; each attempt logs `database_tested` to the security log, since it
-  may send the stored password to a newly entered host. A save
-  is deliberately *not* gated on `Config.Validate()` passing for the whole config (see the Runner
-  section), and reports whether the *whole* config could be applied live via the response's
-  `applied`/`applyError` fields. `webServer.address` has no input in the config page at all since
+  /api/config/api/test` (`edit_config_api`, `Runner.TestAPI`) and `POST /api/config/database/test`
+  (`edit_config_database`, `Runner.TestDatabase` → `store.Ping`) test a tab's *unsaved* settings
+  (blank password = stored one, 10s timeout) for its "Test connection" button: each section is
+  validated on its own (`config.API.Validate`/`config.Database.Validate`; invalid → 400) and then
+  checked live — an API login, or for a configured token just that the base URL answers HTTP (the
+  tileserve-go API has no token-check endpoint used here); a database ping, touching no table. A
+  failed check is a 200 with `ok: false`. Each attempt logs `api_tested`/`database_tested` to the
+  security log, since it may send the stored password to a newly entered host. Every `PUT` save
+  runs that same test **first** and only saves if it passes (invalid → 400, failed connection →
+  422, nothing persisted), then applies. A save is deliberately *not* gated on `Config.Validate()`
+  passing for the whole config (see the Runner section), and reports whether the *whole* config
+  could be applied live via the response's `applied`/`applyError` fields. `webServer.address` has no input in the config page at all since
   changing it always needs a process restart — see below.
 
   The Maps tab is not a config section at all but a first-class CRUD resource
@@ -238,6 +245,15 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   The status page's per-map "Sync" button posts to `POST /api/maps/{id}/sync`
   (`syncMapAPIHandler`), wired to `Runner.SyncMap`, to run that one map's sync immediately rather
   than waiting for its next `interval` tick.
+
+  There is no manual "add map" form any more: maps are added from the tab's "Available maps"
+  list, fed by `GET /api/remote-maps` (`remoteMapsAPIHandler`, `edit_config_maps`), which calls
+  `Runner.RemoteMaps` — a `tileserve.Client.Maps` call made with the *stored* API section (not the
+  active client, so it works before the database is configured; incomplete API → `ErrInvalid` →
+  400, failed request → 502). Each entry carries `configured` (its `id` is already a map here).
+  One click `POST`s a map with `id` = the remote UUID, `name` = the remote name, `versions:
+  ["current"]`, `interval: "1h"` (`MapsTab.tsx`'s `newMapFrom`); everything stays editable on the
+  map's card afterwards (except `id`).
 
   `GET /api/status` (`status_api.go`) is the status page's data source — a JSON version of
   `Runner.Status()` (a `status.Recorder` snapshot; timestamps as RFC3339 strings), polled by the SPA every 10s to match
@@ -408,9 +424,12 @@ the Runner → `Runner.Run` (blocks until the context is cancelled). Everything 
   `wake` (buffered, non-blocking) so `Run` reacts immediately. `webServer.address` is the one
   setting that can't be applied live (the server a change request arrives on can't restart itself
   mid-request), which is why it lives in the bootstrap file rather than `configdb`.
-- `config.go` — `Config`, `SaveAPI`/`SaveDatabase` (via `saveSection`): merge one section into
-  a copy of `stored`, `configdb.Save`, replace `stored`, log `config_saved` with the diff, then
-  `apply`. A save is deliberately **not** gated on the whole config validating — each tab alone
+- `config.go` — `Config`, `TestAPI`/`TestDatabase`, `SaveAPI`/`SaveDatabase` (via
+  `saveSection`): merge one section into a copy of `stored`, **test** that section on its own
+  (`testAPI`/`testDatabase`, the same check as `TestAPI`/`TestDatabase`; a failure is returned
+  wrapped in `ErrInvalid` or `ErrTestFailed` and nothing is saved), `configdb.Save`, replace
+  `stored`, log `config_saved` with the diff, then `apply`. The test runs under `writeMu`, so it
+  checks exactly what gets saved. A save is deliberately **not** gated on the whole config validating — each tab alone
   is always incomplete during initial setup — instead `apply`'s error comes back as
   `ChangeResult.ApplyErr` (the same outcome as a valid-but-unreachable API/DB); the save is never
   rolled back. `cloneConfig`/`cloneMap` deep-copy so handed-out values never alias `stored`.

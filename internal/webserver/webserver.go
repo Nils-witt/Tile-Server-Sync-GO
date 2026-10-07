@@ -12,6 +12,7 @@ import (
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/runner"
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/status"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/tileserve"
 )
 
 // Runner is everything the web server needs from the application
@@ -26,6 +27,7 @@ type Runner interface {
 	SaveDatabase(
 		ctx context.Context, actor runner.Actor, db config.Database,
 	) (config.Config, runner.ChangeResult, error)
+	TestAPI(ctx context.Context, actor runner.Actor, api config.API) error
 	TestDatabase(ctx context.Context, actor runner.Actor, db config.Database) error
 
 	Maps() []config.MapTarget
@@ -37,6 +39,7 @@ type Runner interface {
 	) (config.MapTarget, runner.ChangeResult, error)
 	DeleteMap(ctx context.Context, actor runner.Actor, id string) (runner.ChangeResult, error)
 	SyncMap(ctx context.Context, mapID string) (int, error)
+	RemoteMaps(ctx context.Context) ([]tileserve.RemoteMap, error)
 
 	LogSecurityEvent(ctx context.Context, actor runner.Actor, eventType, detail string)
 	SecurityLog(ctx context.Context, limit int) ([]runner.SecurityLogEntry, error)
@@ -104,6 +107,8 @@ func New(opts Options) *http.Server {
 		requirePermission(auth, permEditConfigDatabase)(saveDatabaseSectionHandler(run)))
 	// Testing connects to a user-entered host (possibly with the stored
 	// password), so it needs the same permission as saving.
+	mux.HandleFunc("POST /api/config/api/test",
+		requirePermission(auth, permEditConfigAPI)(testAPIHandler(run)))
 	mux.HandleFunc("POST /api/config/database/test",
 		requirePermission(auth, permEditConfigDatabase)(testDatabaseHandler(run)))
 
@@ -117,6 +122,11 @@ func New(opts Options) *http.Server {
 		requirePermission(auth, permEditConfigMaps)(updateMapAPIHandler(run)))
 	mux.HandleFunc("DELETE /api/maps/{id}",
 		requirePermission(auth, permEditConfigMaps)(deleteMapAPIHandler(run)))
+	// The maps tileserve-go offers, for the Maps tab's one-click add: it
+	// talks to the API with the stored credentials, so it needs the same
+	// permission as adding a map.
+	mux.HandleFunc("GET /api/remote-maps",
+		requirePermission(auth, permEditConfigMaps)(remoteMapsAPIHandler(run)))
 	mux.HandleFunc("POST /api/maps/{id}/sync",
 		requirePermission(auth, permTriggerSync)(syncMapAPIHandler(run)))
 

@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
 	"time"
@@ -113,6 +114,36 @@ type API struct {
 	Token string `yaml:"token" json:"token"`
 }
 
+// Validate checks a on its own: a base URL plus either a token or both a
+// username and password. Used by Config.Validate and to check the API
+// section alone before it's saved.
+func (a *API) Validate() error {
+	if a.BaseURL == "" {
+		return errors.New("api.baseUrl is required")
+	}
+
+	if a.Token == "" && (a.Username == "" || a.Password == "") {
+		return errors.New("either api.token or both api.username and api.password are required")
+	}
+
+	return nil
+}
+
+// Validate checks d on its own — its connection settings
+// (ValidateConnection) plus its table/column mapping — without modifying
+// it: the defaults Config.Validate fills in are applied to a copy only. Used
+// to check the database section alone before it's saved.
+func (d *Database) Validate() error {
+	if err := d.ValidateConnection(); err != nil {
+		return err
+	}
+
+	cp := *d
+	cp.Columns = maps.Clone(d.Columns)
+
+	return cp.validate()
+}
+
 // Database holds the MariaDB connection details — stored and edited as
 // separate components, assembled into a Go MySQL driver DSN by DSN() (see
 // dsn.go) — plus where and how synced geo objects are written.
@@ -202,12 +233,8 @@ const defaultWebServerAddress = ":8080"
 // *Config (configdb, plus the WebServer overlay applied by
 // runner.Runner's apply) must call this themselves before using the result.
 func (c *Config) Validate() error {
-	if c.API.BaseURL == "" {
-		return errors.New("api.baseUrl is required")
-	}
-
-	if c.API.Token == "" && (c.API.Username == "" || c.API.Password == "") {
-		return errors.New("either api.token or both api.username and api.password are required")
+	if err := c.API.Validate(); err != nil {
+		return err
 	}
 
 	if err := c.Database.ValidateConnection(); err != nil {
