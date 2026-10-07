@@ -15,8 +15,8 @@ const defaultConfigDBName = "config.db"
 // Bootstrap is the minimal file/CLI-driven config: just enough to find the
 // SQLite database holding everything else (API credentials, database
 // target, maps — each with its own optional sync interval), to configure
-// the optional status/config web server, and to configure optional OIDC
-// single sign-on for it. WebServer lives here rather than in that database
+// the status/config web server (which always runs), and to configure the
+// OIDC single sign-on it requires. WebServer lives here rather than in that database
 // because changing it already requires a process restart (the HTTP server
 // can't restart itself mid-request), so there's nothing to gain by making it
 // reloadable; SSO lives here so login settings are managed alongside the
@@ -29,8 +29,8 @@ type Bootstrap struct {
 	// openLogFile places the log file next to it), not the process's
 	// working directory. Defaults to "config.db" if left empty.
 	ConfigDB string `yaml:"configDb" json:"configDb"`
-	// SSO is the optional OpenID Connect login configuration, under the
-	// "oidc" key (see SSO).
+	// SSO is the OpenID Connect login configuration, under the "oidc" key
+	// (see SSO) — the web server's only login method, so it's required.
 	SSO SSO `yaml:"oidc" json:"oidc"`
 }
 
@@ -54,12 +54,6 @@ func LoadBootstrap(path string) (*Bootstrap, error) {
 
 	if err := b.SSO.validate(); err != nil {
 		return nil, fmt.Errorf("bootstrap config %q: %w", path, err)
-	}
-
-	// SSO is the web server's only login method, so without it nobody could
-	// ever sign in.
-	if b.WebServer.Enabled && !b.SSO.Enabled {
-		return nil, fmt.Errorf("bootstrap config %q: oidc.enabled must be true when webServer.enabled is true", path)
 	}
 
 	if b.ConfigDB == "" {

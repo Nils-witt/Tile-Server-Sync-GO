@@ -56,7 +56,7 @@ type Options struct {
 // picks up the change immediately without a separate action — see
 // finishConfigSave in config.go. The bootstrap-file-sourced webServer
 // settings are deliberately not exposed or editable here, since applying a
-// changed webServer.enabled/address needs a process restart the server
+// changed webServer.address needs a process restart the server
 // itself can't safely trigger mid-request.
 func New(opts Options) *http.Server {
 	addr, rec, cfgDB, sso := opts.Addr, opts.Recorder, opts.ConfigDB, opts.SSO

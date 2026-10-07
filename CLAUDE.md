@@ -63,9 +63,10 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   old `Load`/`Parse` were removed): the web config editor reads/writes structured JSON only and the
   bootstrap file goes through the separate `LoadBootstrap`/`Bootstrap` type. `Bootstrap`
   (`bootstrap.go`) is the separate, minimal file-backed type — `LoadBootstrap` reads it, applies
-  the same `webServer.enabled && address == ""` defaulting as `Validate` (shared via
+  the same `address == ""` → `":8080"` defaulting as `Validate` (shared via
   `WebServer.applyDefault`), defaults/validates `SSO` (`sso.go`: blank `scopes`/`buttonLabel` get
-  defaults; `issuerUrl`/`clientId` are required when `enabled`, failing startup otherwise), and
+  defaults; `issuerUrl`/`clientId` are always required, failing startup otherwise — there is no
+  `oidc.enabled` switch, since the web server always runs and SSO is its only login), and
   resolves `ConfigDB` (default `"config.db"`) relative to the bootstrap file's own directory. `Config.Maps` is a list of `{id, versions[], interval,
   staticColumns, disabled}` entries; a version string may be a real numeric version, the literal
   `"current"`, or a user-defined alias (see `PUT /maps/{id}/aliases/{alias}` in the tileserve-go
@@ -73,8 +74,7 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `MapTarget.validateInterval` and read back via `MapTarget.SyncInterval()`) controls how often
   *that* map re-syncs — there is no longer a global interval; a map with no `interval` syncs once
   and isn't automatically repeated (see `RunLoop` below). `disabled`, if true, opts a map out of
-  *automatic* syncing only — `scheduleTick` (see `RunLoop` below) never considers it due, and
-  `Engine.RunSync`'s run-once path skips it too — while leaving its stored config untouched and
+  *automatic* syncing only — `scheduleTick` (see `RunLoop` below) never considers it due — while leaving its stored config untouched and
   still letting it be synced on demand via its own "Sync" button/`POST /api/maps/{id}/sync`, which
   passes its ID explicitly rather than relying on scheduling (see `Engine.SyncMap`).
   `Config.Maps` requiring at least one entry was dropped from `Validate` — an empty `maps` list is
@@ -205,8 +205,7 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   always "incomplete"). Instead every save calls `reload` (see below) immediately afterward and
   reports whether the *whole* config was valid enough to apply live via the response's
   `applied`/`applyError` fields — the same mechanism already used for a valid-but-unreachable
-  API/database. `webServer.enabled`/`address` have no inputs in the config page at all (removed
-  entirely, not just disabled) since changing them isn't possible through this API and always needs
+  API/database. `webServer.address` has no input in the config page at all since changing it isn't possible through this API and always needs
   a process restart — see below.
 
   The Maps tab is not a config section at all but a first-class CRUD resource
@@ -307,16 +306,17 @@ remote addresses and permission detail not meant for every logged-in user.
 ### SSO (OpenID Connect)
 
 The web server's only login method — there are no local username/password accounts any more, and
-`LoadBootstrap` fails startup if `webServer.enabled` is true while `oidc.enabled` is false.
+SSO is always on: there is no `oidc.enabled` (or `webServer.enabled`) switch, and `LoadBootstrap`
+fails startup if `oidc.issuerUrl`/`oidc.clientId` are missing.
 Configured only in the bootstrap file's `oidc:`
-section (`config.SSO` — `enabled`, `issuerUrl`, `clientId`, `scopes`, `buttonLabel`,
+section (`config.SSO` — `issuerUrl`, `clientId`, `scopes`, `buttonLabel`,
 `defaultPermissions`, `groupsClaim`, `groupPermissions`; see `config.example.yaml`), passed from `run` through `startWebServer` into
 `webserver.New`, and fixed for the process's lifetime — changing it needs a restart, and there is no
 SSO tab or `edit_config_sso` permission in the web UI. There is no client secret.
 
 The server takes no part in the login itself. The SPA is a **public OIDC client**:
 `frontend/src/auth/oidc.ts` wraps `oidc-client-ts`'s `UserManager`, built from the unauthenticated
-`GET /api/sso/status` (which returns `issuerUrl`/`clientId`/`scopes` while SSO is enabled — none
+`GET /api/sso/status` (which returns `issuerUrl`/`clientId`/`scopes` — none
 secret). It runs authorization code + PKCE directly against the provider, with
 `<origin>/login/sso/callback` (`frontend/src/pages/SsoCallbackPage.tsx`) as the redirect URI. The
 provider must therefore register the client as public/SPA and allow this origin for CORS. Tokens
@@ -380,11 +380,9 @@ starts out all-nil — see "starting unconfigured" below), plus a second mutex (
 to serializing syncs, and three fields fixed for the process's lifetime: `cfgDB` (the
 `*configdb.Store`) and `webServer` (the bootstrap-sourced `config.WebServer`, overlaid onto every
 loaded `Config` before it's validated or used), plus the `*status.Recorder` every sync reports to.
-`Engine.RunSync(ctx)` syncs every configured
-map and is what the run-once path in `run` (no map has an `interval`, `webServer.enabled` is
-false) calls at startup; the unexported `runSyncMaps(ctx, ids)` syncs just the maps whose ID is in
+The unexported `runSyncMaps(ctx, ids)` syncs just the maps whose ID is in
 `ids` and is what both `RunLoop`'s per-map scheduler (see below) and, via `Engine.SyncMap`, the
-status page's per-map "Sync" button (`POST /api/maps/{id}/sync`) call. Both lock `syncMu`,
+status page's per-map "Sync" button (`POST /api/maps/{id}/sync`) call. It locks `syncMu`,
 read the current `{cfg, client, db}` via `Engine.Current()` — returning `ErrNotConfigured`
 instead of calling `syncAll` if `db` is still nil — and call `syncAll`; the `syncMu` lock is what
 stops a manual per-map sync from running concurrently with a scheduled tick against the same
@@ -405,18 +403,16 @@ API/DB leaves the previous, still-working state (which may be the initial unconf
 place. On a successful swap it also pings `e.wake` (a buffered `chan struct{}`, non-blocking send)
 so `RunLoop` (below) reacts immediately instead of finishing out whatever sleep it's already in.
 This is how config changes made through the web UI (new/removed maps, per-map intervals,
-credentials, DB settings) take effect without a process restart. `webServer.enabled`/`address` are
-the one exception: changing those still needs a restart, since the server a reload request arrives on
-can't safely restart itself mid-request — this is also why they live in the bootstrap file rather
+credentials, DB settings) take effect without a process restart. `webServer.address` is
+the one exception: changing it still needs a restart, since the server a reload request arrives on
+can't safely restart itself mid-request — this is also why it lives in the bootstrap file rather
 than `configdb` at all: `configdb`-backed settings are exactly the ones `Reload` can apply live,
 and `webServer` structurally can't be.
 
 **Starting unconfigured**: since there's no automatic migration of pre-SQLite `config.yaml`
 content, a fresh install's `configdb` is empty, and `run`'s initial `Reload` call fails validation
-(missing `api.baseUrl` etc.) — expected, not a bug. If `webServer.enabled` is false at that point,
-`run` fails hard (there'd be no way to fix it otherwise, same as an invalid `config.yaml` always
-failed hard). If `webServer.enabled` is true, `run` logs the error and continues: the web server
-starts regardless, `GET /config` renders an all-blank structured form (see the `internal/webserver`
+(missing `api.baseUrl` etc.) — expected, not a bug. `run` logs the error and continues: the web server
+(which always runs — there's no option to disable it) starts regardless, `GET /config` renders an all-blank structured form (see the `internal/webserver`
 bullet above), and the process falls into `RunLoop` regardless of whether any configured map has a
 usable `interval` yet.
 
@@ -436,12 +432,8 @@ sleep itself (`select { ... case <-time.After(wait): case <-e.wake: }`) is also 
 `e.wake` (see `Engine.Reload` above) — without it, a map added via `POST /api/maps` while the
 loop was already sleeping out some other map's longer interval would sit unsynced until that
 unrelated timer happened to fire, rather than starting on the next tick as intended.
-This means: whenever `webServer.enabled` is true, the process no longer ever exits on its own (a
-deliberate behavior change from before SQLite-backed config — a config with only one-shot maps
-used to run once and exit even with `webServer` on); `run` only takes the old "run once and exit"
-branch — now gated on `!cfg.HasRecurringMaps()` (true when no configured map has a positive
-`Interval`) — when `webServer.enabled` is false, where config is guaranteed valid up front and
-there's no live-edit scenario to accommodate.
+This means the process never exits on its own (only on context cancellation): there is no "run
+once and exit" mode any more, even when every map is one-shot.
 
 Sync is idempotent: rows are upserted by `uuid`, so re-running (whether manually or via a map's own
 `interval`) updates existing rows rather than duplicating them.

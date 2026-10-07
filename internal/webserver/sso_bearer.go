@@ -33,10 +33,6 @@ import (
 // instead of hanging it indefinitely.
 const oidcTimeout = 10 * time.Second
 
-// errSSODisabled is returned by ssoBearerUser when a bearer token arrives
-// while SSO is switched off in the bootstrap file.
-var errSSODisabled = errors.New("sso is not enabled")
-
 // ssoVerifierCache holds one *oidc.IDTokenVerifier per issuer URL, built
 // lazily on first use. Unlike the old redirect flow (which
 // re-ran discovery on each, infrequent, interactive login), verification
@@ -107,10 +103,6 @@ type bearerClaims struct {
 func ssoBearerUser(
 	ctx context.Context, ssoCfg config.SSO, cache *ssoVerifierCache, rawToken string,
 ) (*principal, error) {
-	if !ssoCfg.Enabled {
-		return nil, errSSODisabled
-	}
-
 	verifier, err := cache.get(ctx, ssoCfg.IssuerURL)
 	if err != nil {
 		return nil, err

@@ -87,13 +87,12 @@ export interface SyncResponse {
   error?: string
 }
 
-/** Public SSO settings; the provider fields are only present while SSO is enabled. */
+/** Public SSO settings the SPA needs to run the OIDC login itself. */
 export interface SSOStatus {
-  enabled: boolean
   buttonLabel: string
-  issuerUrl?: string
-  clientId?: string
-  scopes?: string
+  issuerUrl: string
+  clientId: string
+  scopes: string
 }
 
 export interface SecurityLogEntry {

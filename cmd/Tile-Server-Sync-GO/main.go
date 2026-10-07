@@ -130,46 +130,23 @@ func run(ctx context.Context, configPath string) error {
 	eng := syncer.New(cfgDB, boot.WebServer, rec)
 	defer func() { _ = eng.Close() }()
 
-	initialErr := eng.Reload(ctx)
-	if initialErr != nil {
-		if !boot.WebServer.Enabled {
-			// No web UI to fix it through — fail hard, same as today's
-			// behavior for an invalid/missing config file.
-			return fmt.Errorf("initial config: %w", initialErr)
-		}
-
-		log.Printf("starting with no valid configuration yet (%v); use /config to enter and save it", initialErr)
+	if err := eng.Reload(ctx); err != nil {
+		log.Printf("starting with no valid configuration yet (%v); use /config to enter and save it", err)
 	}
 
-	if boot.WebServer.Enabled {
-		stopWebServer := startWebServer(webserver.Options{
-			Addr:     boot.WebServer.Address,
-			Recorder: rec,
-			ConfigDB: cfgDB,
-			SSO:      boot.SSO,
-			Version:  version,
-			Commit:   commit,
-			Engine:   eng,
-		})
-		defer stopWebServer()
+	stopWebServer := startWebServer(webserver.Options{
+		Addr:     boot.WebServer.Address,
+		Recorder: rec,
+		ConfigDB: cfgDB,
+		SSO:      boot.SSO,
+		Version:  version,
+		Commit:   commit,
+		Engine:   eng,
+	})
+	defer stopWebServer()
 
-		// Since config may start out empty/invalid and only become valid
-		// (with or without an interval) via a later live edit, the process
-		// stays alive and polling as long as the web server is enabled,
-		// rather than choosing once at startup between "run once and exit"
-		// and "loop forever" the way the no-web-server branch below still
-		// does.
-		return eng.RunLoop(ctx)
-	}
-
-	// Config is guaranteed valid here (initialErr == nil, or we'd have
-	// returned above), so this preserves today's exact behavior.
-	cfg, _, _ := eng.Current()
-	if !cfg.HasRecurringMaps() {
-		_, err := eng.RunSync(ctx)
-		return err
-	}
-
+	// Config may start out empty/invalid and only become valid via a later
+	// live edit, so the process always stays alive and polling.
 	return eng.RunLoop(ctx)
 }
 
@@ -208,7 +185,7 @@ func openLogFile(configPath string) (*os.File, error) {
 // startWebServer starts the status/log/config web server in a goroutine and
 // returns a function that shuts it down; run defers a call to it, so the
 // server stops when run returns (including on ctx cancellation, since that's
-// what ends RunSync/RunLoop). Listen errors (other than a clean shutdown) are
+// what ends RunLoop). Listen errors (other than a clean shutdown) are
 // logged rather than returned, since a status page failing to start
 // shouldn't stop the sync itself.
 func startWebServer(opts webserver.Options) (stop func()) {

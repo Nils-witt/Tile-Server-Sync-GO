@@ -17,7 +17,7 @@ let manager: UserManager | null = null
  * in sessionStorage by an earlier page load is attached to it.
  */
 export function initOidc(status: SSOStatus) {
-  if (!status.enabled || !status.issuerUrl || !status.clientId) {
+  if (!status.issuerUrl || !status.clientId) {
     manager = null
     return
   }
@@ -108,7 +108,7 @@ export function renewAccessToken(): Promise<string | null> {
 
 /** Sends the browser to the provider's login page. */
 export async function startLogin(next: string) {
-  if (!manager) throw new Error('SSO is not enabled')
+  if (!manager) throw new Error('SSO is not configured')
 
   await manager.signinRedirect({ state: { next } })
 }
@@ -118,7 +118,7 @@ export async function startLogin(next: string) {
  * same-site path to continue to.
  */
 export async function completeLogin(): Promise<string> {
-  if (!manager) throw new Error('SSO is not enabled')
+  if (!manager) throw new Error('SSO is not configured')
 
   const user = await manager.signinRedirectCallback()
   const next = (user.state as { next?: unknown } | undefined)?.next

@@ -11,14 +11,14 @@ const (
 	DefaultSSOGroupsClaim = "groups"
 )
 
-// SSO is the optional OpenID Connect single sign-on configuration, read from
-// the bootstrap file (see Bootstrap) — not from the SQLite config database,
-// and not editable through the web UI, so changing it needs a restart. The
+// SSO is the OpenID Connect single sign-on configuration: the web server's
+// only login method, so it's always on and IssuerURL/ClientID are required.
+// It's read from the bootstrap file (see Bootstrap), not from the SQLite
+// config database, and not editable through the web UI, so changing it needs a restart. The
 // SPA runs the login itself as a public client (authorization code + PKCE,
 // no client secret) and then authenticates every API call with the
 // provider's access token; see internal/webserver/sso_bearer.go.
 type SSO struct {
-	Enabled bool `yaml:"enabled" json:"enabled"`
 	// IssuerURL is the provider's issuer, e.g. "https://accounts.example.com"
 	// — the base for OIDC discovery, and what every token's "iss" must match.
 	IssuerURL string `yaml:"issuerUrl" json:"issuerUrl"`
@@ -85,20 +85,15 @@ func (s *SSO) applyDefaults() {
 	}
 }
 
-// validate requires the provider settings an enabled SSO can't work without.
-// A disabled section isn't checked at all.
+// validate requires the provider settings SSO can't work without.
 func (s *SSO) validate() error {
-	if !s.Enabled {
-		return nil
-	}
-
 	var errs []error
 	if s.IssuerURL == "" {
-		errs = append(errs, errors.New("oidc.issuerUrl is required when oidc.enabled is true"))
+		errs = append(errs, errors.New("oidc.issuerUrl is required"))
 	}
 
 	if s.ClientID == "" {
-		errs = append(errs, errors.New("oidc.clientId is required when oidc.enabled is true"))
+		errs = append(errs, errors.New("oidc.clientId is required"))
 	}
 
 	for group := range s.GroupPermissions {

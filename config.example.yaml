@@ -3,11 +3,9 @@
 # This is now just a small bootstrap file: it points at the SQLite database
 # holding the rest of the configuration (API credentials, database target,
 # and maps — each with its own optional sync interval) and configures the
-# optional status/config web server. Everything that used to live directly
-# in this file (api, database, maps) is entered instead through that web
-# server's "/config" page after startup — there's no other way to set it on
-# a fresh install, so webServer.enabled needs to be true at least once to
-# configure anything.
+# status/config web server, which always runs. Everything that used to live
+# directly in this file (api, database, maps) is entered instead through that
+# web server's "/config" page after startup.
 #
 # config.yaml is git-ignored so nothing sensitive lands in it — the SQLite
 # database itself (default "config.db", next to this file) does hold
@@ -19,22 +17,20 @@
 # own directory. Defaults to "config.db" if omitted.
 # configDb: "config.db"
 
-# Optional HTTP server exposing a status page (last sync results per
+# HTTP server (always running) exposing a status page (last sync results per
 # map/version and recent log output) at "/", plus a config editor at
 # "/config" backed by a JSON API at "/api/config". The editor's "Apply saved
 # config now" button makes a saved change take effect immediately, without a
 # restart, and its "Sync now" button runs a sync immediately instead of
-# waiting for the next interval tick. Changing webServer.enabled/address
-# itself always needs a process restart — the editor shows these two values
-# read-only for that reason. Signing in is only possible via SSO (see "oidc"
-# below), so oidc.enabled must be true whenever webServer.enabled is.
+# waiting for the next interval tick. Changing webServer.address itself
+# always needs a process restart. Signing in is only possible via SSO (see
+# "oidc" below), so that section is required.
 webServer:
-  enabled: true
   address: ":8080"
 
 # OpenID Connect single sign-on: the web server's only login method (there
-# are no local username/password accounts), so it's required whenever
-# webServer.enabled is true. Changing anything here needs a restart.
+# are no local username/password accounts), so it's required. Changing
+# anything here needs a restart.
 #
 # The browser runs the login itself, as a public client (authorization code
 # + PKCE, no client secret), and then sends the provider's access token with
@@ -47,7 +43,6 @@ webServer:
 # Permissions come solely from defaultPermissions plus the provider's groups
 # (groupPermissions below); nothing about users is stored locally.
 oidc:
-  enabled: true
   issuerUrl: "https://accounts.example.com/realms/example"
   clientId: "tile-server-sync"
   # scopes: "openid profile email"   # default

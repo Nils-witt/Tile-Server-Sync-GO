@@ -17,16 +17,16 @@ import (
 // status web server to display, and returns the total number of objects
 // synced across every pair that succeeded. maps is not necessarily every map
 // in the current config — RunLoop passes only the maps currently due for a
-// sync, per their own Interval, while the run-once path and the web UI's
-// "sync now" pass every configured map.
+// sync, per their own Interval, while the web UI's per-map
+// "Sync" button passes a single map.
 //
 // A failure on one map/version (a fetch error or a store error) is logged
 // and recorded against that pair, but does not stop the others from being
 // attempted — one map being unreachable or misconfigured shouldn't prevent
 // the rest of the fleet from syncing. If any pair failed, syncAll still
 // returns a non-nil error (joining every failure) after all pairs have been
-// attempted, so callers (RunLoop's logging, the run-once path, the web UI's
-// "sync now") can tell the run as a whole was not fully successful.
+// attempted, so callers (RunLoop's logging, the web UI's per-map
+// "Sync" button) can tell the run as a whole was not fully successful.
 func syncAll(
 	ctx context.Context, maps []config.MapTarget, client *tileserve.Client, db *store.Store, rec *status.Recorder,
 ) (totalSynced int, err error) {

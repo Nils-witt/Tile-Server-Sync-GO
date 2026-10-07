@@ -155,22 +155,21 @@ type Database struct {
 	SyncOverlays bool `yaml:"syncOverlays" json:"syncOverlays"`
 }
 
-// WebServer configures the optional HTTP server that exposes sync status and
-// recent log output.
+// WebServer configures the HTTP server that exposes sync status, recent log
+// output and the config editor. It always runs.
 type WebServer struct {
-	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Address is the address (see net/http.Server.Addr) the server listens
-	// on, e.g. ":8080" or "127.0.0.1:8080". Defaults to ":8080" if enabled
-	// and left empty.
+	// on, e.g. ":8080" or "127.0.0.1:8080". Defaults to ":8080" if left
+	// empty.
 	Address string `yaml:"address" json:"address"`
 }
 
-// applyDefault fills Address with defaultWebServerAddress if Enabled and
-// Address is empty. Shared by Config.Validate and LoadBootstrap, since
+// applyDefault fills Address with defaultWebServerAddress if Address is
+// empty. Shared by Config.Validate and LoadBootstrap, since
 // WebServer is now validated/defaulted in two different places (a full
 // Config, and the standalone bootstrap file).
 func (w *WebServer) applyDefault() {
-	if w.Enabled && w.Address == "" {
+	if w.Address == "" {
 		w.Address = defaultWebServerAddress
 	}
 }
@@ -184,22 +183,6 @@ type Config struct {
 }
 
 const defaultWebServerAddress = ":8080"
-
-// HasRecurringMaps reports whether any enabled configured map has a
-// positive Interval (a disabled map never runs automatically regardless of
-// its Interval, so it doesn't count). If false, every configured map is
-// one-shot or disabled, so a caller that only runs once when there's
-// nothing to repeat (see main.go's run, when webServer is disabled) knows
-// it can sync once and exit rather than loop.
-func (c *Config) HasRecurringMaps() bool {
-	for _, m := range c.Maps {
-		if !m.Disabled && m.SyncInterval() > 0 {
-			return true
-		}
-	}
-
-	return false
-}
 
 // Validate checks c for consistency, filling in defaults (Database.Table,
 // Database.Columns, WebServer.Address) as it goes. Callers that assemble a

@@ -47,7 +47,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const status = await api.ssoStatus()
         initOidc(status)
-        if (status.enabled) setSsoLabel(status.buttonLabel || 'Sign in with SSO')
+        setSsoLabel(status.buttonLabel || 'Sign in with SSO')
         // An SSO session that can't be renewed any more counts as logged
         // out: AuthGate then sends the user to /login?next=<current page>.
         onSsoSessionEnded(() => setMe(null))
