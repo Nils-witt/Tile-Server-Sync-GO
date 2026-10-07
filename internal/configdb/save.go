@@ -19,20 +19,23 @@ import (
 func (s *Store) Save(ctx context.Context, cfg *config.Config) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		scalar := configScalar{
-			ID:             1,
-			APIBaseURL:     cfg.API.BaseURL,
-			APIUsername:    cfg.API.Username,
-			APIPassword:    cfg.API.Password,
-			APIToken:       cfg.API.Token,
-			DBHost:         cfg.Database.Host,
-			DBPort:         cfg.Database.Port,
-			DBUser:         cfg.Database.User,
-			DBPassword:     cfg.Database.Password,
-			DBName:         cfg.Database.Name,
-			DBParams:       cfg.Database.Params,
-			DBTable:        cfg.Database.Table,
-			DBPruneMissing: cfg.Database.PruneMissing,
-			DBSyncOverlays: cfg.Database.SyncOverlays,
+			ID:              1,
+			APIBaseURL:      cfg.API.BaseURL,
+			APIUsername:     cfg.API.Username,
+			APIPassword:     cfg.API.Password,
+			APIToken:        cfg.API.Token,
+			DBHost:          cfg.Database.Host,
+			DBPort:          cfg.Database.Port,
+			DBUser:          cfg.Database.User,
+			DBPassword:      cfg.Database.Password,
+			DBName:          cfg.Database.Name,
+			DBParams:        cfg.Database.Params,
+			DBTLS:           cfg.Database.TLS,
+			DBTLSSkipVerify: cfg.Database.TLSSkipVerify,
+			DBTLSCACert:     cfg.Database.TLSCACert,
+			DBTable:         cfg.Database.Table,
+			DBPruneMissing:  cfg.Database.PruneMissing,
+			DBSyncOverlays:  cfg.Database.SyncOverlays,
 		}
 
 		err := tx.Clauses(clause.OnConflict{

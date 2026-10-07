@@ -125,8 +125,21 @@ type Database struct {
 	// Name is the database (schema) name.
 	Name string `yaml:"name" json:"name"`
 	// Params are extra driver parameters in URL query form (e.g.
-	// "tls=true&timeout=10s"); parseTime=true is always set by DSN().
+	// "timeout=10s"); parseTime=true is always set by DSN(). TLS is
+	// configured via TLS/TLSSkipVerify, not a "tls" parameter here.
 	Params string `yaml:"params" json:"params"`
+	// TLS, if true, encrypts the connection to the database server.
+	TLS bool `yaml:"tls" json:"tls"`
+	// TLSSkipVerify, if true (and TLS is enabled), accepts any server
+	// certificate instead of verifying its chain and host name — only for
+	// self-signed certificates on a trusted network. Defaults to false, so
+	// enabling TLS verifies the certificate unless explicitly opted out.
+	TLSSkipVerify bool `yaml:"tlsSkipVerify" json:"tlsSkipVerify"`
+	// TLSCACert, if set, is one or more PEM-encoded CA certificates the
+	// server certificate is verified against instead of the system roots
+	// (e.g. for a private CA). Only used when TLS is enabled and
+	// TLSSkipVerify isn't. Not a secret, so it's never redacted.
+	TLSCACert string `yaml:"tlsCaCert" json:"tlsCaCert"`
 	// Table is the target table name. Defaults to "geo_objects".
 	Table string `yaml:"table" json:"table"`
 	// Columns maps GeoObject field keys (see FieldUUID etc.) and
@@ -197,7 +210,7 @@ func (c *Config) Validate() error {
 		return errors.New("either api.token or both api.username and api.password are required")
 	}
 
-	if err := c.Database.validateConnection(); err != nil {
+	if err := c.Database.ValidateConnection(); err != nil {
 		return err
 	}
 

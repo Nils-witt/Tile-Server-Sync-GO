@@ -3,6 +3,7 @@ package webserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -71,6 +72,35 @@ func saveDatabaseSectionHandler(run Runner) http.HandlerFunc {
 	) {
 		return run.SaveDatabase(ctx, actor, req.Database)
 	})
+}
+
+// databaseTestResponse is POST /api/config/database/test's body: OK, or
+// why the connection attempt failed.
+type databaseTestResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// testDatabaseHandler serves POST /api/config/database/test: it tries the
+// submitted (unsaved) database section's connection settings. Invalid
+// settings are a 400; a failed connection is still a 200 with ok=false,
+// since the test itself ran fine. Requires edit_config_database.
+func testDatabaseHandler(run Runner) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req databaseSectionRequest
+		if err := decodeBody(w, r, maxConfigBodyBytes, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, databaseTestResponse{Error: err.Error()})
+			return
+		}
+
+		err := run.TestDatabase(r.Context(), actorOf(r), req.Database)
+		if errors.Is(err, runner.ErrInvalid) {
+			writeJSON(w, http.StatusBadRequest, databaseTestResponse{Error: err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, databaseTestResponse{OK: err == nil, Error: errorString(err)})
+	}
 }
 
 // sectionSaveHandler decodes the request body as a T and hands it to save,

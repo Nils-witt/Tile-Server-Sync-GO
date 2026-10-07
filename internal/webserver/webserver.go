@@ -26,6 +26,7 @@ type Runner interface {
 	SaveDatabase(
 		ctx context.Context, actor runner.Actor, db config.Database,
 	) (config.Config, runner.ChangeResult, error)
+	TestDatabase(ctx context.Context, actor runner.Actor, db config.Database) error
 
 	Maps() []config.MapTarget
 	CreateMap(
@@ -101,6 +102,10 @@ func New(opts Options) *http.Server {
 		requirePermission(auth, permViewConfig)(getDatabaseSectionHandler(run)))
 	mux.HandleFunc("PUT /api/config/database",
 		requirePermission(auth, permEditConfigDatabase)(saveDatabaseSectionHandler(run)))
+	// Testing connects to a user-entered host (possibly with the stored
+	// password), so it needs the same permission as saving.
+	mux.HandleFunc("POST /api/config/database/test",
+		requirePermission(auth, permEditConfigDatabase)(testDatabaseHandler(run)))
 
 	// Maps: a first-class CRUD resource (see maps.go), not a config section —
 	// each map is independently addressable/mutable, so adding or editing one

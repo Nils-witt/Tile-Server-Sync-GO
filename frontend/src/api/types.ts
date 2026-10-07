@@ -33,8 +33,14 @@ export interface DatabaseSection {
   password: string
   /** Database (schema) name. */
   name: string
-  /** Extra driver params in URL query form, e.g. "tls=true"; parseTime=true is always set. */
+  /** Extra driver params in URL query form, e.g. "timeout=10s"; parseTime=true is always set, tls is not allowed (see tls below). */
   params: string
+  /** Encrypt the connection with TLS. */
+  tls: boolean
+  /** With tls: accept any server certificate instead of verifying it. */
+  tlsSkipVerify: boolean
+  /** With tls (and verification): PEM CA certificate(s) to trust instead of the system roots; "" = system roots. */
+  tlsCaCert: string
   table: string
   pruneMissing: boolean
   syncOverlays: boolean
@@ -54,6 +60,11 @@ export interface Config {
   api: ApiSection
   database: DatabaseSection
   maps: MapTarget[]
+}
+
+export interface DatabaseTestResponse {
+  ok: boolean
+  error?: string
 }
 
 export interface ConfigGetResponse {

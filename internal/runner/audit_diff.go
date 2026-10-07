@@ -70,6 +70,11 @@ func diffDatabase(before, after config.Database) []string {
 		changes = append(changes, "columns changed")
 	}
 
+	// The PEM text itself is too long to be useful in the log.
+	if before.TLSCACert != after.TLSCACert {
+		changes = append(changes, "tlsCaCert changed")
+	}
+
 	return changes
 }
 
@@ -125,6 +130,14 @@ func diffDatabaseConnection(before, after config.Database) []string {
 
 	if before.Password != after.Password {
 		changes = append(changes, "password changed")
+	}
+
+	if before.TLS != after.TLS {
+		changes = append(changes, fmt.Sprintf("tls %v->%v", before.TLS, after.TLS))
+	}
+
+	if before.TLSSkipVerify != after.TLSSkipVerify {
+		changes = append(changes, fmt.Sprintf("tlsSkipVerify %v->%v", before.TLSSkipVerify, after.TLSSkipVerify))
 	}
 
 	return changes

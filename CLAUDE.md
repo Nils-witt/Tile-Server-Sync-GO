@@ -93,7 +93,14 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   Validation requires either `api.token` or both `api.username`/`api.password`. The MariaDB
   connection is stored as separate components (`database.host`/`port`/`user`/`password`/`name`/
   `params`, each its own field in the `/config/database` form); `Database.DSN()` (`dsn.go`)
-  assembles the driver DSN from them, always forcing `parseTime=true`. A `configdb` saved before
+  assembles the driver DSN from them, always forcing `parseTime=true`. TLS has its own two
+  checkboxes, `database.tls` and `database.tlsSkipVerify` (default false, so enabling TLS verifies
+  the certificate against the system roots and host name), mapped onto the driver's
+  `tls=true`/`tls=skip-verify`; `ValidateConnection` rejects a `tls` key in `params`, and
+  `Database.LiftTLSParam` moves one stored there by an older version into the two fields on `Load`. An
+  optional `database.tlsCaCert` (pasted PEM) replaces the system roots for verification; since a
+  DSN string can't carry a `*tls.Config`, `store` connects via `Database.DriverConfig()` +
+  `mysql.NewConnector`/`sql.OpenDB` rather than `sql.Open` with `DSN()`. A `configdb` saved before
   the split still has only the legacy `db_dsn` column filled — `Load` splits it via
   `config.DatabaseFromDSN` (TCP only) until the next `Save` writes the components and clears it.
 - **`internal/configdb`** — the new SQLite-backed store for everything in `Config` except
@@ -214,7 +221,11 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database` — backed by `Runner.Config()`
   (secrets already redacted by the Runner) and `Runner.SaveAPI`/`SaveDatabase`. An
   empty/unconfigured database is not an error, so the SPA's structured form always has something
-  to render (blank on a fresh install). There is no whole-config `GET /api/config` bundle. A save
+  to render (blank on a fresh install). There is no whole-config `GET /api/config` bundle. `POST
+  /api/config/database/test` (`edit_config_database`, `Runner.TestDatabase` → `store.Ping`) tries
+  the Database tab's *unsaved* connection settings (blank password = stored one, 10s timeout) for
+  its "Test connection" button; each attempt logs `database_tested` to the security log, since it
+  may send the stored password to a newly entered host. A save
   is deliberately *not* gated on `Config.Validate()` passing for the whole config (see the Runner
   section), and reports whether the *whole* config could be applied live via the response's
   `applied`/`applyError` fields. `webServer.address` has no input in the config page at all since

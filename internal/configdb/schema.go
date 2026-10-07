@@ -19,16 +19,19 @@ type configScalar struct {
 	APIToken    string `gorm:"column:api_token;not null;default:''"`
 	// DBDSN is the pre-split connection string, only read to migrate an
 	// older database (see Load); Save always clears it.
-	DBDSN          string `gorm:"column:db_dsn;not null;default:''"`
-	DBHost         string `gorm:"column:db_host;not null;default:''"`
-	DBPort         int    `gorm:"column:db_port;not null;default:0"`
-	DBUser         string `gorm:"column:db_user;not null;default:''"`
-	DBPassword     string `gorm:"column:db_password;not null;default:''"`
-	DBName         string `gorm:"column:db_name;not null;default:''"`
-	DBParams       string `gorm:"column:db_params;not null;default:''"`
-	DBTable        string `gorm:"column:db_table;not null;default:''"`
-	DBPruneMissing bool   `gorm:"column:db_prune_missing;not null;default:false"`
-	DBSyncOverlays bool   `gorm:"column:db_sync_overlays;not null;default:false"`
+	DBDSN           string `gorm:"column:db_dsn;not null;default:''"`
+	DBHost          string `gorm:"column:db_host;not null;default:''"`
+	DBPort          int    `gorm:"column:db_port;not null;default:0"`
+	DBUser          string `gorm:"column:db_user;not null;default:''"`
+	DBPassword      string `gorm:"column:db_password;not null;default:''"`
+	DBName          string `gorm:"column:db_name;not null;default:''"`
+	DBParams        string `gorm:"column:db_params;not null;default:''"`
+	DBTLS           bool   `gorm:"column:db_tls;not null;default:false"`
+	DBTLSSkipVerify bool   `gorm:"column:db_tls_skip_verify;not null;default:false"`
+	DBTLSCACert     string `gorm:"column:db_tls_ca_cert;not null;default:''"`
+	DBTable         string `gorm:"column:db_table;not null;default:''"`
+	DBPruneMissing  bool   `gorm:"column:db_prune_missing;not null;default:false"`
+	DBSyncOverlays  bool   `gorm:"column:db_sync_overlays;not null;default:false"`
 }
 
 // TableName pins this model to a singular name — GORM would otherwise

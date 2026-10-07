@@ -14,7 +14,7 @@ const COLUMN_FIELDS: [string, string][] = [
 ]
 
 const empty: DatabaseSection = {
-  host: '', port: 0, user: '', password: '', name: '', params: '',
+  host: '', port: 0, user: '', password: '', name: '', params: '', tls: false, tlsSkipVerify: false, tlsCaCert: '',
   table: '', pruneMissing: false, syncOverlays: false, columns: {} }
 
 export function DatabaseTab() {
@@ -23,6 +23,7 @@ export function DatabaseTab() {
   const [form, setForm] = useState<DatabaseSection>(empty)
   const [banner, setBanner] = useState<BannerState | null>(null)
   const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
 
   useEffect(() => {
     api
@@ -39,18 +40,40 @@ export function DatabaseTab() {
     setForm((prev) => ({ ...prev, columns: { ...prev.columns, [key]: value } }))
   }
 
+  function trimmedForm(): DatabaseSection {
+    return {
+      ...form,
+      host: form.host.trim(),
+      user: form.user.trim(),
+      name: form.name.trim(),
+      params: form.params.trim(),
+      table: form.table.trim(),
+      tlsCaCert: form.tlsCaCert.trim(),
+    }
+  }
+
+  async function handleTest() {
+    setTesting(true)
+
+    try {
+      const res = await api.testDatabaseSection(trimmedForm())
+      if (res.ok) {
+        setBanner({ ok: true, text: 'Connection succeeded (not saved yet).' })
+      } else {
+        setBanner({ ok: false, text: `Connection failed: ${res.error}` })
+      }
+    } catch (err) {
+      setBanner({ ok: false, text: `Connection test failed: ${err instanceof ApiError ? err.message : err}` })
+    } finally {
+      setTesting(false)
+    }
+  }
+
   async function handleSave() {
     setSaving(true)
 
     try {
-      const res = await api.saveDatabaseSection({
-        ...form,
-        host: form.host.trim(),
-        user: form.user.trim(),
-        name: form.name.trim(),
-        params: form.params.trim(),
-        table: form.table.trim(),
-      })
+      const res = await api.saveDatabaseSection(trimmedForm())
       if (res.applied) {
         setBanner({ ok: true, text: 'Saved and applied to the running process.' })
       } else {
@@ -122,10 +145,42 @@ export function DatabaseTab() {
       <input
         type="text"
         id="db-params"
-        placeholder="tls=true&timeout=10s"
+        placeholder="timeout=10s"
         disabled={disabled}
         value={form.params}
         onChange={(e) => setForm({ ...form, params: e.target.value })}
+      />
+      <div className="checkbox-row">
+        <input
+          type="checkbox"
+          id="db-tls"
+          disabled={disabled}
+          checked={form.tls}
+          onChange={(e) => setForm({ ...form, tls: e.target.checked })}
+        />
+        <label htmlFor="db-tls">Use TLS</label>
+      </div>
+      <div className="checkbox-row">
+        <input
+          type="checkbox"
+          id="db-tls-verify"
+          disabled={disabled || !form.tls}
+          checked={form.tls && !form.tlsSkipVerify}
+          onChange={(e) => setForm({ ...form, tlsSkipVerify: !e.target.checked })}
+        />
+        <label htmlFor="db-tls-verify">
+          Verify the server certificate (uncheck only for a self-signed certificate on a trusted network)
+        </label>
+      </div>
+      <label htmlFor="db-tls-ca">CA certificate (optional, PEM — leave blank to use the system's trusted CAs)</label>
+      <textarea
+        id="db-tls-ca"
+        rows={4}
+        spellCheck={false}
+        placeholder={'-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----'}
+        disabled={disabled || !form.tls || form.tlsSkipVerify}
+        value={form.tlsCaCert}
+        onChange={(e) => setForm({ ...form, tlsCaCert: e.target.value })}
       />
       <label htmlFor="db-table">Table</label>
       <input
@@ -180,6 +235,9 @@ export function DatabaseTab() {
       <div className="actions-row">
         <button type="button" className="primary" disabled={disabled || saving} onClick={handleSave}>
           Save database section
+        </button>
+        <button type="button" disabled={disabled || testing || saving} onClick={handleTest}>
+          {testing ? 'Testing…' : 'Test connection'}
         </button>
       </div>
     </section>

@@ -38,7 +38,13 @@ func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 		cfg.Database.Password = scalar.DBPassword
 		cfg.Database.Name = scalar.DBName
 		cfg.Database.Params = scalar.DBParams
+		cfg.Database.TLS = scalar.DBTLS
+		cfg.Database.TLSSkipVerify = scalar.DBTLSSkipVerify
+		cfg.Database.TLSCACert = scalar.DBTLSCACert
 		applyLegacyDSN(&cfg.Database, scalar.DBDSN)
+		// A tls parameter saved before TLS had its own options; the next
+		// Save persists it in db_tls/db_tls_skip_verify instead.
+		cfg.Database.LiftTLSParam()
 		cfg.Database.Table = scalar.DBTable
 		cfg.Database.PruneMissing = scalar.DBPruneMissing
 		cfg.Database.SyncOverlays = scalar.DBSyncOverlays
@@ -77,8 +83,9 @@ func applyLegacyDSN(db *config.Database, dsn string) {
 		return
 	}
 
-	db.Host, db.Port, db.User, db.Password, db.Name, db.Params =
-		parsed.Host, parsed.Port, parsed.User, parsed.Password, parsed.Name, parsed.Params
+	db.Host, db.Port, db.User, db.Password, db.Name, db.Params, db.TLS, db.TLSSkipVerify =
+		parsed.Host, parsed.Port, parsed.User, parsed.Password, parsed.Name, parsed.Params,
+		parsed.TLS, parsed.TLSSkipVerify
 }
 
 func (s *Store) loadDatabaseColumns(ctx context.Context) (map[string]string, error) {

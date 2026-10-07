@@ -2,11 +2,19 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/store"
 )
+
+// databaseTestTimeout bounds TestDatabase, so an unreachable host (whose
+// packets are silently dropped) fails the test instead of hanging the
+// request.
+const databaseTestTimeout = 10 * time.Second
 
 // Config returns a copy of the stored config with its secrets
 // (API.Password, Database.Password) blanked: stored secrets never leave the
@@ -57,6 +65,38 @@ func (r *Runner) SaveDatabase(
 
 		return changes
 	})
+}
+
+// TestDatabase tries to connect to db without saving or applying it, so the
+// config page can check connection settings first. A blank Password means
+// the stored one, as in SaveDatabase. Invalid settings are reported wrapped
+// in ErrInvalid; any other error is the connection attempt's own. Every
+// attempt is recorded in the security log, since it may send the stored
+// password to a newly entered host.
+func (r *Runner) TestDatabase(ctx context.Context, actor Actor, db config.Database) error {
+	if db.Password == "" {
+		db.Password = r.storedCopy().Database.Password
+	}
+
+	if err := db.ValidateConnection(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, databaseTestTimeout)
+	defer cancel()
+
+	err := store.Ping(pingCtx, db)
+
+	result := "ok"
+	if err != nil {
+		result = "failed"
+	}
+
+	r.LogSecurityEvent(ctx, actor, "database_tested",
+		fmt.Sprintf("host=%q user=%q name=%q tls=%v tlsSkipVerify=%v customCa=%v result=%s",
+			db.Host, db.User, db.Name, db.TLS, db.TLSSkipVerify, db.TLSCACert != "", result))
+
+	return err
 }
 
 // saveSection is the shared body of SaveAPI/SaveDatabase: merge (which

@@ -12,10 +12,7 @@ import (
 
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/tileserve"
-
-	// Registers the "mysql" driver with database/sql; never referenced
-	// directly, only through sql.Open.
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 )
 
 // Store wraps a MariaDB connection along with the target table and column
@@ -47,14 +44,9 @@ type Store struct {
 // staticColumns is the full set of extra static-value column names across
 // all configured maps (see config.Config.StaticColumnNames).
 func Open(ctx context.Context, dbCfg config.Database, staticColumns []string) (*Store, error) {
-	db, err := sql.Open("mysql", dbCfg.DSN())
+	db, err := connect(ctx, dbCfg)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
-
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("ping database: %w", err)
+		return nil, err
 	}
 
 	// Sync runs are effectively single-writer (UpsertGeoObjects's caller
@@ -76,6 +68,43 @@ func Open(ctx context.Context, dbCfg config.Database, staticColumns []string) (*
 		pruneMissing:  dbCfg.PruneMissing,
 		syncOverlays:  dbCfg.SyncOverlays,
 	}, nil
+}
+
+// Ping opens a throwaway connection to dbCfg's database, pings it and
+// closes it again, without touching any table — used to test connection
+// settings before they're saved.
+func Ping(ctx context.Context, dbCfg config.Database) error {
+	db, err := connect(ctx, dbCfg)
+	if err != nil {
+		return err
+	}
+
+	return db.Close()
+}
+
+// connect opens dbCfg's database and pings it, so a bad host or credentials
+// fail here rather than on first use.
+func connect(ctx context.Context, dbCfg config.Database) (*sql.DB, error) {
+	// A connector rather than sql.Open's DSN string, since a custom CA
+	// (TLSCACert) can only be passed as a *tls.Config.
+	driverCfg, err := dbCfg.DriverConfig()
+	if err != nil {
+		return nil, fmt.Errorf("database connection settings: %w", err)
+	}
+
+	connector, err := mysql.NewConnector(driverCfg)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	db := sql.OpenDB(connector)
+
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+
+	return db, nil
 }
 
 // Close closes the underlying database connection.

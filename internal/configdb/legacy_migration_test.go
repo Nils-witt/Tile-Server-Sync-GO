@@ -187,7 +187,7 @@ func assertLegacyConfigIntact(ctx context.Context, t *testing.T, s *Store) {
 	}
 
 	assertDatabaseConnection(t, cfg.Database, config.Database{
-		Host: "db.example", Port: 3307, User: "user", Password: "pass", Name: "db", Params: "tls=true",
+		Host: "db.example", Port: 3307, User: "user", Password: "pass", Name: "db", TLS: true,
 	})
 
 	if len(cfg.Maps) != 1 || cfg.Maps[0].ID != "legacy-map" || cfg.Maps[0].Interval != "10m" || len(cfg.Maps[0].Versions) != 1 {
@@ -200,7 +200,8 @@ func assertDatabaseConnection(t *testing.T, got, want config.Database) {
 	t.Helper()
 
 	if got.Host != want.Host || got.Port != want.Port || got.User != want.User ||
-		got.Password != want.Password || got.Name != want.Name || got.Params != want.Params {
+		got.Password != want.Password || got.Name != want.Name || got.Params != want.Params ||
+		got.TLS != want.TLS || got.TLSSkipVerify != want.TLSSkipVerify {
 		t.Errorf("database connection = %+v, want %+v", got, want)
 	}
 }

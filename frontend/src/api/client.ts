@@ -1,6 +1,7 @@
 import type {
   ConfigGetResponse,
   DatabaseSection,
+  DatabaseTestResponse,
   ApiSection,
   Me,
   MapDeleteResponse,
@@ -75,6 +76,9 @@ export const api = {
   getDatabaseSection: () => apiFetch<{ database: DatabaseSection }>('/api/config/database'),
   saveDatabaseSection: (section: DatabaseSection) =>
     putJSON<ConfigGetResponse>('/api/config/database', { database: section }),
+  /** Tries the given (unsaved) connection settings; a blank password means the stored one. */
+  testDatabaseSection: (section: DatabaseSection) =>
+    postJSON<DatabaseTestResponse>('/api/config/database/test', { database: section }),
 
 
   listMaps: () => apiFetch<MapTarget[]>('/api/maps'),
