@@ -65,8 +65,9 @@ func (r *Runner) Run(ctx context.Context) error {
 // for every map synced this tick.
 func (r *Runner) tick(ctx context.Context, lastSync map[string]time.Time) time.Duration {
 	cfg, _, db := r.active()
+	// Not configured yet: poll silently — Run already logged why at startup,
+	// and repeating it every pollInterval would only flood the log.
 	if db == nil {
-		log.Print("waiting for configuration via /config")
 		return pollInterval
 	}
 

@@ -433,8 +433,8 @@ server is already running, `/config` renders an all-blank form, and the schedule
 
 `Runner.Run` (`internal/runner/schedule.go`) schedules each map independently by its own
 `Interval`. It tracks an in-memory `lastSync map[string]time.Time` (map ID → last sync start),
-rebuilt from scratch on every process start. Each tick: if there's no active database yet it logs
-a wait message and sleeps `pollInterval` (5s); otherwise `scheduleTick` computes the currently-due
+rebuilt from scratch on every process start. Each tick: if there's no active database yet it silently
+sleeps `pollInterval` (5s) — `Run`'s one startup message already said why; otherwise `scheduleTick` computes the currently-due
 map IDs from the active config — a map with no `lastSync` entry is always due once (covers startup
 and a map added live), after that a map with a positive `Interval` is due again once that much
 time has passed, and a map with no `Interval` is never due again automatically. Due maps are
