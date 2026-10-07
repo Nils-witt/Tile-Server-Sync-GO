@@ -54,7 +54,7 @@ func toStatusResponse(s status.Snapshot) statusResponse {
 }
 
 // statusAPIHandler serves GET /api/status. Requires view_status.
-func statusAPIHandler(rec *status.Recorder) http.HandlerFunc {
+func statusAPIHandler(run Runner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -63,7 +63,7 @@ func statusAPIHandler(rec *status.Recorder) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, toStatusResponse(rec.Snapshot()))
+		writeJSON(w, http.StatusOK, toStatusResponse(run.Status()))
 	}
 }
 

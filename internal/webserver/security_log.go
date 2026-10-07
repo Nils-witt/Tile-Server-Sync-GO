@@ -1,31 +1,19 @@
 package webserver
 
 import (
-	"log"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/runner"
 )
-
-// logSecurityEvent appends one row to the security log (see
-// configdb.Store.LogSecurityEvent). Best-effort: a failure to write the log
-// entry is only logged to stderr, never returned to the caller — the audit
-// trail must not block or fail the login/save action that
-// triggered it.
-func logSecurityEvent(r *http.Request, cfgDB *configdb.Store, eventType, username, detail string) {
-	if err := cfgDB.LogSecurityEvent(r.Context(), eventType, username, r.RemoteAddr, detail); err != nil {
-		log.Printf("security log: %v", err)
-	}
-}
 
 const (
 	defaultSecurityLogLimit = 200
 	maxSecurityLogLimit     = 1000
 )
 
-// securityLogEntryDTO is a configdb.SecurityLogEntry as sent to the JSON API.
+// securityLogEntryDTO is a runner.SecurityLogEntry as sent to the JSON API.
 type securityLogEntryDTO struct {
 	At         string `json:"at"`
 	EventType  string `json:"eventType"`
@@ -34,7 +22,7 @@ type securityLogEntryDTO struct {
 	Detail     string `json:"detail"`
 }
 
-func toSecurityLogEntryDTO(e configdb.SecurityLogEntry) securityLogEntryDTO {
+func toSecurityLogEntryDTO(e runner.SecurityLogEntry) securityLogEntryDTO {
 	return securityLogEntryDTO{
 		At: e.At.Format(time.RFC3339), EventType: e.EventType,
 		Username: e.Username, RemoteAddr: e.RemoteAddr, Detail: e.Detail,
@@ -47,7 +35,7 @@ func toSecurityLogEntryDTO(e configdb.SecurityLogEntry) securityLogEntryDTO {
 // logged-in user. An optional "limit" query parameter caps how many recent
 // entries are returned (default defaultSecurityLogLimit, hard-capped at
 // maxSecurityLogLimit).
-func securityLogAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+func securityLogAPIHandler(run Runner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -64,7 +52,7 @@ func securityLogAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 			}
 		}
 
-		entries, err := cfgDB.ListSecurityLog(r.Context(), limit)
+		entries, err := run.SecurityLog(r.Context(), limit)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorJSON(err.Error()))
 			return

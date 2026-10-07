@@ -1,4 +1,4 @@
-package syncer
+package runner
 
 import (
 	"testing"

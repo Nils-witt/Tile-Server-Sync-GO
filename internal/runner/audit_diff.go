@@ -1,4 +1,4 @@
-package webserver
+package runner
 
 import (
 	"fmt"
@@ -74,8 +74,8 @@ func diffDatabase(before, after config.Database) []string {
 }
 
 // diffMapFields compares two config.MapTarget values field by field
-// (name/versions/interval/disabled/staticColumns) — used by maps.go's
-// updateMapAPIHandler to log what a PUT /api/maps/{id} actually changed.
+// (name/versions/interval/disabled/staticColumns) — used by UpdateMap to
+// log what an update actually changed.
 func diffMapFields(old, updated config.MapTarget) []string {
 	var changes []string
 
@@ -100,35 +100,6 @@ func diffMapFields(old, updated config.MapTarget) []string {
 	}
 
 	return changes
-}
-
-// permissionFields lists a config.SSOPermissions' boolean fields alongside
-// the label used to describe each in a security_log detail string (see
-// grantedPermissions).
-var permissionFields = []struct {
-	label string
-	get   func(config.SSOPermissions) bool
-}{
-	{"viewStatus", func(p config.SSOPermissions) bool { return p.ViewStatus }},
-	{"triggerSync", func(p config.SSOPermissions) bool { return p.TriggerSync }},
-	{"viewConfig", func(p config.SSOPermissions) bool { return p.ViewConfig }},
-	{"editConfigApi", func(p config.SSOPermissions) bool { return p.EditConfigAPI }},
-	{"editConfigDatabase", func(p config.SSOPermissions) bool { return p.EditConfigDatabase }},
-	{"editConfigMaps", func(p config.SSOPermissions) bool { return p.EditConfigMaps }},
-}
-
-// grantedPermissions lists the permissions set to true in perms, for
-// recording what a login's groups granted (see meAPIHandler).
-func grantedPermissions(perms config.SSOPermissions) []string {
-	var granted []string
-
-	for _, f := range permissionFields {
-		if f.get(perms) {
-			granted = append(granted, f.label)
-		}
-	}
-
-	return granted
 }
 
 // diffDatabaseConnection compares the connection components of two

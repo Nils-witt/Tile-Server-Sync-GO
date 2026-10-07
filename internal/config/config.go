@@ -80,20 +80,20 @@ type MapTarget struct {
 	// often this map re-syncs. If empty, this map is synced once (at
 	// startup, or once picked up by a live config reload) and not
 	// automatically repeated — other maps with their own Interval keep
-	// repeating on their own schedule regardless. See runLoop in main.go.
+	// repeating on their own schedule regardless. See internal/runner's Run.
 	Interval string `yaml:"interval" json:"interval"`
 	// interval is Interval parsed by validateInterval(); read it via
 	// SyncInterval.
 	interval time.Duration
-	// Disabled, if true, excludes this map from automatic syncing: runLoop's
-	// per-map scheduler never considers it due (see scheduleTick in
-	// main.go), and the run-once path (runtime.runSync) skips it too. Its
-	// config (versions, interval, staticColumns) is kept as-is — disabling
-	// is meant to be temporary, not a lighter-weight delete — and it can
-	// still be synced on demand via its own "Sync" button/API call
-	// (runtime.runSyncMaps), which is given its ID explicitly rather than
-	// discovering it through scheduling. Defaults to false (enabled) so an
-	// existing map, or a request that omits the field, keeps syncing.
+	// Disabled, if true, excludes this map from automatic syncing: the
+	// runner's per-map scheduler never considers it due (see scheduleTick in
+	// internal/runner). Its config (versions, interval, staticColumns) is
+	// kept as-is — disabling is meant to be temporary, not a lighter-weight
+	// delete — and it can still be synced on demand via its own "Sync"
+	// button (runner.Runner.SyncMap), which is given its ID explicitly
+	// rather than discovering it through scheduling. Defaults to false
+	// (enabled) so an existing map, or a request that omits the field, keeps
+	// syncing.
 	Disabled bool `yaml:"disabled" json:"disabled"`
 }
 
@@ -187,7 +187,7 @@ const defaultWebServerAddress = ":8080"
 // Validate checks c for consistency, filling in defaults (Database.Table,
 // Database.Columns, WebServer.Address) as it goes. Callers that assemble a
 // *Config (configdb, plus the WebServer overlay applied by
-// syncer.Engine.Reload) must call this themselves before using the result.
+// runner.Runner's apply) must call this themselves before using the result.
 func (c *Config) Validate() error {
 	if c.API.BaseURL == "" {
 		return errors.New("api.baseUrl is required")
@@ -215,8 +215,8 @@ func (c *Config) Validate() error {
 // staticColumns are valid SQL identifiers that don't collide with a
 // database.columns target, and that no two entries share an id — split out
 // from Validate to keep its cyclomatic complexity down, and exported so
-// callers that validate just a candidate maps list (e.g. the webserver's
-// per-map create/update handlers, which don't have api/database connection details filled in
+// callers that validate just a candidate maps list (e.g. the runner's
+// per-map create/update, which don't have api/database connection details filled in
 // to satisfy the rest of Validate) can call it directly against
 // c.Maps/c.Database.Columns alone.
 func (c *Config) ValidateMaps() error {

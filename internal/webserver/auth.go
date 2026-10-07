@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
-	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
 )
 
 type contextKey int
@@ -34,11 +33,11 @@ func currentUser(ctx context.Context) (*principal, bool) {
 }
 
 // authenticator bundles what requireUser needs to resolve a request to a
-// principal: the configdb store (for the security log), the bootstrap
+// principal: the Runner (for the security log), the bootstrap
 // file's SSO config, and the cache of OIDC verifiers for bearer tokens (see
 // sso_bearer.go). One is built per server in New and shared by every route.
 type authenticator struct {
-	cfgDB     *configdb.Store
+	runner    Runner
 	sso       config.SSO
 	verifiers *ssoVerifierCache
 }
@@ -62,7 +61,7 @@ func requireUser(a *authenticator) func(http.HandlerFunc) http.HandlerFunc {
 
 			user, err := ssoBearerUser(r.Context(), a.sso, a.verifiers, raw)
 			if err != nil {
-				rejectBearer(w, r, a.cfgDB, err)
+				rejectBearer(w, r, a.runner, err)
 				return
 			}
 
@@ -87,11 +86,11 @@ func bearerToken(r *http.Request) (string, bool) {
 // event for an idle tab, which the SPA recovers from by renewing it) only
 // goes to stderr; anything else (bad signature, wrong issuer/client, SSO
 // disabled) is also recorded as sso_login_failed in the security log.
-func rejectBearer(w http.ResponseWriter, r *http.Request, cfgDB *configdb.Store, err error) {
+func rejectBearer(w http.ResponseWriter, r *http.Request, run Runner, err error) {
 	log.Printf("sso: bearer token rejected: %v", err)
 
 	if !isTokenExpired(err) {
-		logSecurityEvent(r, cfgDB, "sso_login_failed", "", err.Error())
+		run.LogSecurityEvent(r.Context(), actorOf(r), "sso_login_failed", err.Error())
 	}
 
 	writeJSON(w, http.StatusUnauthorized, errorJSON("invalid or expired token"))
@@ -160,7 +159,7 @@ func meAPIHandler() http.HandlerFunc {
 // completing the provider's login, to record sso_login. It returns the same
 // body as GET /api/me so the callback page can load the account in the
 // same round trip.
-func ssoLoginAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
+func ssoLoginAPIHandler(run Runner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, ok := currentUser(r.Context())
 		if !ok {
@@ -168,7 +167,7 @@ func ssoLoginAPIHandler(cfgDB *configdb.Store) http.HandlerFunc {
 			return
 		}
 
-		logSecurityEvent(r, cfgDB, "sso_login", user.Username, fmt.Sprintf("isSuperuser=%v; permissions=%s",
+		run.LogSecurityEvent(r.Context(), actorOf(r), "sso_login", fmt.Sprintf("isSuperuser=%v; permissions=%s",
 			user.IsSuperuser, strings.Join(grantedPermissions(user.Permissions), ",")))
 
 		writeMe(w, user)
@@ -179,4 +178,33 @@ func writeMe(w http.ResponseWriter, user *principal) {
 	writeJSON(w, http.StatusOK, meResponse{
 		Username: user.Username, IsSuperuser: user.IsSuperuser, Permissions: user.Permissions,
 	})
+}
+
+// permissionFields lists a config.SSOPermissions' boolean fields alongside
+// the label used to describe each in a security_log detail string (see
+// grantedPermissions).
+var permissionFields = []struct {
+	label string
+	get   func(config.SSOPermissions) bool
+}{
+	{"viewStatus", func(p config.SSOPermissions) bool { return p.ViewStatus }},
+	{"triggerSync", func(p config.SSOPermissions) bool { return p.TriggerSync }},
+	{"viewConfig", func(p config.SSOPermissions) bool { return p.ViewConfig }},
+	{"editConfigApi", func(p config.SSOPermissions) bool { return p.EditConfigAPI }},
+	{"editConfigDatabase", func(p config.SSOPermissions) bool { return p.EditConfigDatabase }},
+	{"editConfigMaps", func(p config.SSOPermissions) bool { return p.EditConfigMaps }},
+}
+
+// grantedPermissions lists the permissions set to true in perms, for
+// recording what a login's groups granted (see ssoLoginAPIHandler).
+func grantedPermissions(perms config.SSOPermissions) []string {
+	var granted []string
+
+	for _, f := range permissionFields {
+		if f.get(perms) {
+			granted = append(granted, f.label)
+		}
+	}
+
+	return granted
 }

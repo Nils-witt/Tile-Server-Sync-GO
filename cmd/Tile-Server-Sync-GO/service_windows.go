@@ -2,7 +2,7 @@
 
 // Windows service integration. Tile-Server-Sync-GO can install itself as a
 // Windows service (`-service install`) so it runs unattended in the
-// background under the interval loop (see main.go's run and internal/syncer's RunLoop), instead
+// background under the interval loop (see main.go's run and internal/runner's Runner.Run), instead
 // of requiring a foreground console session.
 package main
 

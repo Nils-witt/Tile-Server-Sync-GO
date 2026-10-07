@@ -1,6 +1,7 @@
 // Package webserver exposes a JSON API (status, config, maps,
 // security log, auth) consumed by the frontend package's embedded React SPA
-// (see spa.go), backed by an internal/status.Recorder.
+// (see spa.go). It holds no application state of its own: every read and
+// every change goes through the Runner (internal/runner).
 package webserver
 
 import (
@@ -9,33 +10,44 @@ import (
 	"time"
 
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
-	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/runner"
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/status"
 )
 
-// Engine is what the web server needs from the sync engine (implemented by
-// internal/syncer's *Engine): applying a saved config live, triggering a
-// single map's sync, and the per-map cleanup/overlay side effects of map
-// CRUD. Declared here, at the consumer, so this package doesn't depend on
-// internal/syncer.
-type Engine interface {
-	Reload(ctx context.Context) error
+// Runner is everything the web server needs from the application
+// (implemented by *runner.Runner): reading the status, config and security
+// log, and asking for config/map changes and syncs. Declared here, at the
+// consumer, so the API surface the frontend can reach is visible in one
+// place.
+type Runner interface {
+	Status() status.Snapshot
+	Config() config.Config
+	SaveAPI(ctx context.Context, actor runner.Actor, api config.API) (config.Config, runner.ChangeResult, error)
+	SaveDatabase(
+		ctx context.Context, actor runner.Actor, db config.Database,
+	) (config.Config, runner.ChangeResult, error)
+
+	Maps() []config.MapTarget
+	CreateMap(
+		ctx context.Context, actor runner.Actor, m config.MapTarget,
+	) (config.MapTarget, runner.ChangeResult, error)
+	UpdateMap(
+		ctx context.Context, actor runner.Actor, id string, m config.MapTarget,
+	) (config.MapTarget, runner.ChangeResult, error)
+	DeleteMap(ctx context.Context, actor runner.Actor, id string) (runner.ChangeResult, error)
 	SyncMap(ctx context.Context, mapID string) (int, error)
-	DeleteMapObjects(ctx context.Context, mapID string) (int64, error)
-	CreateMapOverlays(ctx context.Context, m config.MapTarget) error
-	UpdateMapOverlays(ctx context.Context, before, after config.MapTarget) error
-	DeleteMapOverlays(ctx context.Context, m config.MapTarget) error
+
+	LogSecurityEvent(ctx context.Context, actor runner.Actor, eventType, detail string)
+	SecurityLog(ctx context.Context, limit int) ([]runner.SecurityLogEntry, error)
 }
 
 // Options configures New.
 type Options struct {
-	Addr     string
-	Recorder *status.Recorder
-	ConfigDB *configdb.Store
-	SSO      config.SSO
-	Version  string
-	Commit   string
-	Engine   Engine
+	Addr    string
+	SSO     config.SSO
+	Version string
+	Commit  string
+	Runner  Runner
 }
 
 // New builds an *http.Server serving the built React SPA (see spa.go) for
@@ -52,23 +64,20 @@ type Options struct {
 // 401/403. It does not start
 // listening; call ListenAndServe (typically in a goroutine).
 //
-// A successful config save also calls Engine.Reload itself, so the running process
-// picks up the change immediately without a separate action — see
-// finishConfigSave in config.go. The bootstrap-file-sourced webServer
+// Every change is handed to the Runner, which persists it and applies it
+// to the running process immediately. The bootstrap-file-sourced webServer
 // settings are deliberately not exposed or editable here, since applying a
 // changed webServer.address needs a process restart the server
 // itself can't safely trigger mid-request.
 func New(opts Options) *http.Server {
-	addr, rec, cfgDB, sso := opts.Addr, opts.Recorder, opts.ConfigDB, opts.SSO
-	version, commit, eng := opts.Version, opts.Commit, opts.Engine
-	reload := eng.Reload
+	run, sso := opts.Runner, opts.SSO
 
 	mux := http.NewServeMux()
-	auth := &authenticator{cfgDB: cfgDB, sso: sso, verifiers: newSSOVerifierCache()}
+	auth := &authenticator{runner: run, sso: sso, verifiers: newSSOVerifierCache()}
 
 	mux.HandleFunc("GET /api/me", requireUser(auth)(meAPIHandler()))
-	mux.HandleFunc("POST /api/sso/login", requireUser(auth)(ssoLoginAPIHandler(cfgDB)))
-	mux.HandleFunc("GET /api/version", versionAPIHandler(version, commit))
+	mux.HandleFunc("POST /api/sso/login", requireUser(auth)(ssoLoginAPIHandler(run)))
+	mux.HandleFunc("GET /api/version", versionAPIHandler(opts.Version, opts.Commit))
 
 	// Unauthenticated: the login page needs it before any
 	// credential exists, to decide whether (and how) to start the SPA's own
@@ -77,7 +86,7 @@ func New(opts Options) *http.Server {
 	// authenticates every API call with the provider's access token.
 	mux.HandleFunc("GET /api/sso/status", ssoStatusAPIHandler(sso))
 
-	mux.HandleFunc("GET /api/status", requirePermission(auth, permViewStatus)(statusAPIHandler(rec)))
+	mux.HandleFunc("GET /api/status", requirePermission(auth, permViewStatus)(statusAPIHandler(run)))
 
 	// Config: the api/database sections (the Maps tab is served by the
 	// /api/maps family below instead). Each section has its own GET
@@ -85,30 +94,28 @@ func New(opts Options) *http.Server {
 	// (edit_config_{api,database}) registered separately, so the
 	// permission each method requires is visible right here rather than
 	// buried in a per-handler method switch.
-	mux.HandleFunc("GET /api/config/api", requirePermission(auth, permViewConfig)(getAPISectionHandler(cfgDB)))
+	mux.HandleFunc("GET /api/config/api", requirePermission(auth, permViewConfig)(getAPISectionHandler(run)))
 	mux.HandleFunc("PUT /api/config/api",
-		requirePermission(auth, permEditConfigAPI)(saveAPISectionHandler(cfgDB, reload)))
+		requirePermission(auth, permEditConfigAPI)(saveAPISectionHandler(run)))
 	mux.HandleFunc("GET /api/config/database",
-		requirePermission(auth, permViewConfig)(getDatabaseSectionHandler(cfgDB)))
+		requirePermission(auth, permViewConfig)(getDatabaseSectionHandler(run)))
 	mux.HandleFunc("PUT /api/config/database",
-		requirePermission(auth, permEditConfigDatabase)(saveDatabaseSectionHandler(cfgDB, reload)))
+		requirePermission(auth, permEditConfigDatabase)(saveDatabaseSectionHandler(run)))
 
 	// Maps: a first-class CRUD resource (see maps.go), not a config section —
 	// each map is independently addressable/mutable, so adding or editing one
 	// map no longer requires resubmitting every other configured map.
-	mux.HandleFunc("GET /api/maps", requirePermission(auth, permViewConfig)(listMapsAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/maps", requirePermission(auth, permViewConfig)(listMapsAPIHandler(run)))
 	mux.HandleFunc("POST /api/maps",
-		requirePermission(auth, permEditConfigMaps)(createMapAPIHandler(cfgDB, reload, eng.CreateMapOverlays)))
+		requirePermission(auth, permEditConfigMaps)(createMapAPIHandler(run)))
 	mux.HandleFunc("PUT /api/maps/{id}",
-		requirePermission(auth, permEditConfigMaps)(updateMapAPIHandler(cfgDB, reload, eng.UpdateMapOverlays)))
+		requirePermission(auth, permEditConfigMaps)(updateMapAPIHandler(run)))
 	mux.HandleFunc("DELETE /api/maps/{id}",
-		requirePermission(auth, permEditConfigMaps)(
-			deleteMapAPIHandler(cfgDB, reload, eng.DeleteMapObjects, eng.DeleteMapOverlays),
-		))
+		requirePermission(auth, permEditConfigMaps)(deleteMapAPIHandler(run)))
 	mux.HandleFunc("POST /api/maps/{id}/sync",
-		requirePermission(auth, permTriggerSync)(syncMapAPIHandler(eng.SyncMap)))
+		requirePermission(auth, permTriggerSync)(syncMapAPIHandler(run)))
 
-	mux.HandleFunc("GET /api/security-log", requireSuperuser(auth)(securityLogAPIHandler(cfgDB)))
+	mux.HandleFunc("GET /api/security-log", requireSuperuser(auth)(securityLogAPIHandler(run)))
 
 	// The SPA shell: registered last (net/http's ServeMux resolves by
 	// pattern specificity regardless of registration order, but the ordering
@@ -129,7 +136,7 @@ func New(opts Options) *http.Server {
 	mux.HandleFunc("GET /", spaHandler(dist))
 
 	return &http.Server{
-		Addr:              addr,
+		Addr:              opts.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}

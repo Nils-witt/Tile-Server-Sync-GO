@@ -32,8 +32,8 @@ first (see the `frontend` bullet below for why a bare `go build`/`go vet` still 
 one); the hook doesn't build the frontend itself.
 
 There is no Go test suite for most packages (`go test ./...` reports "no test files" for
-everything except `internal/configdb` (GORM-backed store/migration tests), `internal/syncer`
-(`scheduleTick` table tests) and `internal/webserver` (SSO bearer helpers)). The root
+everything except `internal/configdb` (GORM-backed store/migration tests), `internal/runner`
+(`scheduleTick` table tests plus config/map lifecycle tests against a temp SQLite configdb) and `internal/webserver` (SSO bearer helpers)). The root
 `package.json`/`npm` setup exists only to drive Husky; it is not a Node project — the actual
 frontend lives in `frontend/` as its own npm project (`frontend/package.json`), see below. In
 `frontend/`, `npm run build` runs `tsc -b && vite build`; `npx oxlint` lints it (also warns-only in
@@ -42,14 +42,20 @@ CI, doesn't fail the build).
 ## Architecture
 
 The module path is `github.com/Nils-witt/Tile-Server-Sync-GO` (matches the repo URL). `cmd/` holds
-only entry-point code (flags, `-service` dispatch, log fan-out, wiring); the sync engine lives in
-`internal/syncer` (see below).
+only entry-point code (flags, `-service` dispatch, log fan-out, wiring). The application's single
+central coordinator is `runner.Runner` (`internal/runner`, see "The Runner" below): it owns the
+config (loading/saving `configdb`), applies it, schedules and runs syncs, and writes the security
+log. `internal/webserver` holds no state of its own — it only reads from the Runner or asks it
+to make a change, and never touches `configdb` directly.
 
 Config now comes from two places, wired together in `cmd/Tile-Server-Sync-GO/main.go`'s `run()`:
 
 ```
-config.LoadBootstrap()  →  configdb.Store  →  tileserve.Client  →  store.Store
- (YAML → Bootstrap)        (SQLite → Config)   (HTTP API client)   (MariaDB upsert)
+config.LoadBootstrap()  →  configdb.Store  →  runner.Runner  →  tileserve.Client + store.Store
+ (YAML → Bootstrap)        (SQLite → Config)   (owns config,     (HTTP API client) (MariaDB upsert)
+                                                schedules syncs)
+                                                     ↑
+                                              webserver (JSON API, reads/changes via Runner)
 ```
 
 `Bootstrap` (`webServer` + `configDb` + `oidc`) comes from the small YAML file at `-config`; every
@@ -59,7 +65,7 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
 
 - **`internal/config`** — defines `Config` (`API`, `Database`, `[]MapTarget`, `WebServer`) and its
   validation/defaulting (`Validate`, exported since callers assemble a `*Config` themselves — see
-  `configdb.Store.Load`/`syncer.Engine.Reload`). There is no YAML loader for `Config` itself (the
+  `configdb.Store.Load`/the Runner's `apply`). There is no YAML loader for `Config` itself (the
   old `Load`/`Parse` were removed): the web config editor reads/writes structured JSON only and the
   bootstrap file goes through the separate `LoadBootstrap`/`Bootstrap` type. `Bootstrap`
   (`bootstrap.go`) is the separate, minimal file-backed type — `LoadBootstrap` reads it, applies
@@ -73,10 +79,10 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   API). Each map's own optional `interval` (a Go duration string, parsed by
   `MapTarget.validateInterval` and read back via `MapTarget.SyncInterval()`) controls how often
   *that* map re-syncs — there is no longer a global interval; a map with no `interval` syncs once
-  and isn't automatically repeated (see `RunLoop` below). `disabled`, if true, opts a map out of
-  *automatic* syncing only — `scheduleTick` (see `RunLoop` below) never considers it due — while leaving its stored config untouched and
+  and isn't automatically repeated (see `Runner.Run` below). `disabled`, if true, opts a map out of
+  *automatic* syncing only — `scheduleTick` (see `Runner.Run` below) never considers it due — while leaving its stored config untouched and
   still letting it be synced on demand via its own "Sync" button/`POST /api/maps/{id}/sync`, which
-  passes its ID explicitly rather than relying on scheduling (see `Engine.SyncMap`).
+  passes its ID explicitly rather than relying on scheduling (see `Runner.SyncMap`).
   `Config.Maps` requiring at least one entry was dropped from `Validate` — an empty `maps` list is
   a valid (if idle) config now, not a validation error, so removing the last map (or none having
   been added yet on a fresh install) no longer blocks saving/applying the rest of the config.
@@ -193,38 +199,33 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   file; anything else — `/`, `/config/maps`, a hard-reload on any client-side route — falls back to
   `index.html` so `react-router` (running client-side) can render it.
 
+  Every handler is a thin translator between HTTP/JSON and a `Runner` method: `webserver.go`
+  declares a consumer-side `Runner` interface (implemented by `*runner.Runner`) listing exactly
+  what the API can do, passed in via `webserver.Options.Runner`. Handlers decode the request, build a
+  `runner.Actor` (`actorOf`: signed-in username + `RemoteAddr`, for the security log), call the
+  Runner, and map its `runner.ChangeResult`/errors onto the JSON response (`runner.ErrInvalid` →
+  400, `ErrMapNotFound` → 404, `ErrMapIDTaken` → 409).
+
   The API and Database tabs are each their own sub-resource (`internal/webserver/config.go`) —
-  `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database` — reading/writing a
-  `*configdb.Store`, secrets redacted on the way out (see `redactSecrets`); an empty/unconfigured
-  database is not an error, so the SPA's structured form always has something to render (blank on
-  a fresh install). There is no whole-config `GET /api/config` bundle any more. A `PUT` loads the
-  currently stored config once (capturing the stored API/database passwords, so a blank secret in the request
-  means "unchanged" — see `storedSecrets`), replaces just that one section, and saves — deliberately *not* gated on `Config.Validate()`
-  passing for the whole merged config (see `finishConfigSave`'s doc comment in `config.go`), since
-  that would make it impossible to ever save a single tab during initial setup (each tab alone is
-  always "incomplete"). Instead every save calls `reload` (see below) immediately afterward and
-  reports whether the *whole* config was valid enough to apply live via the response's
-  `applied`/`applyError` fields — the same mechanism already used for a valid-but-unreachable
-  API/database. `webServer.address` has no input in the config page at all since changing it isn't possible through this API and always needs
-  a process restart — see below.
+  `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database` — backed by `Runner.Config()`
+  (secrets already redacted by the Runner) and `Runner.SaveAPI`/`SaveDatabase`. An
+  empty/unconfigured database is not an error, so the SPA's structured form always has something
+  to render (blank on a fresh install). There is no whole-config `GET /api/config` bundle. A save
+  is deliberately *not* gated on `Config.Validate()` passing for the whole config (see the Runner
+  section), and reports whether the *whole* config could be applied live via the response's
+  `applied`/`applyError` fields. `webServer.address` has no input in the config page at all since
+  changing it always needs a process restart — see below.
 
   The Maps tab is not a config section at all but a first-class CRUD resource
   (`internal/webserver/maps.go`): `GET`/`POST /api/maps` (collection) and `PUT`/`DELETE
-  /api/maps/{id}` (one map — there's no single-map `GET`; the SPA only uses the list), each independently addressable/mutable — adding, editing, or removing
-  one map no longer means resubmitting every other configured map. `POST`/`PUT` validate the
-  candidate map against the *rest* of the currently stored maps via the exported
-  `config.Config.ValidateMaps()` (checking id/versions/interval/staticColumns, plus that no two
-  maps share an `id` — nothing enforced that before `id` became a REST resource key) before
-  persisting via `configdb.Store`'s per-map methods, then call `reload` the same way a config
-  section save does. The status page's per-map "Sync" button posts to `POST
-  /api/maps/{id}/sync` (`syncMapAPIHandler`, `id` from the native path value), wired to
-  `Engine.SyncMap` (a single-ID `runSyncMaps`), to run that one map's sync immediately rather than
-  waiting for its next `interval` tick — combined with `Engine.Reload`'s `wake` ping (see
-  below), a map added via `POST /api/maps` starts syncing almost immediately rather than waiting
-  out `RunLoop`'s current sleep.
+  /api/maps/{id}` (one map — there's no single-map `GET`; the SPA only uses the list), each
+  independently addressable/mutable, backed by `Runner.Maps`/`CreateMap`/`UpdateMap`/`DeleteMap`.
+  The status page's per-map "Sync" button posts to `POST /api/maps/{id}/sync`
+  (`syncMapAPIHandler`), wired to `Runner.SyncMap`, to run that one map's sync immediately rather
+  than waiting for its next `interval` tick.
 
   `GET /api/status` (`status_api.go`) is the status page's data source — a JSON version of
-  `status.Recorder.Snapshot()` (timestamps as RFC3339 strings), polled by the SPA every 10s to match
+  `Runner.Status()` (a `status.Recorder` snapshot; timestamps as RFC3339 strings), polled by the SPA every 10s to match
   the old server-rendered page's `<meta http-equiv="refresh" content="10">`. `GET /api/version`
   (also `status_api.go`, deliberately unauthenticated since the footer it feeds is shown on
   `/login` too) replaces the old build-time-spliced `{{FOOTER}}` template marker with a
@@ -253,11 +254,10 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   referencing this tool's map/version identity; `NAME`/`CACHE_LOKAL` come from the map's `Name`
   (`config.MapTarget.Name`, a human-readable label distinct from its `id` — required for a map to be
   synced into EDP, but not for the map itself: a map with `SyncOverlays` enabled and no `Name` is
-  skipped, logged, rather than failing the sync). This is wired into map create/update/delete
-  through the same `webserver.Engine` interface `DeleteMapObjects` already uses (see
-  `internal/syncer/engine.go`'s `CreateMapOverlays`/`UpdateMapOverlays`/`DeleteMapOverlays` and
-  `webserver/maps.go`'s handlers) — a failure here is reported back via each response's
-  `overlayError` field but never fails the request, since the map change itself already succeeded.
+  skipped, logged, rather than failing the sync). The Runner's `CreateMap`/`UpdateMap`/`DeleteMap`
+  call these (`internal/runner/maps.go`) — a failure here is reported back via
+  `ChangeResult.OverlayErr` (each response's `overlayError` field) but never fails the request,
+  since the map change itself already succeeded.
 
 ### Authentication & permissions
 
@@ -291,13 +291,15 @@ username (or attempted username, for a failed login), the request's `RemoteAddr`
 free-form detail string (e.g. `section=api`, `map "town-centre" created`).
 For every change event (a config save or a map create/update/delete),
 that detail also records what actually changed —
-built by the `diff*`/`changesDetail`/`grantedPermissions` helpers in
-`internal/webserver/audit_diff.go`, which compare the before/after `config.Config`/
+built by the Runner's `diff*`/`changesDetail` helpers in
+`internal/runner/audit_diff.go` (the change events are written by the Runner itself; only the SSO
+login events, whose detail uses `grantedPermissions` in `internal/webserver/auth.go`, come from the
+webserver), which compare the before/after `config.Config`/
 `config.MapTarget` field by field (e.g. `changed: baseUrl
 "a"->"b", table changed`) — never in plaintext for a secret field (`API.Password`,
 `Database.Password`), which are only ever reported as changed.
 Writing a log entry is
-best-effort — `internal/webserver/security_log.go`'s `logSecurityEvent` helper only logs a write
+best-effort — `Runner.LogSecurityEvent` (`internal/runner/securitylog.go`) only logs a write
 failure to stderr, never blocks or fails the action that triggered it. `GET /security-log`
 (superuser-only) renders it via `GET /api/security-log?limit=N` (default 200, capped
 at 1000, newest first) — there's no separate permission bit for it since the log can contain
@@ -366,74 +368,77 @@ username/permissions/superuser flag; `frontend/src/components/TopBar.tsx` is wha
 links the user can't use, purely a UX nicety, since every actual enforcement happens server-side
 per route.
 
-`cmd/Tile-Server-Sync-GO/main.go`'s `run(ctx, configPath)` orchestrates the whole flow and is the place to look first when
-tracing behavior end-to-end: load the bootstrap file → open `configdb` → attempt an initial
-`Reload` (see below) → hand off to `internal/syncer/sync.go`'s `syncAll(ctx, maps, client, db, rec)`
-for each map × version in `maps` (some subset of the configured maps — see `RunLoop` below): fetch, overwrite each object's
-`Version` with the configured version string (so an alias like `"current"` is what lands in the
-database, not whatever concrete version the API resolved it to), then upsert (and prune, if
-enabled), logging counts as it goes.
+### The Runner
 
-The client and database connection aren't held directly by `run`, though — they're wrapped in a
-`*syncer.Engine` (`internal/syncer/engine.go`), a mutex-guarded holder of the current `{cfg, client, db}` triple (which
-starts out all-nil — see "starting unconfigured" below), plus a second mutex (`syncMu`) dedicated
-to serializing syncs, and three fields fixed for the process's lifetime: `cfgDB` (the
-`*configdb.Store`) and `webServer` (the bootstrap-sourced `config.WebServer`, overlaid onto every
-loaded `Config` before it's validated or used), plus the `*status.Recorder` every sync reports to.
-The unexported `runSyncMaps(ctx, ids)` syncs just the maps whose ID is in
-`ids` and is what both `RunLoop`'s per-map scheduler (see below) and, via `Engine.SyncMap`, the
-status page's per-map "Sync" button (`POST /api/maps/{id}/sync`) call. It locks `syncMu`,
-read the current `{cfg, client, db}` via `Engine.Current()` — returning `ErrNotConfigured`
-instead of calling `syncAll` if `db` is still nil — and call `syncAll`; the `syncMu` lock is what
-stops a manual per-map sync from running concurrently with a scheduled tick against the same
-database, which could otherwise race on `pruneMissing` deleting rows the other's insert just
-wrote.
+`cmd/Tile-Server-Sync-GO/main.go`'s `run(ctx, configPath)` is only wiring: load the bootstrap file →
+open `configdb` → `runner.New` (loads the stored config into memory) → start the web server with
+the Runner → `Runner.Run` (blocks until the context is cancelled). Everything else happens in
+`internal/runner`:
 
-`Engine.Reload(ctx)` is what every successful config/map save calls (the engine is passed to
-`webserver.New` via `webserver.Options.Engine`, typed as the consumer-side `webserver.Engine`
-interface so `internal/webserver` never imports `internal/syncer` — see above, and called directly by
-`finishConfigSave` and `maps.go`'s create/update/delete handlers), and is also what `run` calls
-once at startup to do the initial configure: it
-loads via `e.cfgDB.Load`, overlays `e.webServer`, calls `Config.Validate`, and — only if that
-succeeds — builds a fresh client (re-logging in, unless a token is configured) and database
-connection (`newClient`/`openStore`),
-swapping them into the engine (closing the old database connection afterwards, nil-guarded for
-the first successful reload) only if all of that succeeds — so an invalid edit or an unreachable
-API/DB leaves the previous, still-working state (which may be the initial unconfigured state) in
-place. On a successful swap it also pings `e.wake` (a buffered `chan struct{}`, non-blocking send)
-so `RunLoop` (below) reacts immediately instead of finishing out whatever sleep it's already in.
-This is how config changes made through the web UI (new/removed maps, per-map intervals,
-credentials, DB settings) take effect without a process restart. `webServer.address` is
-the one exception: changing it still needs a restart, since the server a reload request arrives on
-can't safely restart itself mid-request — this is also why it lives in the bootstrap file rather
-than `configdb` at all: `configdb`-backed settings are exactly the ones `Reload` can apply live,
-and `webServer` structurally can't be.
+- `runner.go` — the `Runner` type and `apply`. It keeps **two views** of the config, both guarded
+  by `mu` (held only for pointer swaps/copies, never across I/O):
+  - `stored`: exactly what's in `configdb`, possibly incomplete/invalid (initial setup saves one
+    tab at a time). Loaded once by `New`, updated in memory after every successful write, so UI
+    reads (`Config()`, `Maps()`) never hit SQLite. `Config()` blanks `API.Password`/
+    `Database.Password` — stored secrets never leave the Runner, and a blank secret in a save means
+    "unchanged".
+  - active `{cfg, client, db}`: the validated config plus the tileserve client and MariaDB
+    connection built from it; all-nil until the first successful `apply`.
 
-**Starting unconfigured**: since there's no automatic migration of pre-SQLite `config.yaml`
-content, a fresh install's `configdb` is empty, and `run`'s initial `Reload` call fails validation
-(missing `api.baseUrl` etc.) — expected, not a bug. `run` logs the error and continues: the web server
-(which always runs — there's no option to disable it) starts regardless, `GET /config` renders an all-blank structured form (see the `internal/webserver`
-bullet above), and the process falls into `RunLoop` regardless of whether any configured map has a
-usable `interval` yet.
+  `apply(ctx)` copies `stored`, overlays the bootstrap `webServer`, runs `Config.Validate`, and —
+  only if that succeeds — builds a fresh client (re-logging in unless a token is configured) and
+  database connection (`newClient`/`openStore`), then swaps them in (closing the old connection
+  afterwards). Any failure leaves the previous active state in place and is returned — so an
+  invalid edit or an unreachable API/DB never takes down a working sync. On success it pings
+  `wake` (buffered, non-blocking) so `Run` reacts immediately. `webServer.address` is the one
+  setting that can't be applied live (the server a change request arrives on can't restart itself
+  mid-request), which is why it lives in the bootstrap file rather than `configdb`.
+- `config.go` — `Config`, `SaveAPI`/`SaveDatabase` (via `saveSection`): merge one section into
+  a copy of `stored`, `configdb.Save`, replace `stored`, log `config_saved` with the diff, then
+  `apply`. A save is deliberately **not** gated on the whole config validating — each tab alone
+  is always incomplete during initial setup — instead `apply`'s error comes back as
+  `ChangeResult.ApplyErr` (the same outcome as a valid-but-unreachable API/DB); the save is never
+  rolled back. `cloneConfig`/`cloneMap` deep-copy so handed-out values never alias `stored`.
+- `maps.go` — `Maps`/`CreateMap`/`UpdateMap`/`DeleteMap`: validate the candidate map list (stored
+  maps with the change merged in) with `config.Config.ValidateMaps()` (wrapped in `ErrInvalid`;
+  it also catches a duplicate `id`), persist via `configdb.Store`'s per-map methods, update
+  `stored`, keep `map_src_overlays` in sync, log `map_created`/`map_updated`/`map_deleted`, then
+  `apply`. `DeleteMap` also purges the map's synced `geo_objects` rows (`deleteMapObjects`), which
+  first strips the map from the *active* config too — if the following `apply` fails, the stale
+  active config would otherwise keep re-syncing the deleted map. Also `SyncMap`/`runSyncMaps`.
+- `securitylog.go` — `LogSecurityEvent` (best-effort; used internally for change events and by the
+  webserver for SSO login events) and `SecurityLog`.
+- `audit_diff.go` — the `diff*`/`changesDetail` helpers building each change event's detail.
+- `sync.go` — `syncAll(ctx, maps, client, db, rec)`: for each map × version, fetch, overwrite each
+  object's `Version` with the configured version string (so an alias like `"current"` is what lands
+  in the database), then upsert (and prune, if enabled), recording results in the
+  `status.Recorder`.
+- `schedule.go` — `Run` and the per-map scheduler (below).
 
-`Engine.RunLoop` (`internal/syncer/schedule.go`) no longer runs one global interval loop — since `Interval` now lives per-map
-(`config.MapTarget`), each map is scheduled independently. It tracks an in-memory
-`lastSync map[string]time.Time` (map ID → last sync start), rebuilt from scratch on every process
-start (nothing about scheduling state is persisted). Each tick: if the engine has no database yet (unconfigured), it
-just logs a wait message and falls back to `pollInterval` (5s), same as before; otherwise
-`scheduleTick` computes the set of currently-due map IDs from the latest `e.Current()` config — a map
-with no `lastSync` entry yet is always due once (covers both startup and a map added via a live
-reload), and after that a map with a positive `Interval` is due again once that much time has
-passed, while a map with no `Interval` is never due again automatically. Due maps (if any) are
-synced together via `e.runSyncMaps`, and `tick` folds their next-due times into how long to sleep: the shortest
-remaining time until any already-synced, positive-`Interval` map next comes due, or `pollInterval`
-if there's no such map (nothing configured, every map is one-shot, or nothing has synced yet). The
-sleep itself (`select { ... case <-time.After(wait): case <-e.wake: }`) is also woken early by
-`e.wake` (see `Engine.Reload` above) — without it, a map added via `POST /api/maps` while the
-loop was already sleeping out some other map's longer interval would sit unsynced until that
-unrelated timer happened to fire, rather than starting on the next tick as intended.
-This means the process never exits on its own (only on context cancellation): there is no "run
-once and exit" mode any more, even when every map is one-shot.
+Three mutexes, each with one job: `writeMu` serializes every change (save/map CRUD **and** its
+`apply`, plus `Run`'s initial apply) so read-modify-writes of `stored` and applies can't
+interleave; `mu` guards `stored`/active; `syncMu` serializes `runSyncMaps` and the per-map
+cleanup/overlay writes against each other, so a manual "Sync" can't run concurrently with a
+scheduled tick (two overlapping syncs could race on `pruneMissing` deleting rows the other just
+inserted). `runSyncMaps(ctx, ids)` re-reads the active state under `syncMu` and returns
+`ErrNotConfigured` if there's no database yet.
+
+**Starting unconfigured**: a fresh install's `configdb` is empty, so `Run`'s initial `apply` fails
+validation (missing `api.baseUrl` etc.) — expected, not a bug. `Run` logs it and continues: the web
+server is already running, `/config` renders an all-blank form, and the scheduler polls.
+
+`Runner.Run` (`internal/runner/schedule.go`) schedules each map independently by its own
+`Interval`. It tracks an in-memory `lastSync map[string]time.Time` (map ID → last sync start),
+rebuilt from scratch on every process start. Each tick: if there's no active database yet it logs
+a wait message and sleeps `pollInterval` (5s); otherwise `scheduleTick` computes the currently-due
+map IDs from the active config — a map with no `lastSync` entry is always due once (covers startup
+and a map added live), after that a map with a positive `Interval` is due again once that much
+time has passed, and a map with no `Interval` is never due again automatically. Due maps are
+synced together via `runSyncMaps`, and `tick` folds their next-due times into how long to sleep
+(the shortest remaining time until any positive-`Interval` map is next due, else `pollInterval`).
+The sleep (`select { ... case <-time.After(wait): case <-r.wake: }`) is also woken early by `wake`,
+so a map added via `POST /api/maps` starts syncing right away rather than after some other map's
+longer interval. The process never exits on its own (only on context cancellation).
 
 Sync is idempotent: rows are upserted by `uuid`, so re-running (whether manually or via a map's own
 `interval`) updates existing rows rather than duplicating them.
@@ -451,7 +456,7 @@ an event log source. `cmd/Tile-Server-Sync-GO/service_other.go` (build-tagged `!
 that return an explanatory error, so `go vet`/`golangci-lint`/builds stay green on
 linux/darwin. `cmd/Tile-Server-Sync-GO/main.go` also calls `isWindowsService()` at startup (true only when actually built
 for and running under Windows) as a fallback to route into service mode even without `-service
-run` on the command line. Neither service file changes `run` or anything in `internal/syncer` — the service
+run` on the command line. Neither service file changes `run` or anything in `internal/runner` — the service
 wrapper just runs `run(ctx, configPath)` in a goroutine and cancels its context on a Stop/Shutdown
 SCM request.
 

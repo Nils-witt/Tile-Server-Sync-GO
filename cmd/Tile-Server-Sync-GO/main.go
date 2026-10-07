@@ -21,8 +21,8 @@ import (
 
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/configdb"
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/runner"
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/status"
-	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/syncer"
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/webserver"
 )
 
@@ -127,27 +127,24 @@ func run(ctx context.Context, configPath string) error {
 	}
 	defer func() { _ = cfgDB.Close() }()
 
-	eng := syncer.New(cfgDB, boot.WebServer, rec)
-	defer func() { _ = eng.Close() }()
-
-	if err := eng.Reload(ctx); err != nil {
-		log.Printf("starting with no valid configuration yet (%v); use /config to enter and save it", err)
+	app, err := runner.New(ctx, cfgDB, boot.WebServer, rec)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = app.Close() }()
 
 	stopWebServer := startWebServer(webserver.Options{
-		Addr:     boot.WebServer.Address,
-		Recorder: rec,
-		ConfigDB: cfgDB,
-		SSO:      boot.SSO,
-		Version:  version,
-		Commit:   commit,
-		Engine:   eng,
+		Addr:    boot.WebServer.Address,
+		SSO:     boot.SSO,
+		Version: version,
+		Commit:  commit,
+		Runner:  app,
 	})
 	defer stopWebServer()
 
 	// Config may start out empty/invalid and only become valid via a later
 	// live edit, so the process always stays alive and polling.
-	return eng.RunLoop(ctx)
+	return app.Run(ctx)
 }
 
 // fanoutWriter writes p to every writer in the slice, independently of
@@ -185,7 +182,7 @@ func openLogFile(configPath string) (*os.File, error) {
 // startWebServer starts the status/log/config web server in a goroutine and
 // returns a function that shuts it down; run defers a call to it, so the
 // server stops when run returns (including on ctx cancellation, since that's
-// what ends RunLoop). Listen errors (other than a clean shutdown) are
+// what ends Runner.Run). Listen errors (other than a clean shutdown) are
 // logged rather than returned, since a status page failing to start
 // shouldn't stop the sync itself.
 func startWebServer(opts webserver.Options) (stop func()) {

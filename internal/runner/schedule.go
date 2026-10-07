@@ -1,4 +1,4 @@
-package syncer
+package runner
 
 import (
 	"context"
@@ -8,62 +8,63 @@ import (
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 )
 
-// pollInterval is how often RunLoop checks back in while the engine isn't
+// pollInterval is how often Run checks back in while the runner isn't
 // configured yet (fresh install, empty SQLite-backed config), or is
 // configured but none of its maps have a positive Interval yet due, waiting
 // for a live edit via the web UI to make an automatic sync possible.
 const pollInterval = 5 * time.Second
 
-// RunLoop syncs each configured map on its own schedule — determined by that
-// map's own Interval (see config.MapTarget) — until ctx is cancelled (e.g. by
-// SIGINT/SIGTERM). Every map is synced once immediately the first time it's
-// seen (covering both startup and a map added later via a live config
-// reload); a map with a positive Interval then keeps re-syncing every
-// Interval after that, while a map with no Interval is not automatically
-// repeated. Errors from an individual sync are logged rather than aborting
-// the loop, so a transient failure (e.g. a network blip) doesn't take down an
-// otherwise long-running process.
+// Run applies the stored config (an invalid or incomplete one — e.g. on a
+// fresh install — is logged, not fatal: it can be fixed via /config while
+// the process keeps running) and then syncs each configured map on its own
+// schedule until ctx is cancelled (e.g. by SIGINT/SIGTERM).
 //
-// Each tick re-fetches e.Current() (rather than this loop capturing it
-// once), so a config reload triggered via the web UI — new/removed maps,
-// changed intervals, API credentials, database settings — takes effect
-// immediately: e.reload pings e.wake on success, which this loop also
-// selects on, so it doesn't wait out whatever wait duration was already in
-// flight (which could otherwise be as long as another map's interval).
-// e.runSyncMaps also serializes against a manual "sync now" request from the
-// web UI, so the two can't run concurrently. lastSync (map ID -> last sync
-// start time) is purely in-memory scheduling state for this run of the loop;
-// it doesn't survive a restart, so every map syncs once immediately whenever
-// the process starts.
-func (e *Engine) RunLoop(ctx context.Context) error {
+// Every map is synced once immediately the first time it's seen (covering
+// both startup and a map added later via a live change); a map with a
+// positive Interval then keeps re-syncing every Interval after that, while a
+// map with no Interval is not automatically repeated. Errors from an
+// individual sync are logged rather than aborting the loop, so a transient
+// failure doesn't take down an otherwise long-running process.
+//
+// Each tick re-reads the active config, so a change applied via the web UI
+// takes effect immediately: apply pings r.wake on success, which this loop
+// also selects on, so it doesn't wait out a sleep computed from the now
+// stale config (which could otherwise be as long as another map's
+// interval). lastSync (map ID -> last sync start time) is purely in-memory;
+// it doesn't survive a restart, so every map syncs once whenever the
+// process starts.
+func (r *Runner) Run(ctx context.Context) error {
+	r.writeMu.Lock()
+	err := r.apply(ctx)
+	r.writeMu.Unlock()
+
+	if err != nil {
+		log.Printf("starting with no valid configuration yet (%v); use /config to enter and save it", err)
+	}
+
 	lastSync := make(map[string]time.Time)
 
 	log.Print("running (press Ctrl+C to stop)")
 
 	for {
-		wait := e.tick(ctx, lastSync)
+		wait := r.tick(ctx, lastSync)
 
 		select {
 		case <-ctx.Done():
 			log.Print("shutting down")
 			return nil
 		case <-time.After(wait):
-		case <-e.wake:
-			// A config reload landed (e.g. a map added/edited via /config) —
-			// loop back around immediately instead of finishing out the wait
-			// computed from the config that's now stale, so a newly added
-			// map gets synced right away rather than after whatever sleep
-			// happened to already be in flight.
+		case <-r.wake:
 		}
 	}
 }
 
-// tick runs one pass of RunLoop's schedule: syncing whatever maps are
-// currently due (if the engine is configured yet) and returning how long
-// RunLoop should sleep before its next tick. lastSync is mutated in place
+// tick runs one pass of Run's schedule: syncing whatever maps are
+// currently due (if the runner is configured yet) and returning how long
+// Run should sleep before its next tick. lastSync is mutated in place
 // for every map synced this tick.
-func (e *Engine) tick(ctx context.Context, lastSync map[string]time.Time) time.Duration {
-	cfg, _, db := e.Current()
+func (r *Runner) tick(ctx context.Context, lastSync map[string]time.Time) time.Duration {
+	cfg, _, db := r.active()
 	if db == nil {
 		log.Print("waiting for configuration via /config")
 		return pollInterval
@@ -82,7 +83,7 @@ func (e *Engine) tick(ctx context.Context, lastSync map[string]time.Time) time.D
 
 	syncStart := now
 
-	if _, err := e.runSyncMaps(ctx, due); err != nil {
+	if _, err := r.runSyncMaps(ctx, due); err != nil {
 		log.Printf("sync error: %v", err)
 	}
 
@@ -125,7 +126,7 @@ func (e *Engine) tick(ctx context.Context, lastSync map[string]time.Time) time.D
 // map — nothing configured yet, every configured map is one-shot, disabled,
 // or already due, or none has synced yet).
 //
-// dueIntervals carries the positive Interval of every due map, so RunLoop
+// dueIntervals carries the positive Interval of every due map, so Run
 // can fold each just-synced map's fresh next-due time into otherWait after
 // syncing without a second pass over every configured map — mirroring what
 // the former separate dueMaps/nextWake functions computed in two full
