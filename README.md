@@ -26,7 +26,12 @@ api:
   # token: ""   # alternative to username/password
 
 database:
-  dsn: "user:password@tcp(127.0.0.1:3306)/tileserve?parseTime=true"
+  host: "127.0.0.1"
+  port: 3306                    # optional, defaults to 3306
+  user: "user"
+  password: "password"
+  name: "tileserve"
+  # params: "tls=true"          # optional extra driver params; parseTime=true is always set
   # table: "geo_objects"        # optional, defaults to "geo_objects"
   # columns:                    # optional, maps GeoObject fields to columns
   #   uuid: "uuid"

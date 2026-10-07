@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 
@@ -31,7 +32,13 @@ func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 		cfg.API.Username = scalar.APIUsername
 		cfg.API.Password = scalar.APIPassword
 		cfg.API.Token = scalar.APIToken
-		cfg.Database.DSN = scalar.DBDSN
+		cfg.Database.Host = scalar.DBHost
+		cfg.Database.Port = scalar.DBPort
+		cfg.Database.User = scalar.DBUser
+		cfg.Database.Password = scalar.DBPassword
+		cfg.Database.Name = scalar.DBName
+		cfg.Database.Params = scalar.DBParams
+		applyLegacyDSN(&cfg.Database, scalar.DBDSN)
 		cfg.Database.Table = scalar.DBTable
 		cfg.Database.PruneMissing = scalar.DBPruneMissing
 		cfg.Database.SyncOverlays = scalar.DBSyncOverlays
@@ -52,6 +59,26 @@ func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 	cfg.Maps = maps
 
 	return cfg, nil
+}
+
+// applyLegacyDSN fills db's connection components from a database last
+// saved before they were split out of a single DSN string. It only applies
+// while no host is stored yet; the next Save writes the components and
+// clears db_dsn. A DSN that can't be split (e.g. a unix socket) is logged
+// and left for the user to re-enter.
+func applyLegacyDSN(db *config.Database, dsn string) {
+	if dsn == "" || db.Host != "" {
+		return
+	}
+
+	parsed, err := config.DatabaseFromDSN(dsn)
+	if err != nil {
+		log.Printf("configdb: can't migrate stored database dsn, re-enter it on the config page: %v", err)
+		return
+	}
+
+	db.Host, db.Port, db.User, db.Password, db.Name, db.Params =
+		parsed.Host, parsed.Port, parsed.User, parsed.Password, parsed.Name, parsed.Params
 }
 
 func (s *Store) loadDatabaseColumns(ctx context.Context) (map[string]string, error) {

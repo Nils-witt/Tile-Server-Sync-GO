@@ -49,15 +49,10 @@ func diffAPI(before, after config.API) []string {
 	return changes
 }
 
-// diffDatabase compares two config.Database values field by field. DSN
-// typically embeds credentials, so like API.Password it's only reported as
-// changed, never in plaintext.
+// diffDatabase compares two config.Database values field by field. Like
+// API.Password, Password is only reported as changed, never in plaintext.
 func diffDatabase(before, after config.Database) []string {
-	var changes []string
-
-	if before.DSN != after.DSN {
-		changes = append(changes, "dsn changed")
-	}
+	changes := diffDatabaseConnection(before, after)
 
 	if before.Table != after.Table {
 		changes = append(changes, fmt.Sprintf("table %q->%q", before.Table, after.Table))
@@ -134,4 +129,32 @@ func grantedPermissions(perms config.SSOPermissions) []string {
 	}
 
 	return granted
+}
+
+// diffDatabaseConnection compares the connection components of two
+// config.Database values (split out of diffDatabase to keep its cyclomatic
+// complexity down).
+func diffDatabaseConnection(before, after config.Database) []string {
+	var changes []string
+
+	for _, f := range []struct{ name, before, after string }{
+		{"host", before.Host, after.Host},
+		{"user", before.User, after.User},
+		{"name", before.Name, after.Name},
+		{"params", before.Params, after.Params},
+	} {
+		if f.before != f.after {
+			changes = append(changes, fmt.Sprintf("%s %q->%q", f.name, f.before, f.after))
+		}
+	}
+
+	if before.Port != after.Port {
+		changes = append(changes, fmt.Sprintf("port %d->%d", before.Port, after.Port))
+	}
+
+	if before.Password != after.Password {
+		changes = append(changes, "password changed")
+	}
+
+	return changes
 }

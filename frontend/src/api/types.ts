@@ -26,7 +26,15 @@ export interface ApiSection {
 }
 
 export interface DatabaseSection {
-  dsn: string
+  host: string
+  /** 0 means the default, 3306. */
+  port: number
+  user: string
+  password: string
+  /** Database (schema) name. */
+  name: string
+  /** Extra driver params in URL query form, e.g. "tls=true"; parseTime=true is always set. */
+  params: string
   table: string
   pruneMissing: boolean
   syncOverlays: boolean

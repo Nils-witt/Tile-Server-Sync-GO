@@ -80,7 +80,12 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `Config.Maps` requiring at least one entry was dropped from `Validate` — an empty `maps` list is
   a valid (if idle) config now, not a validation error, so removing the last map (or none having
   been added yet on a fresh install) no longer blocks saving/applying the rest of the config.
-  Validation requires either `api.token` or both `api.username`/`api.password`.
+  Validation requires either `api.token` or both `api.username`/`api.password`. The MariaDB
+  connection is stored as separate components (`database.host`/`port`/`user`/`password`/`name`/
+  `params`, each its own field in the `/config/database` form); `Database.DSN()` (`dsn.go`)
+  assembles the driver DSN from them, always forcing `parseTime=true`. A `configdb` saved before
+  the split still has only the legacy `db_dsn` column filled — `Load` splits it via
+  `config.DatabaseFromDSN` (TCP only) until the next `Save` writes the components and clears it.
 - **`internal/configdb`** — the new SQLite-backed store for everything in `Config` except
   `WebServer`, as a relational schema (not a serialized blob): a singleton `config_scalar` row for
   `api`/`database`'s scalar fields, plus `database_columns`, `maps` (which also holds each map's
@@ -193,7 +198,7 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `*configdb.Store`, secrets redacted on the way out (see `redactSecrets`); an empty/unconfigured
   database is not an error, so the SPA's structured form always has something to render (blank on
   a fresh install). There is no whole-config `GET /api/config` bundle any more. A `PUT` loads the
-  currently stored config once (capturing the stored password/DSN, so a blank secret in the request
+  currently stored config once (capturing the stored API/database passwords, so a blank secret in the request
   means "unchanged" — see `storedSecrets`), replaces just that one section, and saves — deliberately *not* gated on `Config.Validate()`
   passing for the whole merged config (see `finishConfigSave`'s doc comment in `config.go`), since
   that would make it impossible to ever save a single tab during initial setup (each tab alone is
@@ -291,7 +296,7 @@ built by the `diff*`/`changesDetail`/`grantedPermissions` helpers in
 `internal/webserver/audit_diff.go`, which compare the before/after `config.Config`/
 `config.MapTarget` field by field (e.g. `changed: baseUrl
 "a"->"b", table changed`) — never in plaintext for a secret field (`API.Password`,
-`Database.DSN`), which are only ever reported as changed.
+`Database.Password`), which are only ever reported as changed.
 Writing a log entry is
 best-effort — `internal/webserver/security_log.go`'s `logSecurityEvent` helper only logs a write
 failure to stderr, never blocks or fails the action that triggered it. `GET /security-log`

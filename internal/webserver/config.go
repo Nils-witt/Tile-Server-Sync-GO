@@ -14,8 +14,7 @@ import (
 // returns. Cfg is the saved config — always set on success, even when
 // it's all zero values (e.g. a brand new install with nothing saved yet), so
 // the structured editor always has something to render. API.Password and
-// Database.DSN (which typically embeds the MariaDB credentials) are
-// redacted (never sent back to the browser once saved — see redactSecrets)
+// Database.Password are redacted (never sent back to the browser once saved — see redactSecrets)
 // so stored secrets never round-trip into the config page's form fields.
 // Error/no Cfg only happens on a genuine load failure (a database problem),
 // not on an unconfigured-but-loadable state. Applied reports whether a save
@@ -170,7 +169,7 @@ func saveConfigSection(
 		return
 	}
 
-	stored := storedSecrets{apiPassword: cfg.API.Password, databaseDSN: cfg.Database.DSN}
+	stored := storedSecrets{apiPassword: cfg.API.Password, databasePassword: cfg.Database.Password}
 	changes := merge(cfg)
 	finishConfigSave(w, r, cfgDB, reload, section, changes, cfg, stored)
 }
@@ -180,7 +179,7 @@ func saveConfigSection(
 // save, and apply the change live via reload.
 //
 // Deliberately not gated on cfg.Validate(): Config.Validate requires the
-// *whole* config to be complete (api.baseUrl, api credentials, database.dsn —
+// *whole* config to be complete (api.baseUrl, api credentials, database host/user/name —
 // see internal/config's Validate; maps may be empty), which a single section
 // save can never satisfy on its own during initial setup — saving just the
 // API tab would always fail because Database isn't filled in yet, and vice
@@ -218,26 +217,24 @@ func finishConfigSave(
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// redactSecrets clears cfg.API.Password and cfg.Database.DSN in place before
-// a *config.Config is sent to the browser, so stored secrets are never
+// redactSecrets clears cfg.API.Password and cfg.Database.Password in place
+// before a *config.Config is sent to the browser, so stored secrets are never
 // echoed back into the config page — see configGetResponse and
-// storedSecrets. DSN is included
-// because it typically embeds the MariaDB username/password (e.g.
-// "user:pass@tcp(...)"), not just a host/database name.
+// storedSecrets.
 func redactSecrets(cfg *config.Config) {
 	cfg.API.Password = ""
-	cfg.Database.DSN = ""
+	cfg.Database.Password = ""
 }
 
-// storedSecrets holds the API password and database DSN as stored before a
+// storedSecrets holds the API and database passwords as stored before a
 // section save. The config page never shows the real values back to the
 // browser (see redactSecrets), so a blank field in a save request means
 // "unchanged", not "clear it". A brand new/unconfigured install has no stored
 // values to fall back to, which is fine: the field just stays empty, exactly
 // as if the user had typed nothing.
 type storedSecrets struct {
-	apiPassword string
-	databaseDSN string
+	apiPassword      string
+	databasePassword string
 }
 
 // fill restores each secret cfg left blank from s.
@@ -246,8 +243,8 @@ func (s storedSecrets) fill(cfg *config.Config) {
 		cfg.API.Password = s.apiPassword
 	}
 
-	if cfg.Database.DSN == "" {
-		cfg.Database.DSN = s.databaseDSN
+	if cfg.Database.Password == "" {
+		cfg.Database.Password = s.databasePassword
 	}
 }
 

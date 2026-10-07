@@ -12,12 +12,20 @@ import (
 // scalar fields (API/Database). It has no exported use outside this
 // package — Store.Load/Save translate to/from config.Config instead.
 type configScalar struct {
-	ID             int64  `gorm:"column:id;primaryKey;autoIncrement:false;check:cfg_scalar_singleton,id = 1"`
-	APIBaseURL     string `gorm:"column:api_base_url;not null;default:''"`
-	APIUsername    string `gorm:"column:api_username;not null;default:''"`
-	APIPassword    string `gorm:"column:api_password;not null;default:''"`
-	APIToken       string `gorm:"column:api_token;not null;default:''"`
+	ID          int64  `gorm:"column:id;primaryKey;autoIncrement:false;check:cfg_scalar_singleton,id = 1"`
+	APIBaseURL  string `gorm:"column:api_base_url;not null;default:''"`
+	APIUsername string `gorm:"column:api_username;not null;default:''"`
+	APIPassword string `gorm:"column:api_password;not null;default:''"`
+	APIToken    string `gorm:"column:api_token;not null;default:''"`
+	// DBDSN is the pre-split connection string, only read to migrate an
+	// older database (see Load); Save always clears it.
 	DBDSN          string `gorm:"column:db_dsn;not null;default:''"`
+	DBHost         string `gorm:"column:db_host;not null;default:''"`
+	DBPort         int    `gorm:"column:db_port;not null;default:0"`
+	DBUser         string `gorm:"column:db_user;not null;default:''"`
+	DBPassword     string `gorm:"column:db_password;not null;default:''"`
+	DBName         string `gorm:"column:db_name;not null;default:''"`
+	DBParams       string `gorm:"column:db_params;not null;default:''"`
 	DBTable        string `gorm:"column:db_table;not null;default:''"`
 	DBPruneMissing bool   `gorm:"column:db_prune_missing;not null;default:false"`
 	DBSyncOverlays bool   `gorm:"column:db_sync_overlays;not null;default:false"`

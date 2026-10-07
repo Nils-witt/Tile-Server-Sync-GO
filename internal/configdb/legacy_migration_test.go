@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Nils-witt/Tile-Server-Sync-GO/internal/config"
 )
 
 // legacySchema mirrors the pre-GORM raw-SQL schema (schema.go/users.go/
@@ -134,7 +136,7 @@ func seedLegacyDatabase(ctx context.Context, t *testing.T, dbPath string) (mapRo
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
 
 	_, err = raw.ExecContext(ctx, `INSERT INTO config_scalar (id, api_base_url, api_token, db_dsn, db_table, db_prune_missing)
-		VALUES (1, 'https://legacy.example', 'tok123', 'user:pass@/db', 'geo_objects', 1)`)
+		VALUES (1, 'https://legacy.example', 'tok123', 'user:pass@tcp(db.example:3307)/db?parseTime=true&tls=true', 'geo_objects', 1)`)
 	if err != nil {
 		t.Fatalf("insert config_scalar: %v", err)
 	}
@@ -184,8 +186,22 @@ func assertLegacyConfigIntact(ctx context.Context, t *testing.T, s *Store) {
 		t.Errorf("legacy config_scalar lost: %+v", cfg)
 	}
 
+	assertDatabaseConnection(t, cfg.Database, config.Database{
+		Host: "db.example", Port: 3307, User: "user", Password: "pass", Name: "db", Params: "tls=true",
+	})
+
 	if len(cfg.Maps) != 1 || cfg.Maps[0].ID != "legacy-map" || cfg.Maps[0].Interval != "10m" || len(cfg.Maps[0].Versions) != 1 {
 		t.Errorf("legacy map lost: %+v", cfg.Maps)
+	}
+}
+
+// assertDatabaseConnection checks got's connection components against want's.
+func assertDatabaseConnection(t *testing.T, got, want config.Database) {
+	t.Helper()
+
+	if got.Host != want.Host || got.Port != want.Port || got.User != want.User ||
+		got.Password != want.Password || got.Name != want.Name || got.Params != want.Params {
+		t.Errorf("database connection = %+v, want %+v", got, want)
 	}
 }
 

@@ -40,15 +40,14 @@ type Store struct {
 	syncOverlays bool
 }
 
-// Open connects to MariaDB using dbCfg.DSN (e.g.
-// "user:pass@tcp(127.0.0.1:3306)/dbname?parseTime=true"; parseTime=true is
-// required so DATETIME columns scan into time.Time) and configures the
+// Open connects to MariaDB using dbCfg.DSN() (which always sets
+// parseTime=true, required so DATETIME columns scan into time.Time) and configures the
 // target table/columns geo objects are synced to. dbCfg must already have
 // passed config.Load's validation, which fills in Table/Columns defaults.
 // staticColumns is the full set of extra static-value column names across
 // all configured maps (see config.Config.StaticColumnNames).
 func Open(ctx context.Context, dbCfg config.Database, staticColumns []string) (*Store, error) {
-	db, err := sql.Open("mysql", dbCfg.DSN)
+	db, err := sql.Open("mysql", dbCfg.DSN())
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

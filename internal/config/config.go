@@ -113,11 +113,20 @@ type API struct {
 	Token string `yaml:"token" json:"token"`
 }
 
-// Database holds the MariaDB connection string (Go MySQL driver DSN, e.g.
-// "user:pass@tcp(127.0.0.1:3306)/dbname?parseTime=true") plus where and how
-// synced geo objects are written.
+// Database holds the MariaDB connection details — stored and edited as
+// separate components, assembled into a Go MySQL driver DSN by DSN() (see
+// dsn.go) — plus where and how synced geo objects are written.
 type Database struct {
-	DSN string `yaml:"dsn" json:"dsn"`
+	Host string `yaml:"host" json:"host"`
+	// Port defaults to 3306 when 0.
+	Port     int    `yaml:"port"     json:"port"`
+	User     string `yaml:"user"     json:"user"`
+	Password string `yaml:"password" json:"password"`
+	// Name is the database (schema) name.
+	Name string `yaml:"name" json:"name"`
+	// Params are extra driver parameters in URL query form (e.g.
+	// "tls=true&timeout=10s"); parseTime=true is always set by DSN().
+	Params string `yaml:"params" json:"params"`
 	// Table is the target table name. Defaults to "geo_objects".
 	Table string `yaml:"table" json:"table"`
 	// Columns maps GeoObject field keys (see FieldUUID etc.) and
@@ -205,8 +214,8 @@ func (c *Config) Validate() error {
 		return errors.New("either api.token or both api.username and api.password are required")
 	}
 
-	if c.Database.DSN == "" {
-		return errors.New("database.dsn is required")
+	if err := c.Database.validateConnection(); err != nil {
+		return err
 	}
 
 	if err := c.Database.validate(); err != nil {
@@ -224,7 +233,7 @@ func (c *Config) Validate() error {
 // database.columns target, and that no two entries share an id — split out
 // from Validate to keep its cyclomatic complexity down, and exported so
 // callers that validate just a candidate maps list (e.g. the webserver's
-// per-map create/update handlers, which don't have api/database.dsn filled in
+// per-map create/update handlers, which don't have api/database connection details filled in
 // to satisfy the rest of Validate) can call it directly against
 // c.Maps/c.Database.Columns alone.
 func (c *Config) ValidateMaps() error {

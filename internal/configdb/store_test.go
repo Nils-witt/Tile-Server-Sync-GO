@@ -113,7 +113,10 @@ func TestSaveLoadConfigRoundtrip(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.API.BaseURL = "https://example.com"
 	cfg.API.Token = "tok"
-	cfg.Database.DSN = "user:pass@/db"
+	cfg.Database.Host = "db.example"
+	cfg.Database.User = "user"
+	cfg.Database.Password = "pass"
+	cfg.Database.Name = "db"
 	cfg.Database.Table = "geo_objects"
 	cfg.Database.PruneMissing = true
 	cfg.Database.Columns = map[string]string{"uuid": "uuid"}
@@ -127,6 +130,8 @@ func TestSaveLoadConfigRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
+
+	assertDatabaseConnection(t, loaded.Database, cfg.Database)
 
 	if loaded.API.BaseURL != "https://example.com" || !loaded.Database.PruneMissing ||
 		len(loaded.Maps) != 1 || loaded.Maps[0].ID != "m2" {

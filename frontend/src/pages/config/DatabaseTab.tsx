@@ -13,7 +13,9 @@ const COLUMN_FIELDS: [string, string][] = [
   ['createdBy', 'Created by'], ['updatedBy', 'Updated by'], ['syncedAt', 'Synced at (bookkeeping)'],
 ]
 
-const empty: DatabaseSection = { dsn: '', table: '', pruneMissing: false, syncOverlays: false, columns: {} }
+const empty: DatabaseSection = {
+  host: '', port: 0, user: '', password: '', name: '', params: '',
+  table: '', pruneMissing: false, syncOverlays: false, columns: {} }
 
 export function DatabaseTab() {
   const { me } = useAuth()
@@ -29,7 +31,7 @@ export function DatabaseTab() {
       // an unconfigured/empty map still serializes as JSON null, not {} —
       // default it back to {} so the column inputs below (form.columns[key])
       // don't throw on a fresh install.
-      .then((res) => setForm({ ...res.database, dsn: '', columns: res.database.columns || {} }))
+      .then((res) => setForm({ ...res.database, password: '', columns: res.database.columns || {} }))
       .catch((err) => setBanner({ ok: false, text: `Failed to load config: ${err instanceof ApiError ? err.message : err}` }))
   }, [])
 
@@ -41,13 +43,20 @@ export function DatabaseTab() {
     setSaving(true)
 
     try {
-      const res = await api.saveDatabaseSection({ ...form, dsn: form.dsn.trim(), table: form.table.trim() })
+      const res = await api.saveDatabaseSection({
+        ...form,
+        host: form.host.trim(),
+        user: form.user.trim(),
+        name: form.name.trim(),
+        params: form.params.trim(),
+        table: form.table.trim(),
+      })
       if (res.applied) {
         setBanner({ ok: true, text: 'Saved and applied to the running process.' })
       } else {
         setBanner({ ok: false, text: `Saved, but failed to apply to the running process: ${res.applyError}` })
       }
-      if (res.config) setForm({ ...res.config.database, dsn: '', columns: res.config.database.columns || {} })
+      if (res.config) setForm({ ...res.config.database, password: '', columns: res.config.database.columns || {} })
     } catch (err) {
       setBanner({ ok: false, text: `Not saved: ${err instanceof ApiError ? err.message : err}` })
     } finally {
@@ -61,14 +70,62 @@ export function DatabaseTab() {
       <p className="hint">Where synced geo objects are written.</p>
       <Banner state={banner} />
 
-      <label htmlFor="db-dsn">DSN</label>
+      <label htmlFor="db-host">Host</label>
       <input
         type="text"
-        id="db-dsn"
-        placeholder="unchanged — leave blank to keep the current DSN"
+        id="db-host"
+        placeholder="127.0.0.1"
         disabled={disabled}
-        value={form.dsn}
-        onChange={(e) => setForm({ ...form, dsn: e.target.value })}
+        value={form.host}
+        onChange={(e) => setForm({ ...form, host: e.target.value })}
+      />
+      <label htmlFor="db-port">Port</label>
+      <input
+        type="number"
+        id="db-port"
+        min={1}
+        max={65535}
+        placeholder="3306"
+        disabled={disabled}
+        value={form.port || ''}
+        onChange={(e) => setForm({ ...form, port: Number(e.target.value) || 0 })}
+      />
+      <label htmlFor="db-user">User</label>
+      <input
+        type="text"
+        id="db-user"
+        autoComplete="off"
+        disabled={disabled}
+        value={form.user}
+        onChange={(e) => setForm({ ...form, user: e.target.value })}
+      />
+      <label htmlFor="db-password">Password</label>
+      <input
+        type="password"
+        id="db-password"
+        autoComplete="new-password"
+        placeholder="unchanged — leave blank to keep the current password"
+        disabled={disabled}
+        value={form.password}
+        onChange={(e) => setForm({ ...form, password: e.target.value })}
+      />
+      <label htmlFor="db-name">Database name</label>
+      <input
+        type="text"
+        id="db-name"
+        placeholder="tileserve"
+        disabled={disabled}
+        value={form.name}
+        onChange={(e) => setForm({ ...form, name: e.target.value })}
+      />
+      <label htmlFor="db-params">Extra parameters (optional, parseTime=true is always set)</label>
+      <input
+        type="text"
+        id="db-params"
+        placeholder="tls=true&timeout=10s"
+        disabled={disabled}
+        value={form.params}
+        onChange={(e) => setForm({ ...form, params: e.target.value })}
       />
       <label htmlFor="db-table">Table</label>
       <input
