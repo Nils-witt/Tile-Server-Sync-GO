@@ -1,7 +1,9 @@
 import type {
+  ApiDeleteResponse,
+  ApiSaveResponse,
+  ApiTarget,
   ConfigGetResponse,
   DatabaseSection,
-  ApiSection,
   Me,
   MapDeleteResponse,
   MapSaveResponse,
@@ -72,12 +74,17 @@ export const api = {
   status: () => apiFetch<StatusSnapshot>('/api/status'),
   syncMap: (id: string) => postJSON<SyncResponse>(`/api/maps/${encodeURIComponent(id)}/sync`, {}),
 
-  getAPISection: () => apiFetch<{ api: ApiSection }>('/api/config/api'),
-  /** Tests, then saves (only if the test passed), then applies the API section. */
-  saveAPISection: (section: ApiSection) => putJSON<ConfigGetResponse>('/api/config/api', { api: section }),
-  /** Tests the given (unsaved) API settings; a blank password means the stored one. */
-  testAPISection: (section: ApiSection) =>
-    postJSON<SectionTestResponse>('/api/config/api/test', { api: section }),
+  listAPIs: () => apiFetch<ApiTarget[]>('/api/apis'),
+  /** Tests, then creates (only if the test passed), then applies an API. */
+  createAPI: (a: ApiTarget) => postJSON<ApiSaveResponse>('/api/apis', a),
+  /** Tests, then saves (only if the test passed), then applies an API; a blank password keeps the stored one. */
+  updateAPI: (id: string, a: ApiTarget) => putJSON<ApiSaveResponse>(`/api/apis/${encodeURIComponent(id)}`, a),
+  deleteAPI: (id: string) =>
+    apiFetch<ApiDeleteResponse>(`/api/apis/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Tests the given (unsaved) API settings; a blank password means the one stored for its id. */
+  testAPI: (a: ApiTarget) => postJSON<SectionTestResponse>('/api/apis/test', a),
+  /** The maps the given API offers, for one-click adding. */
+  listRemoteMaps: (apiId: string) => apiFetch<RemoteMap[]>(`/api/apis/${encodeURIComponent(apiId)}/remote-maps`),
   getDatabaseSection: () => apiFetch<{ database: DatabaseSection }>('/api/config/database'),
   /** Tests, then saves (only if the test passed), then applies the database section. */
   saveDatabaseSection: (section: DatabaseSection) =>
@@ -88,8 +95,6 @@ export const api = {
 
 
   listMaps: () => apiFetch<MapTarget[]>('/api/maps'),
-  /** The maps the configured tileserve-go API offers, for one-click adding. */
-  listRemoteMaps: () => apiFetch<RemoteMap[]>('/api/remote-maps'),
   createMap: (m: MapTarget) => postJSON<MapSaveResponse>('/api/maps', m),
   updateMap: (id: string, m: MapTarget) => putJSON<MapSaveResponse>(`/api/maps/${encodeURIComponent(id)}`, m),
   deleteMap: (id: string) =>

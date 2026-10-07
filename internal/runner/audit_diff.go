@@ -30,6 +30,10 @@ func changesDetail(changes []string) string {
 func diffAPI(before, after config.API) []string {
 	var changes []string
 
+	if before.Name != after.Name {
+		changes = append(changes, fmt.Sprintf("name %q->%q", before.Name, after.Name))
+	}
+
 	if before.BaseURL != after.BaseURL {
 		changes = append(changes, fmt.Sprintf("baseUrl %q->%q", before.BaseURL, after.BaseURL))
 	}
@@ -79,10 +83,14 @@ func diffDatabase(before, after config.Database) []string {
 }
 
 // diffMapFields compares two config.MapTarget values field by field
-// (name/versions/interval/disabled/staticColumns) — used by UpdateMap to
-// log what an update actually changed.
+// (apiId/name/versions/interval/disabled/staticColumns) — used by UpdateMap
+// to log what an update actually changed.
 func diffMapFields(old, updated config.MapTarget) []string {
 	var changes []string
+
+	if old.APIID != updated.APIID {
+		changes = append(changes, fmt.Sprintf("apiId %q->%q", old.APIID, updated.APIID))
+	}
 
 	if old.Name != updated.Name {
 		changes = append(changes, fmt.Sprintf("name %q->%q", old.Name, updated.Name))

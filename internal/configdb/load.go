@@ -28,10 +28,6 @@ func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 	case err != nil:
 		return nil, fmt.Errorf("load config: %w", err)
 	default:
-		cfg.API.BaseURL = scalar.APIBaseURL
-		cfg.API.Username = scalar.APIUsername
-		cfg.API.Password = scalar.APIPassword
-		cfg.API.Token = scalar.APIToken
 		cfg.Database.Host = scalar.DBHost
 		cfg.Database.Port = scalar.DBPort
 		cfg.Database.User = scalar.DBUser
@@ -49,6 +45,13 @@ func (s *Store) Load(ctx context.Context) (*config.Config, error) {
 		cfg.Database.PruneMissing = scalar.DBPruneMissing
 		cfg.Database.SyncOverlays = scalar.DBSyncOverlays
 	}
+
+	apis, err := s.loadAPIs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.APIs = apis
 
 	columns, err := s.loadDatabaseColumns(ctx)
 	if err != nil {
@@ -113,6 +116,7 @@ func (s *Store) loadDatabaseColumns(ctx context.Context) (map[string]string, err
 func (r mapRecord) toMapTarget() config.MapTarget {
 	target := config.MapTarget{
 		ID:       r.MapID,
+		APIID:    r.APIID,
 		Name:     r.Name,
 		Interval: r.Interval,
 		Disabled: r.Disabled,
@@ -141,7 +145,7 @@ func (r mapRecord) toMapTarget() config.MapTarget {
 // own tables.
 func mapRecordFromTarget(m config.MapTarget, sortOrder int) mapRecord {
 	record := mapRecord{
-		MapID: m.ID, Name: m.Name, SortOrder: sortOrder, Interval: m.Interval, Disabled: m.Disabled,
+		MapID: m.ID, APIID: m.APIID, Name: m.Name, SortOrder: sortOrder, Interval: m.Interval, Disabled: m.Disabled,
 	}
 
 	for i, version := range m.Versions {

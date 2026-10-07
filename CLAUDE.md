@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A CLI tool that fetches geo objects from one or more [tileserve-go](https://github.com/Nils-witt/Tileserve-GO)
-maps (at given versions) and upserts them into a MariaDB `geo_objects` table. It talks to the
+A CLI tool that fetches geo objects from maps (at given versions) on one or more
+[tileserve-go](https://github.com/Nils-witt/Tileserve-GO) instances ("APIs") and upserts them into a MariaDB `geo_objects` table. It talks to the
 API described in [`openapi.yaml`](https://github.com/Nils-witt/Tileserve-GO/blob/main/internal/handler/openapi.yaml):
 
-1. `POST /login` — obtain a JWT (unless a token is configured directly).
+1. `POST /login` — obtain a JWT per API (unless a token is configured directly).
 2. `GET /maps/{id}/version/{version}/geo-objects` — once per configured map/version pair.
 3. Upsert each `GeoObject` into `geo_objects` (schema created automatically if missing).
 
@@ -63,11 +63,11 @@ config.LoadBootstrap()  →  configdb.Store  →  runner.Runner  →  tileserve.
 ```
 
 `Bootstrap` (`webServer` + `configDb` + `oidc`) comes from the small YAML file at `-config`; every
-other field of `config.Config` (`api`, `database`, `maps`) lives in a SQLite database at
+other field of `config.Config` (`apis`, `database`, `maps`) lives in a SQLite database at
 `Bootstrap.ConfigDB` instead, edited through the `/config` web UI. `webServer` stays
 file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `oidc` (see "SSO" below).
 
-- **`internal/config`** — defines `Config` (`API`, `Database`, `[]MapTarget`, `WebServer`) and its
+- **`internal/config`** — defines `Config` (`[]API`, `Database`, `[]MapTarget`, `WebServer`) and its
   validation/defaulting (`Validate`, exported since callers assemble a `*Config` themselves — see
   `configdb.Store.Load`/the Runner's `apply`). There is no YAML loader for `Config` itself (the
   old `Load`/`Parse` were removed): the web config editor reads/writes structured JSON only and the
@@ -77,8 +77,11 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `WebServer.applyDefault`), defaults/validates `SSO` (`sso.go`: blank `scopes`/`buttonLabel` get
   defaults; `issuerUrl`/`clientId` are always required, failing startup otherwise — there is no
   `oidc.enabled` switch, since the web server always runs and SSO is its only login), and
-  resolves `ConfigDB` (default `"config.db"`) relative to the bootstrap file's own directory. `Config.Maps` is a list of `{id, versions[], interval,
-  staticColumns, disabled}` entries; a version string may be a real numeric version, the literal
+  resolves `ConfigDB` (default `"config.db"`) relative to the bootstrap file's own directory. `Config.APIs` is a list of tileserve-go instances, each `{id, name, baseUrl,
+  username, password, token}`; its `id` (letters/digits/`-`/`_`, max 64, since it appears in URL paths) is
+  fixed once created, and `Config.API(id)` looks one up. `Config.Maps` is a list of `{id, apiId, versions[], interval,
+  staticColumns, disabled}` entries — `apiId` names the API the map is fetched from and `ValidateMaps`
+  requires it to exist in `Config.APIs` (so a map-only candidate config must still carry the APIs); a version string may be a real numeric version, the literal
   `"current"`, or a user-defined alias (see `PUT /maps/{id}/aliases/{alias}` in the tileserve-go
   API). Each map's own optional `interval` (a Go duration string, parsed by
   `MapTarget.validateInterval` and read back via `MapTarget.SyncInterval()`) controls how often
@@ -90,7 +93,8 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `Config.Maps` requiring at least one entry was dropped from `Validate` — an empty `maps` list is
   a valid (if idle) config now, not a validation error, so removing the last map (or none having
   been added yet on a fresh install) no longer blocks saving/applying the rest of the config.
-  Validation requires either `api.token` or both `api.username`/`api.password`. The MariaDB
+  `ValidateAPIs` checks each API (`API.Validate`: a valid id, `baseUrl`, and either `token` or both
+  `username`/`password`) and that no two share an id; an empty `apis` list is valid, like an empty `maps`. The MariaDB
   connection is stored as separate components (`database.host`/`port`/`user`/`password`/`name`/
   `params`, each its own field in the `/config/database` form); `Database.DSN()` (`dsn.go`)
   assembles the driver DSN from them, always forcing `parseTime=true`. TLS has its own two
@@ -105,7 +109,7 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `config.DatabaseFromDSN` (TCP only) until the next `Save` writes the components and clears it.
 - **`internal/configdb`** — the new SQLite-backed store for everything in `Config` except
   `WebServer`, as a relational schema (not a serialized blob): a singleton `config_scalar` row for
-  `api`/`database`'s scalar fields, plus `database_columns`, `maps` (which also holds each map's
+  `database`'s scalar fields, plus `apis`, `database_columns`, `maps` (which also holds each map's
   own `interval` column), `map_versions`, and `map_static_columns` tables (ordered by a
   `sort_order` column, since `syncAll` iterates maps/versions in configured order). `Store.Load`
   assembles a `*config.Config`
@@ -142,7 +146,14 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   see `internal/configdb/legacy_migration_test.go` for a regression test that seeds a database
   using the old hand-written schema and asserts `Open` migrates it (including cascade deletes)
   without losing data. Unrelated to `internal/store` (MariaDB geo-object storage); no shared code.
-  Unlike `api`/`database`, (`internal/configdb/maps.go`) `maps` get real per-row CRUD methods
+  `config_scalar` still has `api_*` columns holding the single API of a database from before multiple
+  APIs were supported: `migrate`'s last step, `migrateLegacyAPI` (`schema.go`), moves it into `apis` as
+  id `"default"`, points every map with an empty `api_id` at it, and clears those columns (so it never
+  re-runs); nothing writes them any more. Maps refer to their API by its business id (`maps.api_id`),
+  not by foreign key — the Runner refuses to delete an API still in use. Like maps, APIs have per-row
+  CRUD (`internal/configdb/apis.go`: `ListAPIs`/`CreateAPI`/`UpdateAPI`/`DeleteAPI`, returning
+  `ErrAPINotFound`/`ErrAPIIDTaken`; `api_id` has a unique index).
+  Unlike `database`, (`internal/configdb/maps.go`) `maps` get real per-row CRUD methods
   instead of only going through the whole-graph `Load`/`Save` above: `ListMaps`/`GetMap`/
   `CreateMap`/`UpdateMap`/`DeleteMap` (returning `ErrMapNotFound`/`ErrMapIDTaken`) back the
   `/api/maps` REST family in
@@ -158,13 +169,16 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   under "Authentication & permissions" below.
 - **`internal/tileserve`** — minimal synchronous HTTP client for tileserve-go. `Login()`
   exchanges username/password for a bearer token; `SetToken()` bypasses login when a token is
-  already known. `GeoObjects(mapID, version)` fetches and JSON-decodes one map/version's objects
+  already known; `SetCredentials()` defers the login to the first request instead (what the Runner's
+  `apply` uses, so building clients never touches the network). `GeoObjects(mapID, version)` fetches and JSON-decodes one map/version's objects
   (`GeoObject` struct mirrors the API's schema exactly — field-for-field, including JSON tags).
   `Maps()` lists the maps visible to the account (`GET /maps`, decoded into the `RemoteMap` subset
-  of the API's `Map` schema). Both go through `getJSON`, which re-logs-in once on a 401.
+  of the API's `Map` schema). Both go through `getJSON`, which logs in first if there's no token yet
+  but credentials are set, and re-logs-in once on a 401.
 - **`frontend`** — the UI: a Vite + React + TypeScript SPA (client-routed with `react-router-dom`),
   entirely separate from the root `package.json`/Husky setup (its own `frontend/package.json`,
-  `node_modules`, lockfile). Routes: `/` (status), `/config/{api,database,maps}` (tabs, each its
+  `node_modules`, lockfile). Routes: `/` (status), `/config/{api,database,maps}` (tabs — the API tab lists every configured API as
+  its own card plus an "Add API" form, each its
   own route rather than the old hash-fragment tab switcher), `/security-log`, `/login`,
   `/login/sso/callback` — all in `frontend/src/pages`. `frontend/src/auth/AuthContext.tsx`
   fetches `GET /api/sso/status` (to set up the browser-side OIDC client, see "SSO" below) and then
@@ -219,21 +233,24 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   Runner, and map its `runner.ChangeResult`/errors onto the JSON response (`runner.ErrInvalid` →
   400, `ErrMapNotFound` → 404, `ErrMapIDTaken` → 409).
 
-  The API and Database tabs are each their own sub-resource (`internal/webserver/config.go`) —
-  `GET`/`PUT /api/config/api` and `GET`/`PUT /api/config/database` — backed by `Runner.Config()`
-  (secrets already redacted by the Runner) and `Runner.SaveAPI`/`SaveDatabase`. An
-  empty/unconfigured database is not an error, so the SPA's structured form always has something
-  to render (blank on a fresh install). There is no whole-config `GET /api/config` bundle. `POST
-  /api/config/api/test` (`edit_config_api`, `Runner.TestAPI`) and `POST /api/config/database/test`
-  (`edit_config_database`, `Runner.TestDatabase` → `store.Ping`) test a tab's *unsaved* settings
-  (blank password = stored one, 10s timeout) for its "Test connection" button: each section is
-  validated on its own (`config.API.Validate`/`config.Database.Validate`; invalid → 400) and then
-  checked live — an API login, or for a configured token just that the base URL answers HTTP (the
-  tileserve-go API has no token-check endpoint used here); a database ping, touching no table. A
-  failed check is a 200 with `ok: false`. Each attempt logs `api_tested`/`database_tested` to the
-  security log, since it may send the stored password to a newly entered host. Every `PUT` save
-  runs that same test **first** and only saves if it passes (invalid → 400, failed connection →
-  422, nothing persisted), then applies. A save is deliberately *not* gated on `Config.Validate()`
+  The Database tab is its own sub-resource (`internal/webserver/config.go`) — `GET`/`PUT
+  /api/config/database` — backed by `Runner.Config()` (secrets already redacted by the Runner) and
+  `Runner.SaveDatabase`. An empty/unconfigured database is not an error, so the SPA's structured form
+  always has something to render (blank on a fresh install). There is no whole-config `GET
+  /api/config` bundle. The API tab is a CRUD resource like maps (`internal/webserver/apis.go`):
+  `GET`/`POST /api/apis` and `PUT`/`DELETE /api/apis/{id}` (`view_config` / `edit_config_api`),
+  backed by `Runner.APIs`/`CreateAPI`/`UpdateAPI`/`DeleteAPI` (`ErrAPINotFound` → 404,
+  `ErrAPIIDTaken`/`ErrAPIInUse` → 409; deleting an API a map still uses is refused). `POST
+  /api/apis/test` (`edit_config_api`, `Runner.TestAPI`) and `POST /api/config/database/test`
+  (`edit_config_database`, `Runner.TestDatabase` → `store.Ping`) test *unsaved* settings (blank
+  password = the one stored for that API id / the stored database one, 10s timeout) for the "Test
+  connection" buttons: each is validated on its own (`config.API.Validate`/`config.Database.Validate`;
+  invalid → 400) and then checked live — an API login, or for a configured token just that the base
+  URL answers HTTP (the tileserve-go API has no token-check endpoint used here); a database ping,
+  touching no table. A failed check is a 200 with `ok: false`. Each attempt logs
+  `api_tested`/`database_tested` to the security log, since it may send the stored password to a
+  newly entered host. Every API create/update and database `PUT` runs that same test **first** and
+  only saves if it passes (invalid → 400, failed connection → 422, nothing persisted), then applies. A save is deliberately *not* gated on `Config.Validate()`
   passing for the whole config (see the Runner section), and reports whether the *whole* config
   could be applied live via the response's `applied`/`applyError` fields. `webServer.address` has no input in the config page at all since
   changing it always needs a process restart — see below.
@@ -247,13 +264,14 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   than waiting for its next `interval` tick.
 
   There is no manual "add map" form any more: maps are added from the tab's "Available maps"
-  list, fed by `GET /api/remote-maps` (`remoteMapsAPIHandler`, `edit_config_maps`), which calls
-  `Runner.RemoteMaps` — a `tileserve.Client.Maps` call made with the *stored* API section (not the
-  active client, so it works before the database is configured; incomplete API → `ErrInvalid` →
-  400, failed request → 502). Each entry carries `configured` (its `id` is already a map here).
-  One click `POST`s a map with `id` = the remote UUID, `name` = the remote name, `versions:
-  ["current"]`, `interval: "1h"` (`MapsTab.tsx`'s `newMapFrom`); everything stays editable on the
-  map's card afterwards (except `id`).
+  list (with an API selector), fed by `GET /api/apis/{id}/remote-maps` (`remoteMapsAPIHandler`,
+  `edit_config_maps`), which calls `Runner.RemoteMaps(apiID)` — a `tileserve.Client.Maps` call made
+  with that API's *stored* settings (not the active client, so it works before the database is
+  configured; unknown API → 404, invalid API → `ErrInvalid` → 400, failed request → 502). Each entry
+  carries `configured` (its `id` is already a map here). One click `POST`s a map with `id` = the
+  remote UUID, `apiId` = the selected API, `name` = the remote name, `versions: ["current"]`,
+  `interval: "1h"` (`MapsTab.tsx`'s `newMapFrom`); everything stays editable on the map's card
+  afterwards (except `id`; `apiId` is a dropdown there).
 
   `GET /api/status` (`status_api.go`) is the status page's data source — a JSON version of
   `Runner.Status()` (a `status.Recorder` snapshot; timestamps as RFC3339 strings), polled by the SPA every 10s to match
@@ -279,14 +297,15 @@ file/CLI-driven — see "why webServer isn't in SQLite" below — and so does `o
   `geo_objects`, its schema is never created here (`EnsureSchema` doesn't touch it) since its
   EDP-specific columns (`LIZENZ`, `KONFIG`, `OFFLINE_CACHE_*`, ...) are out of scope for this tool;
   a deployment enabling `SyncOverlays` is expected to already have the table. Each row's `SOURCE`
-  column (built from `API.BaseURL` plus the map's `id`/version, e.g.
+  column (built from the `BaseURL` of the map's API plus the map's `id`/version, e.g.
   `"<baseUrl>/maps/<id>/version/<version>/"`) doubles as the natural per-map/version key used to
   find an existing row to update or delete, since `map_src_overlays` has no column of its own
   referencing this tool's map/version identity; `NAME`/`CACHE_LOKAL` come from the map's `Name`
   (`config.MapTarget.Name`, a human-readable label distinct from its `id` — required for a map to be
   synced into EDP, but not for the map itself: a map with `SyncOverlays` enabled and no `Name` is
   skipped, logged, rather than failing the sync). The Runner's `CreateMap`/`UpdateMap`/`DeleteMap`
-  call these (`internal/runner/maps.go`) — a failure here is reported back via
+  call these (`internal/runner/maps.go`), as does `UpdateAPI` for every map of an API whose base URL
+  changed (`UpdateMapOverlays` takes a before and after base URL, so a moved map's old rows are deleted) — a failure here is reported back via
   `ChangeResult.OverlayErr` (each response's `overlayError` field) but never fails the request,
   since the map change itself already succeeded.
 
@@ -315,19 +334,20 @@ Every security-relevant action also appends a row to `configdb`'s append-only `s
 (`internal/configdb/securitylog.go`, `Store.LogSecurityEvent`/`Store.ListSecurityLog`) — SSO logins
 (success, with the permissions the groups granted, and failure — see "SSO" below for when those
 are recorded), every config section
-save (`config_saved`, `section=api|database`), and every map create/update/delete
-(`map_created`/`map_updated`/`map_deleted`, distinct event types since maps are their own resource
-— see the `internal/webserver` bullet above), each with a timestamp, event type, the acting
+save (`config_saved`, `section=database`), every API create/update/delete
+(`api_created`/`api_updated`/`api_deleted`), and every map create/update/delete
+(`map_created`/`map_updated`/`map_deleted`, distinct event types since APIs and maps are their own
+resources — see the `internal/webserver` bullet above), each with a timestamp, event type, the acting
 username (or attempted username, for a failed login), the request's `RemoteAddr`, and a short
 free-form detail string (e.g. `section=api`, `map "town-centre" created`).
-For every change event (a config save or a map create/update/delete),
+For every change event (a config save or an API/map create/update/delete),
 that detail also records what actually changed —
 built by the Runner's `diff*`/`changesDetail` helpers in
 `internal/runner/audit_diff.go` (the change events are written by the Runner itself; only the SSO
 login events, whose detail uses `grantedPermissions` in `internal/webserver/auth.go`, come from the
 webserver), which compare the before/after `config.Config`/
 `config.MapTarget` field by field (e.g. `changed: baseUrl
-"a"->"b", table changed`) — never in plaintext for a secret field (`API.Password`,
+"a"->"b", table changed`) — never in plaintext for a secret field (an API's `Password`/`Token`,
 `Database.Password`), which are only ever reported as changed.
 Writing a log entry is
 best-effort — `Runner.LogSecurityEvent` (`internal/runner/securitylog.go`) only logs a write
@@ -410,25 +430,30 @@ the Runner → `Runner.Run` (blocks until the context is cancelled). Everything 
   by `mu` (held only for pointer swaps/copies, never across I/O):
   - `stored`: exactly what's in `configdb`, possibly incomplete/invalid (initial setup saves one
     tab at a time). Loaded once by `New`, updated in memory after every successful write, so UI
-    reads (`Config()`, `Maps()`) never hit SQLite. `Config()` blanks `API.Password`/
-    `Database.Password` — stored secrets never leave the Runner, and a blank secret in a save means
-    "unchanged".
-  - active `{cfg, client, db}`: the validated config plus the tileserve client and MariaDB
-    connection built from it; all-nil until the first successful `apply`.
+    reads (`Config()`, `APIs()`, `Maps()`) never hit SQLite. `Config()`/`APIs()` blank every API's
+    `Password` and `Database.Password` — stored secrets never leave the Runner, and a blank secret in
+    a save means "unchanged".
+  - active `{cfg, clients, db}`: the validated config plus one tileserve client per API (keyed by API
+    id) and the MariaDB connection built from it; all-nil until the first successful `apply`.
 
   `apply(ctx)` copies `stored`, overlays the bootstrap `webServer`, runs `Config.Validate`, and —
-  only if that succeeds — builds a fresh client (re-logging in unless a token is configured) and
-  database connection (`newClient`/`openStore`), then swaps them in (closing the old connection
+  only if that succeeds — builds fresh clients (`lazyClient`: token set, or credentials set for a
+  login on first request — so one unreachable API never blocks applying, or syncing maps of the
+  others) and database connection (`openStore`), then swaps them in (closing the old connection
   afterwards). Any failure leaves the previous active state in place and is returned — so an
   invalid edit or an unreachable API/DB never takes down a working sync. On success it pings
   `wake` (buffered, non-blocking) so `Run` reacts immediately. `webServer.address` is the one
   setting that can't be applied live (the server a change request arrives on can't restart itself
   mid-request), which is why it lives in the bootstrap file rather than `configdb`.
-- `config.go` — `Config`, `TestAPI`/`TestDatabase`, `SaveAPI`/`SaveDatabase` (via
-  `saveSection`): merge one section into a copy of `stored`, **test** that section on its own
-  (`testAPI`/`testDatabase`, the same check as `TestAPI`/`TestDatabase`; a failure is returned
+- `config.go` — `Config`, `TestAPI`/`TestDatabase`, `SaveDatabase` (via
+  `saveSection`): merge the section into a copy of `stored`, **test** it on its own
+  (`testDatabase`, the same check as `TestDatabase`; a failure is returned
   wrapped in `ErrInvalid` or `ErrTestFailed` and nothing is saved), `configdb.Save`, replace
-  `stored`, log `config_saved` with the diff, then `apply`. The test runs under `writeMu`, so it
+  `stored`, log `config_saved` with the diff, then `apply`.
+- `apis.go` — `APIs`/`CreateAPI`/`UpdateAPI`/`DeleteAPI`: create/update **test** the API first
+  (`testAPI`) exactly like a section save, then persist via `configdb.Store`'s per-API methods, update
+  `stored`, log `api_created`/`api_updated`/`api_deleted`, then `apply`. `DeleteAPI` refuses with
+  `ErrAPIInUse` while a map uses the API. The test runs under `writeMu`, so it
   checks exactly what gets saved. A save is deliberately **not** gated on the whole config validating — each tab alone
   is always incomplete during initial setup — instead `apply`'s error comes back as
   `ChangeResult.ApplyErr` (the same outcome as a valid-but-unreachable API/DB); the save is never
@@ -443,7 +468,8 @@ the Runner → `Runner.Run` (blocks until the context is cancelled). Everything 
 - `securitylog.go` — `LogSecurityEvent` (best-effort; used internally for change events and by the
   webserver for SSO login events) and `SecurityLog`.
 - `audit_diff.go` — the `diff*`/`changesDetail` helpers building each change event's detail.
-- `sync.go` — `syncAll(ctx, maps, client, db, rec)`: for each map × version, fetch, overwrite each
+- `sync.go` — `syncAll(ctx, maps, clients, db, rec)`: for each map × version, fetch (with the
+  client of the map's `apiId`; a missing one fails just that map's pairs), overwrite each
   object's `Version` with the configured version string (so an alias like `"current"` is what lands
   in the database), then upsert (and prune, if enabled), recording results in the
   `status.Recorder`.

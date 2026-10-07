@@ -11,7 +11,7 @@ import (
 )
 
 // Save persists every field of cfg except WebServer, replacing the
-// database_columns and maps (with their versions/staticColumns) tables
+// apis, database_columns and maps (with their versions/staticColumns) tables
 // wholesale inside one transaction — a delete-then-reinsert rather than a
 // diff, matching the web UI's whole-form save semantics. Row ids churn on
 // every save; nothing outside this package references them. Save does not
@@ -20,10 +20,6 @@ func (s *Store) Save(ctx context.Context, cfg *config.Config) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		scalar := configScalar{
 			ID:              1,
-			APIBaseURL:      cfg.API.BaseURL,
-			APIUsername:     cfg.API.Username,
-			APIPassword:     cfg.API.Password,
-			APIToken:        cfg.API.Token,
 			DBHost:          cfg.Database.Host,
 			DBPort:          cfg.Database.Port,
 			DBUser:          cfg.Database.User,
@@ -44,6 +40,10 @@ func (s *Store) Save(ctx context.Context, cfg *config.Config) error {
 		}).Create(&scalar).Error
 		if err != nil {
 			return fmt.Errorf("save config: %w", err)
+		}
+
+		if err := saveAPIs(tx, cfg.APIs); err != nil {
+			return err
 		}
 
 		if err := saveDatabaseColumns(tx, cfg.Database.Columns); err != nil {
@@ -70,6 +70,21 @@ func saveDatabaseColumns(tx *gorm.DB, columns map[string]string) error {
 
 	if err := tx.Create(&rows).Error; err != nil {
 		return fmt.Errorf("save database columns: %w", err)
+	}
+
+	return nil
+}
+
+func saveAPIs(tx *gorm.DB, apis []config.API) error {
+	if err := tx.Exec("DELETE FROM apis").Error; err != nil {
+		return fmt.Errorf("clear apis: %w", err)
+	}
+
+	for i, a := range apis {
+		record := apiRecordFromAPI(a, i)
+		if err := tx.Create(&record).Error; err != nil {
+			return fmt.Errorf("save api %q: %w", a.ID, err)
+		}
 	}
 
 	return nil

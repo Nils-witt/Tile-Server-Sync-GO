@@ -28,8 +28,8 @@ import (
 //     the API tab has been saved yet). This is what the config UI shows and
 //     edits. It's kept in memory, loaded once by New, and updated after
 //     every successful save, so reads never hit SQLite.
-//   - active: the validated config plus the tileserve client and database
-//     connection built from it, which syncs actually run against. It
+//   - active: the validated config plus the tileserve clients (one per
+//     configured API) and database connection built from it, which syncs actually run against. It
 //     starts out nil and is only replaced by a successful apply, so an
 //     invalid edit or an unreachable API/database leaves the previous,
 //     still-working state in place.
@@ -50,11 +50,11 @@ type Runner struct {
 
 	// mu guards stored and the active triple. It's only held for the
 	// pointer swaps/copies themselves, never across I/O.
-	mu     sync.RWMutex
-	stored *config.Config
-	cfg    *config.Config
-	client *tileserve.Client
-	db     *store.Store
+	mu      sync.RWMutex
+	stored  *config.Config
+	cfg     *config.Config
+	clients map[string]*tileserve.Client
+	db      *store.Store
 
 	// syncMu serializes syncs (and the per-map cleanup/overlay writes that
 	// touch the same MariaDB tables), so a manual "sync now" request can't
@@ -103,6 +103,12 @@ var (
 	ErrMapNotFound = configdb.ErrMapNotFound
 	// ErrMapIDTaken is returned by CreateMap for an id already in use.
 	ErrMapIDTaken = configdb.ErrMapIDTaken
+	// ErrAPINotFound is returned by the API methods for an unknown API id.
+	ErrAPINotFound = configdb.ErrAPINotFound
+	// ErrAPIIDTaken is returned by CreateAPI for an id already in use.
+	ErrAPIIDTaken = configdb.ErrAPIIDTaken
+	// ErrAPIInUse is returned by DeleteAPI while a map still uses the API.
+	ErrAPIInUse = errors.New("api is still used by a map")
 )
 
 // New loads the stored config from cfgDB and returns a Runner holding it,
@@ -137,14 +143,14 @@ func (r *Runner) Close() error {
 	return db.Close()
 }
 
-// active returns the applied config, client, and database. All three are
-// nil until the first successful apply — check db to tell whether the
-// runner is configured yet.
-func (r *Runner) active() (*config.Config, *tileserve.Client, *store.Store) {
+// active returns the applied config, clients (by API id), and database.
+// All three are nil until the first successful apply — check db to tell
+// whether the runner is configured yet.
+func (r *Runner) active() (*config.Config, map[string]*tileserve.Client, *store.Store) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.cfg, r.client, r.db
+	return r.cfg, r.clients, r.db
 }
 
 // storedCopy returns a deep copy of the stored config, safe for the caller
@@ -164,9 +170,10 @@ func (r *Runner) setStored(cfg *config.Config) {
 	r.stored = cfg
 }
 
-// apply validates the stored config and — only if that succeeds — builds a
-// fresh client (logging in again unless a token is configured) and database
-// connection, then swaps them in as the active state. On any failure the
+// apply validates the stored config and — only if that succeeds — builds
+// fresh clients (one per API, each logging in lazily on its first request
+// unless a token is configured, so one unreachable API doesn't keep the
+// others from syncing) and database connection, then swaps them in as the active state. On any failure the
 // previous active state (which may be the initial nil state) is left in
 // place and the error is returned.
 //
@@ -184,9 +191,9 @@ func (r *Runner) apply(ctx context.Context) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	client, err := newClient(ctx, cfg.API)
-	if err != nil {
-		return fmt.Errorf("login: %w", err)
+	clients := make(map[string]*tileserve.Client, len(cfg.APIs))
+	for _, api := range cfg.APIs {
+		clients[api.ID] = lazyClient(api)
 	}
 
 	db, err := openStore(ctx, cfg)
@@ -196,7 +203,7 @@ func (r *Runner) apply(ctx context.Context) error {
 
 	r.mu.Lock()
 	oldDB := r.db
-	r.cfg, r.client, r.db = cfg, client, db
+	r.cfg, r.clients, r.db = cfg, clients, db
 	r.mu.Unlock()
 
 	if oldDB != nil {
@@ -215,8 +222,21 @@ func (r *Runner) apply(ctx context.Context) error {
 	return nil
 }
 
-// newClient builds a tileserve client for api, logging in unless a token is
-// already configured.
+// lazyClient builds a tileserve client for api without contacting it: it
+// uses the configured token, or logs in on its first request.
+func lazyClient(api config.API) *tileserve.Client {
+	client := tileserve.New(api.BaseURL)
+	if api.Token != "" {
+		client.SetToken(api.Token)
+	} else {
+		client.SetCredentials(api.Username, api.Password)
+	}
+
+	return client
+}
+
+// newClient builds a tileserve client for api, logging in right away unless
+// a token is already configured.
 func newClient(ctx context.Context, api config.API) (*tileserve.Client, error) {
 	client := tileserve.New(api.BaseURL)
 	if api.Token != "" {

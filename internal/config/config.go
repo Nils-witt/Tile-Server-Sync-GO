@@ -60,11 +60,17 @@ var defaultColumns = map[string]string{
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// apiIDPattern restricts API IDs to what can appear unescaped in a URL path.
+var apiIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 // MapTarget names one map and the version(s) of it whose geo objects should
 // be synced. Version may be a real numeric version, the literal "current",
 // or a user-defined alias.
 type MapTarget struct {
 	ID string `yaml:"id" json:"id"`
+	// APIID is the ID of the configured API (see Config.APIs) this map is
+	// fetched from.
+	APIID string `yaml:"apiId" json:"apiId"`
 	// Name is a human-readable label for the map, distinct from its ID
 	// (a UUID). Optional for the map itself, but required for it to be
 	// synced to EDP (see Database.SyncOverlays): a map with SyncOverlays
@@ -104,8 +110,14 @@ func (m *MapTarget) SyncInterval() time.Duration {
 	return m.interval
 }
 
-// API holds connection details for the tileserve-go instance.
+// API holds connection details for one tileserve-go instance. Maps refer
+// to it by ID (MapTarget.APIID).
 type API struct {
+	// ID identifies the API in URLs and in MapTarget.APIID; it can't be
+	// changed once created.
+	ID string `yaml:"id" json:"id"`
+	// Name is an optional human-readable label.
+	Name     string `yaml:"name"     json:"name"`
 	BaseURL  string `yaml:"baseUrl"  json:"baseUrl"`
 	Username string `yaml:"username" json:"username"`
 	Password string `yaml:"password" json:"password"`
@@ -114,10 +126,14 @@ type API struct {
 	Token string `yaml:"token" json:"token"`
 }
 
-// Validate checks a on its own: a base URL plus either a token or both a
-// username and password. Used by Config.Validate and to check the API
-// section alone before it's saved.
+// Validate checks a on its own: a valid ID, a base URL plus either a token
+// or both a username and password. Used by Config.Validate and to check one
+// API alone before it's saved.
 func (a *API) Validate() error {
+	if !apiIDPattern.MatchString(a.ID) {
+		return fmt.Errorf("api.id %q must be 1-64 letters, digits, '-' or '_'", a.ID)
+	}
+
 	if a.BaseURL == "" {
 		return errors.New("api.baseUrl is required")
 	}
@@ -220,7 +236,7 @@ func (w *WebServer) applyDefault() {
 
 // Config is the root configuration document.
 type Config struct {
-	API       API         `yaml:"api"       json:"api"`
+	APIs      []API       `yaml:"apis"      json:"apis"`
 	Database  Database    `yaml:"database"  json:"database"`
 	Maps      []MapTarget `yaml:"maps"      json:"maps"`
 	WebServer WebServer   `yaml:"webServer" json:"webServer"`
@@ -233,7 +249,7 @@ const defaultWebServerAddress = ":8080"
 // *Config (configdb, plus the WebServer overlay applied by
 // runner.Runner's apply) must call this themselves before using the result.
 func (c *Config) Validate() error {
-	if err := c.API.Validate(); err != nil {
+	if err := c.ValidateAPIs(); err != nil {
 		return err
 	}
 
@@ -250,10 +266,42 @@ func (c *Config) Validate() error {
 	return c.ValidateMaps()
 }
 
+// ValidateAPIs checks every apis[] entry on its own and that no two share
+// an id.
+func (c *Config) ValidateAPIs() error {
+	seen := make(map[string]bool, len(c.APIs))
+
+	for i := range c.APIs {
+		if err := c.APIs[i].Validate(); err != nil {
+			return fmt.Errorf("apis[%d]: %w", i, err)
+		}
+
+		if seen[c.APIs[i].ID] {
+			return fmt.Errorf("apis[%d].id %q is duplicated", i, c.APIs[i].ID)
+		}
+
+		seen[c.APIs[i].ID] = true
+	}
+
+	return nil
+}
+
+// API returns the configured API with the given id, or nil.
+func (c *Config) API(id string) *API {
+	for i := range c.APIs {
+		if c.APIs[i].ID == id {
+			return &c.APIs[i]
+		}
+	}
+
+	return nil
+}
+
 // ValidateMaps checks every maps[] entry — including parsing its Interval
 // (storing the result for SyncInterval to return), checking that its
 // staticColumns are valid SQL identifiers that don't collide with a
-// database.columns target, and that no two entries share an id — split out
+// database.columns target, that its apiId names a configured API, and
+// that no two entries share an id — split out
 // from Validate to keep its cyclomatic complexity down, and exported so
 // callers that validate just a candidate maps list (e.g. the runner's
 // per-map create/update, which don't have api/database connection details filled in
@@ -281,6 +329,14 @@ func (c *Config) ValidateMaps() error {
 		}
 
 		seenIDs[m.ID] = true
+
+		if m.APIID == "" {
+			return fmt.Errorf("maps[%d].apiId is required", i)
+		}
+
+		if c.API(m.APIID) == nil {
+			return fmt.Errorf("maps[%d].apiId %q is not a configured API", i, m.APIID)
+		}
 
 		if len(m.Versions) == 0 {
 			return fmt.Errorf("maps[%d].versions must contain at least one version", i)

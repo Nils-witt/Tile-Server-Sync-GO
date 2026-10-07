@@ -28,22 +28,10 @@ type configGetResponse struct {
 
 const maxConfigBodyBytes = 1 << 20 // 1 MiB; config is never remotely this large
 
-// apiSectionRequest/databaseSectionRequest are the request/response bodies
-// for the API/Database section endpoints — each submits or returns only its
-// own tab's fields.
-type apiSectionRequest struct {
-	API config.API `json:"api"`
-}
-
+// databaseSectionRequest is the request/response body for the Database
+// section endpoints — it submits or returns only its own tab's fields.
 type databaseSectionRequest struct {
 	Database config.Database `json:"database"`
-}
-
-// getAPISectionHandler serves GET /api/config/api. Requires view_config.
-func getAPISectionHandler(run Runner) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, apiSectionRequest{API: run.Config().API})
-	}
 }
 
 // getDatabaseSectionHandler serves GET /api/config/database. Requires
@@ -52,16 +40,6 @@ func getDatabaseSectionHandler(run Runner) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, databaseSectionRequest{Database: run.Config().Database})
 	}
-}
-
-// saveAPISectionHandler serves PUT /api/config/api. Requires
-// edit_config_api (enforced at the route level).
-func saveAPISectionHandler(run Runner) http.HandlerFunc {
-	return sectionSaveHandler(func(ctx context.Context, actor runner.Actor, req apiSectionRequest) (
-		config.Config, runner.ChangeResult, error,
-	) {
-		return run.SaveAPI(ctx, actor, req.API)
-	})
 }
 
 // saveDatabaseSectionHandler serves PUT /api/config/database. Requires
@@ -74,18 +52,20 @@ func saveDatabaseSectionHandler(run Runner) http.HandlerFunc {
 	})
 }
 
-// sectionTestResponse is the body of POST /api/config/{api,database}/test:
+// sectionTestResponse is the body of POST /api/apis/test and POST
+// /api/config/database/test:
 // OK, or why the test failed.
 type sectionTestResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }
 
-// testAPIHandler serves POST /api/config/api/test: it tests the submitted
-// (unsaved) API section. Requires edit_config_api.
+// testAPIHandler serves POST /api/apis/test: it tests the submitted
+// (unsaved) API; a blank password means the one stored for its id.
+// Requires edit_config_api.
 func testAPIHandler(run Runner) http.HandlerFunc {
-	return sectionTestHandler(func(ctx context.Context, actor runner.Actor, req apiSectionRequest) error {
-		return run.TestAPI(ctx, actor, req.API)
+	return sectionTestHandler(func(ctx context.Context, actor runner.Actor, req config.API) error {
+		return run.TestAPI(ctx, actor, req)
 	})
 }
 

@@ -18,7 +18,11 @@ export interface Me {
   permissions: Permissions
 }
 
-export interface ApiSection {
+/** One tileserve-go instance maps are fetched from (GET /api/apis). */
+export interface ApiTarget {
+  /** Letters, digits, '-' or '_'; fixed once created. */
+  id: string
+  name: string
   baseUrl: string
   username: string
   password: string
@@ -49,6 +53,8 @@ export interface DatabaseSection {
 
 export interface MapTarget {
   id: string
+  /** The id of the ApiTarget this map is fetched from. */
+  apiId: string
   name: string
   versions: string[]
   interval: string
@@ -56,7 +62,7 @@ export interface MapTarget {
   disabled: boolean
 }
 
-/** A map the configured tileserve-go API offers (GET /api/remote-maps). */
+/** A map a configured tileserve-go API offers (GET /api/apis/{id}/remote-maps). */
 export interface RemoteMap {
   id: string
   name: string
@@ -67,7 +73,7 @@ export interface RemoteMap {
 }
 
 export interface Config {
-  api: ApiSection
+  apis: ApiTarget[]
   database: DatabaseSection
   maps: MapTarget[]
 }
@@ -79,6 +85,21 @@ export interface SectionTestResponse {
 
 export interface ConfigGetResponse {
   config?: Config
+  error?: string
+  applied?: boolean
+  applyError?: string
+}
+
+export interface ApiSaveResponse {
+  api?: ApiTarget
+  error?: string
+  applied?: boolean
+  applyError?: string
+  overlayError?: string
+}
+
+export interface ApiDeleteResponse {
+  ok: boolean
   error?: string
   applied?: boolean
   applyError?: string

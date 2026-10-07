@@ -23,12 +23,19 @@ import (
 type Runner interface {
 	Status() status.Snapshot
 	Config() config.Config
-	SaveAPI(ctx context.Context, actor runner.Actor, api config.API) (config.Config, runner.ChangeResult, error)
 	SaveDatabase(
 		ctx context.Context, actor runner.Actor, db config.Database,
 	) (config.Config, runner.ChangeResult, error)
 	TestAPI(ctx context.Context, actor runner.Actor, api config.API) error
 	TestDatabase(ctx context.Context, actor runner.Actor, db config.Database) error
+
+	APIs() []config.API
+	CreateAPI(ctx context.Context, actor runner.Actor, api config.API) (config.API, runner.ChangeResult, error)
+	UpdateAPI(
+		ctx context.Context, actor runner.Actor, id string, api config.API,
+	) (config.API, runner.ChangeResult, error)
+	DeleteAPI(ctx context.Context, actor runner.Actor, id string) (runner.ChangeResult, error)
+	RemoteMaps(ctx context.Context, apiID string) ([]tileserve.RemoteMap, error)
 
 	Maps() []config.MapTarget
 	CreateMap(
@@ -39,7 +46,6 @@ type Runner interface {
 	) (config.MapTarget, runner.ChangeResult, error)
 	DeleteMap(ctx context.Context, actor runner.Actor, id string) (runner.ChangeResult, error)
 	SyncMap(ctx context.Context, mapID string) (int, error)
-	RemoteMaps(ctx context.Context) ([]tileserve.RemoteMap, error)
 
 	LogSecurityEvent(ctx context.Context, actor runner.Actor, eventType, detail string)
 	SecurityLog(ctx context.Context, limit int) ([]runner.SecurityLogEntry, error)
@@ -58,8 +64,9 @@ type Options struct {
 // every browser-navigated route ("/", "/config", "/security-log",
 // "/login", and any client-side sub-route of those), backed by a
 // JSON API under "/api/...": status (api/status), a config editor
-// (per-section GET/PUT endpoints under api/config, plus the api/maps CRUD
-// family for the Maps tab — see config.go and maps.go), and a
+// (GET/PUT for the database section under api/config, plus the api/apis
+// and api/maps CRUD families for the API and Maps tabs — see config.go,
+// apis.go and maps.go), and a
 // superuser-only audit trail (api/security-log, see security_log.go)
 // recording logins and config/map changes. Every API route is gated behind
 // an SSO bearer token (see auth.go) and the permissions its groups grant
@@ -92,25 +99,32 @@ func New(opts Options) *http.Server {
 
 	mux.HandleFunc("GET /api/status", requirePermission(auth, permViewStatus)(statusAPIHandler(run)))
 
-	// Config: the api/database sections (the Maps tab is served by the
-	// /api/maps family below instead). Each section has its own GET
-	// (view_config) and PUT
-	// (edit_config_{api,database}) registered separately, so the
+	// Config: the database section (the API and Maps tabs are served by the
+	// /api/apis and /api/maps families below instead). GET (view_config)
+	// and PUT (edit_config_database) are registered separately, so the
 	// permission each method requires is visible right here rather than
 	// buried in a per-handler method switch.
-	mux.HandleFunc("GET /api/config/api", requirePermission(auth, permViewConfig)(getAPISectionHandler(run)))
-	mux.HandleFunc("PUT /api/config/api",
-		requirePermission(auth, permEditConfigAPI)(saveAPISectionHandler(run)))
 	mux.HandleFunc("GET /api/config/database",
 		requirePermission(auth, permViewConfig)(getDatabaseSectionHandler(run)))
 	mux.HandleFunc("PUT /api/config/database",
 		requirePermission(auth, permEditConfigDatabase)(saveDatabaseSectionHandler(run)))
 	// Testing connects to a user-entered host (possibly with the stored
 	// password), so it needs the same permission as saving.
-	mux.HandleFunc("POST /api/config/api/test",
-		requirePermission(auth, permEditConfigAPI)(testAPIHandler(run)))
 	mux.HandleFunc("POST /api/config/database/test",
 		requirePermission(auth, permEditConfigDatabase)(testDatabaseHandler(run)))
+
+	// APIs: the tileserve-go instances maps are fetched from, a CRUD
+	// resource like maps (see apis.go).
+	mux.HandleFunc("GET /api/apis", requirePermission(auth, permViewConfig)(listAPIsHandler(run)))
+	mux.HandleFunc("POST /api/apis", requirePermission(auth, permEditConfigAPI)(createAPIHandler(run)))
+	mux.HandleFunc("PUT /api/apis/{id}", requirePermission(auth, permEditConfigAPI)(updateAPIHandler(run)))
+	mux.HandleFunc("DELETE /api/apis/{id}", requirePermission(auth, permEditConfigAPI)(deleteAPIHandler(run)))
+	mux.HandleFunc("POST /api/apis/test", requirePermission(auth, permEditConfigAPI)(testAPIHandler(run)))
+	// The maps an API offers, for the Maps tab's one-click add: it talks
+	// to the API with the stored credentials, so it needs the same
+	// permission as adding a map.
+	mux.HandleFunc("GET /api/apis/{id}/remote-maps",
+		requirePermission(auth, permEditConfigMaps)(remoteMapsAPIHandler(run)))
 
 	// Maps: a first-class CRUD resource (see maps.go), not a config section —
 	// each map is independently addressable/mutable, so adding or editing one
@@ -122,11 +136,6 @@ func New(opts Options) *http.Server {
 		requirePermission(auth, permEditConfigMaps)(updateMapAPIHandler(run)))
 	mux.HandleFunc("DELETE /api/maps/{id}",
 		requirePermission(auth, permEditConfigMaps)(deleteMapAPIHandler(run)))
-	// The maps tileserve-go offers, for the Maps tab's one-click add: it
-	// talks to the API with the stored credentials, so it needs the same
-	// permission as adding a map.
-	mux.HandleFunc("GET /api/remote-maps",
-		requirePermission(auth, permEditConfigMaps)(remoteMapsAPIHandler(run)))
 	mux.HandleFunc("POST /api/maps/{id}/sync",
 		requirePermission(auth, permTriggerSync)(syncMapAPIHandler(run)))
 

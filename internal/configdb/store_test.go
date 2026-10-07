@@ -111,8 +111,7 @@ func TestSaveLoadConfigRoundtrip(t *testing.T) {
 	s, dbPath := openTestStore(t)
 
 	cfg := &config.Config{}
-	cfg.API.BaseURL = "https://example.com"
-	cfg.API.Token = "tok"
+	cfg.APIs = []config.API{{ID: "a1", Name: "One", BaseURL: "https://example.com", Token: "tok"}}
 	cfg.Database.Host = "db.example"
 	cfg.Database.User = "user"
 	cfg.Database.Password = "pass"
@@ -120,7 +119,7 @@ func TestSaveLoadConfigRoundtrip(t *testing.T) {
 	cfg.Database.Table = "geo_objects"
 	cfg.Database.PruneMissing = true
 	cfg.Database.Columns = map[string]string{"uuid": "uuid"}
-	cfg.Maps = []config.MapTarget{{ID: "m2", Versions: []string{"current"}}}
+	cfg.Maps = []config.MapTarget{{ID: "m2", APIID: "a1", Versions: []string{"current"}}}
 
 	if err := s.Save(ctx, cfg); err != nil {
 		t.Fatalf("save: %v", err)
@@ -133,10 +132,7 @@ func TestSaveLoadConfigRoundtrip(t *testing.T) {
 
 	assertDatabaseConnection(t, loaded.Database, cfg.Database)
 
-	if loaded.API.BaseURL != "https://example.com" || !loaded.Database.PruneMissing ||
-		len(loaded.Maps) != 1 || loaded.Maps[0].ID != "m2" {
-		t.Errorf("load mismatch: %+v", loaded)
-	}
+	assertRoundtrip(t, loaded, cfg)
 
 	// Reopening the same DB file must be idempotent (safe to AutoMigrate on
 	// every startup) and must not lose data.
@@ -159,8 +155,61 @@ func TestSaveLoadConfigRoundtrip(t *testing.T) {
 		t.Fatalf("reload: %v", err)
 	}
 
-	if reloaded.API.BaseURL != "https://example.com" {
+	if len(reloaded.APIs) != 1 || reloaded.APIs[0].BaseURL != "https://example.com" {
 		t.Errorf("data lost across reopen: %+v", reloaded)
+	}
+}
+
+// assertRoundtrip checks loaded's APIs, pruneMissing and maps against
+// saved's.
+func assertRoundtrip(t *testing.T, loaded, saved *config.Config) {
+	t.Helper()
+
+	if len(loaded.APIs) != 1 || loaded.APIs[0] != saved.APIs[0] || !loaded.Database.PruneMissing ||
+		len(loaded.Maps) != 1 || loaded.Maps[0].ID != "m2" || loaded.Maps[0].APIID != "a1" {
+		t.Errorf("load mismatch: %+v", loaded)
+	}
+}
+
+func TestAPICRUD(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s, _ := openTestStore(t)
+
+	a := config.API{ID: "a1", Name: "One", BaseURL: "https://one.example", Username: "u", Password: "p"}
+	if err := s.CreateAPI(ctx, a); err != nil {
+		t.Fatalf("create api: %v", err)
+	}
+
+	if err := s.CreateAPI(ctx, config.API{ID: "a2", BaseURL: "https://two.example", Token: "t"}); err != nil {
+		t.Fatalf("create second api: %v", err)
+	}
+
+	if err := s.CreateAPI(ctx, a); !errors.Is(err, ErrAPIIDTaken) {
+		t.Errorf("duplicate create err = %v, want ErrAPIIDTaken", err)
+	}
+
+	a.BaseURL = "https://moved.example"
+	if err := s.UpdateAPI(ctx, "a1", a); err != nil {
+		t.Fatalf("update api: %v", err)
+	}
+
+	if err := s.UpdateAPI(ctx, "nope", a); !errors.Is(err, ErrAPINotFound) {
+		t.Errorf("update unknown err = %v, want ErrAPINotFound", err)
+	}
+
+	list, err := s.ListAPIs(ctx)
+	if err != nil || len(list) != 2 || list[0] != a || list[1].ID != "a2" {
+		t.Fatalf("list apis = %+v, %v; want a1 (updated) then a2", list, err)
+	}
+
+	if err := s.DeleteAPI(ctx, "a1"); err != nil {
+		t.Fatalf("delete api: %v", err)
+	}
+
+	if err := s.DeleteAPI(ctx, "a1"); !errors.Is(err, ErrAPINotFound) {
+		t.Errorf("second delete err = %v, want ErrAPINotFound", err)
 	}
 }
 

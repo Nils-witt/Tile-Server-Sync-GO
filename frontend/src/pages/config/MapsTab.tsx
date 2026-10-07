@@ -3,12 +3,13 @@ import { api, ApiError } from '../../api/client'
 import { useAuth } from '../../auth/AuthContext'
 import { Banner, type BannerState } from '../../components/Banner'
 import { MapCard } from './MapCard'
-import type { MapTarget, RemoteMap } from '../../api/types'
+import type { ApiTarget, MapTarget, RemoteMap } from '../../api/types'
 
 /** What a one-click add creates; everything stays editable on the map's card afterwards. */
-function newMapFrom(remote: RemoteMap): MapTarget {
+function newMapFrom(remote: RemoteMap, apiId: string): MapTarget {
   return {
     id: remote.id,
+    apiId,
     name: remote.name,
     versions: ['current'],
     interval: '1h',
@@ -25,12 +26,15 @@ export function MapsTab() {
   const { me } = useAuth()
   const disabled = !me?.permissions.editConfigMaps
   const [maps, setMaps] = useState<MapTarget[]>([])
+  const [apis, setApis] = useState<ApiTarget[]>([])
   const [banner, setBanner] = useState<BannerState | null>(null)
 
   useEffect(() => {
-    api
-      .listMaps()
-      .then((list) => setMaps(list || []))
+    Promise.all([api.listMaps(), api.listAPIs()])
+      .then(([mapList, apiList]) => {
+        setMaps(mapList || [])
+        setApis(apiList || [])
+      })
       .catch((err) => setBanner({ ok: false, text: `Failed to load maps: ${errorText(err)}` }))
   }, [])
 
@@ -54,23 +58,26 @@ export function MapsTab() {
         {maps.length === 0 && <p className="hint">No maps configured yet — add one from the list below.</p>}
         <div>
           {maps.map((m) => (
-            <MapCard key={m.id} initial={m} disabled={disabled} onRemoved={() => handleRemoved(m.id)} />
+            <MapCard key={m.id} initial={m} apis={apis} disabled={disabled} onRemoved={() => handleRemoved(m.id)} />
           ))}
         </div>
       </section>
 
-      {!disabled && <AvailableMaps configuredIds={configuredIds} onAdded={handleAdded} />}
+      {!disabled && <AvailableMaps apis={apis} configuredIds={configuredIds} onAdded={handleAdded} />}
     </>
   )
 }
 
 interface AvailableMapsProps {
+  apis: ApiTarget[]
   configuredIds: Set<string>
   onAdded: (m: MapTarget) => void
 }
 
-/** The maps the configured tileserve-go API offers, each addable with one click. */
-function AvailableMaps({ configuredIds, onAdded }: AvailableMapsProps) {
+/** The maps the selected tileserve-go API offers, each addable with one click. */
+function AvailableMaps({ apis, configuredIds, onAdded }: AvailableMapsProps) {
+  const [selectedApiId, setSelectedApiId] = useState('')
+  const apiId = apis.some((a) => a.id === selectedApiId) ? selectedApiId : (apis[0]?.id ?? '')
   const [remote, setRemote] = useState<RemoteMap[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState('')
@@ -78,9 +85,14 @@ function AvailableMaps({ configuredIds, onAdded }: AvailableMapsProps) {
   const [banner, setBanner] = useState<BannerState | null>(null)
 
   const load = useCallback(async () => {
+    if (!apiId) {
+      setRemote(null)
+      return
+    }
+
     setLoading(true)
     try {
-      setRemote((await api.listRemoteMaps()) || [])
+      setRemote((await api.listRemoteMaps(apiId)) || [])
       setBanner(null)
     } catch (err) {
       setRemote(null)
@@ -88,7 +100,7 @@ function AvailableMaps({ configuredIds, onAdded }: AvailableMapsProps) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [apiId])
 
   useEffect(() => {
     void load()
@@ -97,7 +109,7 @@ function AvailableMaps({ configuredIds, onAdded }: AvailableMapsProps) {
   async function handleAdd(r: RemoteMap) {
     setAdding(r.id)
     try {
-      const res = await api.createMap(newMapFrom(r))
+      const res = await api.createMap(newMapFrom(r, apiId))
       if (!res.map) {
         setBanner({ ok: false, text: `Failed to add "${r.name}": ${res.error}` })
         return
@@ -127,14 +139,22 @@ function AvailableMaps({ configuredIds, onAdded }: AvailableMapsProps) {
     <section className="card">
       <h2>Available maps</h2>
       <p className="hint">
-        Maps offered by the configured API. Adding one syncs its current version every hour; adjust it on its card above
+        Maps offered by the selected API. Adding one syncs its current version every hour; adjust it on its card above
         afterwards.
       </p>
       <Banner state={banner} />
 
+      {apis.length === 0 && <p className="hint">Add an API on the API tab first.</p>}
       <div className="actions-row" style={{ marginTop: 0, marginBottom: '0.6rem' }}>
+        <select aria-label="API" style={{ width: 'auto' }} value={apiId} disabled={apis.length === 0} onChange={(e) => setSelectedApiId(e.target.value)}>
+          {apis.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name || a.id}
+            </option>
+          ))}
+        </select>
         <input type="text" placeholder="Filter by name or description" value={filter} onChange={(e) => setFilter(e.target.value)} />
-        <button type="button" disabled={loading} onClick={() => void load()}>
+        <button type="button" disabled={loading || !apiId} onClick={() => void load()}>
           {loading ? 'Loading…' : 'Refresh'}
         </button>
       </div>

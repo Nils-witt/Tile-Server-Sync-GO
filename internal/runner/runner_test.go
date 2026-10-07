@@ -62,11 +62,11 @@ func newTileserve(t *testing.T) string {
 	return srv.URL
 }
 
-// TestSaveAPIKeepsBlankSecretAndPersists checks that a section save is
+// TestUpdateAPIKeepsBlankSecretAndPersists checks that an API change is
 // persisted even though the (incomplete) config can't be applied, that a
 // blank password means "unchanged" (including for the pre-save test), and
 // that secrets never leave the runner.
-func TestSaveAPIKeepsBlankSecretAndPersists(t *testing.T) {
+func TestUpdateAPIKeepsBlankSecretAndPersists(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -74,20 +74,20 @@ func TestSaveAPIKeepsBlankSecretAndPersists(t *testing.T) {
 	actor := Actor{Username: "alice", RemoteAddr: "127.0.0.1:1"}
 	urlA, urlB := newTileserve(t), newTileserve(t)
 
-	if _, _, err := r.SaveAPI(ctx, actor, config.API{BaseURL: urlA, Username: "u", Password: testPassword}); err != nil {
-		t.Fatalf("SaveAPI: %v", err)
+	if _, _, err := r.CreateAPI(ctx, actor, config.API{ID: "a", BaseURL: urlA, Username: "u", Password: testPassword}); err != nil {
+		t.Fatalf("CreateAPI: %v", err)
 	}
 
-	got, res, err := r.SaveAPI(ctx, actor, config.API{BaseURL: urlB, Username: "u"})
+	got, res, err := r.UpdateAPI(ctx, actor, "a", config.API{BaseURL: urlB, Username: "u"})
 	if err != nil {
-		t.Fatalf("SaveAPI: %v", err)
+		t.Fatalf("UpdateAPI: %v", err)
 	}
 
 	if res.ApplyErr == nil {
 		t.Error("ApplyErr = nil for a config without a database, want an error")
 	}
 
-	if got.API.Password != "" || r.Config().API.Password != "" {
+	if got.Password != "" || r.APIs()[0].Password != "" || r.Config().APIs[0].Password != "" {
 		t.Error("password leaked out of the runner")
 	}
 
@@ -96,17 +96,27 @@ func TestSaveAPIKeepsBlankSecretAndPersists(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if stored.API.BaseURL != urlB || stored.API.Password != testPassword {
-		t.Errorf("stored API = %+v, want baseUrl %s with the original password", stored.API, urlB)
+	if len(stored.APIs) != 1 || stored.APIs[0].BaseURL != urlB || stored.APIs[0].Password != testPassword {
+		t.Errorf("stored APIs = %+v, want a at %s with the original password", stored.APIs, urlB)
 	}
+
+	assertEvents(ctx, t, r, "alice", "api_created", "api_updated")
+}
+
+// assertEvents checks that the security log has exactly one entry by
+// username for each of eventTypes.
+func assertEvents(ctx context.Context, t *testing.T, r *Runner, username string, eventTypes ...string) {
+	t.Helper()
 
 	entries, err := r.SecurityLog(ctx, 10)
 	if err != nil {
 		t.Fatalf("SecurityLog: %v", err)
 	}
 
-	if countEvents(entries, "config_saved", "alice") != 2 {
-		t.Errorf("security log = %+v, want two config_saved entries by alice", entries)
+	for _, eventType := range eventTypes {
+		if countEvents(entries, eventType, username) != 1 {
+			t.Errorf("security log = %+v, want one %s by %s", entries, eventType, username)
+		}
 	}
 }
 
@@ -122,24 +132,29 @@ func countEvents(entries []SecurityLogEntry, eventType, username string) int {
 	return n
 }
 
-// TestSaveSectionRejectedWhenTestFails checks that a section failing its
-// pre-save test (invalid settings, or a failed login/ping) isn't persisted.
-func TestSaveSectionRejectedWhenTestFails(t *testing.T) {
+// TestSaveRejectedWhenTestFails checks that an API or database section
+// failing its pre-save test (invalid settings, or a failed login/ping)
+// isn't persisted.
+func TestSaveRejectedWhenTestFails(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	r, cfgDB := newTestRunner(t)
 	url := newTileserve(t)
 
-	if _, _, err := r.SaveAPI(ctx, Actor{}, config.API{BaseURL: url}); !errors.Is(err, ErrInvalid) {
-		t.Errorf("SaveAPI without credentials err = %v, want ErrInvalid", err)
+	if _, _, err := r.CreateAPI(ctx, Actor{}, config.API{ID: "a", BaseURL: url}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("CreateAPI without credentials err = %v, want ErrInvalid", err)
 	}
 
-	if _, _, err := r.SaveAPI(ctx, Actor{}, config.API{BaseURL: url, Username: "u", Password: "wrong"}); !errors.Is(err, ErrTestFailed) {
-		t.Errorf("SaveAPI with wrong password err = %v, want ErrTestFailed", err)
+	if _, _, err := r.CreateAPI(ctx, Actor{}, config.API{ID: "a/b", BaseURL: url, Token: "t"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("CreateAPI with invalid id err = %v, want ErrInvalid", err)
 	}
 
-	if err := r.TestAPI(ctx, Actor{}, config.API{BaseURL: url, Token: "t"}); err != nil {
+	if _, _, err := r.CreateAPI(ctx, Actor{}, config.API{ID: "a", BaseURL: url, Username: "u", Password: "wrong"}); !errors.Is(err, ErrTestFailed) {
+		t.Errorf("CreateAPI with wrong password err = %v, want ErrTestFailed", err)
+	}
+
+	if err := r.TestAPI(ctx, Actor{}, config.API{ID: "a", BaseURL: url, Token: "t"}); err != nil {
 		t.Errorf("TestAPI with token: %v", err)
 	}
 
@@ -158,8 +173,18 @@ func TestSaveSectionRejectedWhenTestFails(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if stored.API.BaseURL != "" || stored.Database.Host != "" {
+	if len(stored.APIs) != 0 || stored.Database.Host != "" {
 		t.Errorf("stored config = %+v, want nothing saved", stored)
+	}
+}
+
+// createTestAPI adds an API with the given id, backed by its own fake
+// tileserve-go.
+func createTestAPI(ctx context.Context, t *testing.T, r *Runner, id string) {
+	t.Helper()
+
+	if _, _, err := r.CreateAPI(ctx, Actor{}, config.API{ID: id, BaseURL: newTileserve(t), Token: "t"}); err != nil {
+		t.Fatalf("CreateAPI %s: %v", id, err)
 	}
 }
 
@@ -169,21 +194,23 @@ func TestMapLifecycle(t *testing.T) {
 	ctx := context.Background()
 	r, cfgDB := newTestRunner(t)
 
-	m := config.MapTarget{ID: "m1", Versions: []string{"current"}, Interval: "5m"}
+	m := config.MapTarget{ID: "m1", APIID: "a", Versions: []string{"current"}, Interval: "5m"}
+
+	if _, _, err := r.CreateMap(ctx, Actor{}, m); !errors.Is(err, ErrInvalid) {
+		t.Errorf("CreateMap with unknown api err = %v, want ErrInvalid", err)
+	}
+
+	createTestAPI(ctx, t, r, "a")
+	createTestAPI(ctx, t, r, "b")
 
 	if _, _, err := r.CreateMap(ctx, Actor{}, m); err != nil {
 		t.Fatalf("CreateMap: %v", err)
 	}
 
-	if _, _, err := r.CreateMap(ctx, Actor{}, m); !errors.Is(err, ErrInvalid) {
-		t.Errorf("duplicate CreateMap err = %v, want ErrInvalid", err)
-	}
-
-	if _, _, err := r.CreateMap(ctx, Actor{}, config.MapTarget{ID: "m2"}); !errors.Is(err, ErrInvalid) {
-		t.Errorf("CreateMap without versions err = %v, want ErrInvalid", err)
-	}
+	assertCreateMapRejectsInvalid(ctx, t, r, m)
 
 	m.Versions = []string{"1", "2"}
+	m.APIID = "b"
 
 	if _, _, err := r.UpdateMap(ctx, Actor{}, "m1", m); err != nil {
 		t.Fatalf("UpdateMap: %v", err)
@@ -193,9 +220,11 @@ func TestMapLifecycle(t *testing.T) {
 		t.Errorf("UpdateMap unknown err = %v, want ErrMapNotFound", err)
 	}
 
-	if maps := r.Maps(); len(maps) != 1 || len(maps[0].Versions) != 2 {
-		t.Errorf("Maps() = %+v, want m1 with two versions", maps)
+	if maps := r.Maps(); len(maps) != 1 || len(maps[0].Versions) != 2 || maps[0].APIID != "b" {
+		t.Errorf("Maps() = %+v, want m1 on api b with two versions", maps)
 	}
+
+	assertDeleteAPIOnlyWhenUnused(ctx, t, r)
 
 	if _, err := r.DeleteMap(ctx, Actor{}, "m1"); err != nil {
 		t.Fatalf("DeleteMap: %v", err)
@@ -215,6 +244,33 @@ func TestMapLifecycle(t *testing.T) {
 	}
 }
 
+// assertCreateMapRejectsInvalid expects existing to be configured already.
+func assertCreateMapRejectsInvalid(ctx context.Context, t *testing.T, r *Runner, existing config.MapTarget) {
+	t.Helper()
+
+	if _, _, err := r.CreateMap(ctx, Actor{}, existing); !errors.Is(err, ErrInvalid) {
+		t.Errorf("duplicate CreateMap err = %v, want ErrInvalid", err)
+	}
+
+	if _, _, err := r.CreateMap(ctx, Actor{}, config.MapTarget{ID: "m2", APIID: "a"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("CreateMap without versions err = %v, want ErrInvalid", err)
+	}
+}
+
+// assertDeleteAPIOnlyWhenUnused expects api "b" to be used by a map and
+// api "a" not to be.
+func assertDeleteAPIOnlyWhenUnused(ctx context.Context, t *testing.T, r *Runner) {
+	t.Helper()
+
+	if _, err := r.DeleteAPI(ctx, Actor{}, "b"); !errors.Is(err, ErrAPIInUse) {
+		t.Errorf("DeleteAPI of a used api err = %v, want ErrAPIInUse", err)
+	}
+
+	if _, err := r.DeleteAPI(ctx, Actor{}, "a"); err != nil {
+		t.Errorf("DeleteAPI of an unused api: %v", err)
+	}
+}
+
 func TestSyncMapNotConfigured(t *testing.T) {
 	t.Parallel()
 
@@ -231,15 +287,15 @@ func TestRemoteMaps(t *testing.T) {
 	ctx := context.Background()
 	r, _ := newTestRunner(t)
 
-	if _, err := r.RemoteMaps(ctx); !errors.Is(err, ErrInvalid) {
-		t.Errorf("RemoteMaps without API err = %v, want ErrInvalid", err)
+	if _, err := r.RemoteMaps(ctx, "a"); !errors.Is(err, ErrAPINotFound) {
+		t.Errorf("RemoteMaps for an unknown api err = %v, want ErrAPINotFound", err)
 	}
 
-	if _, _, err := r.SaveAPI(ctx, Actor{}, config.API{BaseURL: newTileserve(t), Username: "u", Password: testPassword}); err != nil {
-		t.Fatalf("SaveAPI: %v", err)
+	if _, _, err := r.CreateAPI(ctx, Actor{}, config.API{ID: "a", BaseURL: newTileserve(t), Username: "u", Password: testPassword}); err != nil {
+		t.Fatalf("CreateAPI: %v", err)
 	}
 
-	remote, err := r.RemoteMaps(ctx)
+	remote, err := r.RemoteMaps(ctx, "a")
 	if err != nil {
 		t.Fatalf("RemoteMaps: %v", err)
 	}

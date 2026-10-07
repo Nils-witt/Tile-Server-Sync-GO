@@ -37,8 +37,8 @@ func overlaySlug(s string) string {
 }
 
 // overlaySource builds the SOURCE URL an EDP overlay row for mapID/version
-// points at, rooted at apiBaseURL (config.API.BaseURL) — the same
-// tileserve-go instance this tool already talks to. Since it embeds both
+// points at, rooted at apiBaseURL (the BaseURL of the config.API the map is
+// fetched from) — the same tileserve-go instance this tool already talks to. Since it embeds both
 // mapID and version, it also doubles as the natural per-map/version key used
 // to find an existing row to update or delete (map_src_overlays has no
 // column of its own referencing back to this tool's map/version identity).
@@ -131,31 +131,36 @@ func (s *Store) CreateMapOverlays(ctx context.Context, apiBaseURL string, m conf
 	return errors.Join(errs...)
 }
 
-// UpdateMapOverlays reconciles a map's map_src_overlays rows after an edit:
-// a version present in before.Versions but no longer in after.Versions has
-// its row deleted; every version in after.Versions is upserted (inserted if
+// UpdateMapOverlays reconciles a map's map_src_overlays rows after an edit
+// of the map or of the API it's fetched from (beforeBaseURL/afterBaseURL,
+// which differ when the map moved to another API or its API's base URL
+// changed): every row of before whose SOURCE no longer belongs to after is
+// deleted; every version in after.Versions is upserted (inserted if
 // missing, or updated in place if a matching row already exists) with
 // after's current Name. A no-op if SyncOverlays isn't enabled. If after has
-// no Name, versions dropped by the edit are still cleaned up, but no row is
-// (re)written for the remaining ones — matching CreateMapOverlays' skip.
-func (s *Store) UpdateMapOverlays(ctx context.Context, apiBaseURL string, before, after config.MapTarget) error {
+// no Name, stale rows are still cleaned up, but no row is (re)written for
+// the remaining ones — matching CreateMapOverlays' skip.
+func (s *Store) UpdateMapOverlays(
+	ctx context.Context, beforeBaseURL, afterBaseURL string, before, after config.MapTarget,
+) error {
 	if !s.syncOverlays {
 		return nil
 	}
 
-	afterVersions := make(map[string]bool, len(after.Versions))
+	afterSources := make(map[string]bool, len(after.Versions))
 	for _, v := range after.Versions {
-		afterVersions[v] = true
+		afterSources[overlaySource(afterBaseURL, after.ID, v)] = true
 	}
 
 	var errs []error
 
 	for _, v := range before.Versions {
-		if afterVersions[v] {
+		source := overlaySource(beforeBaseURL, before.ID, v)
+		if afterSources[source] {
 			continue
 		}
 
-		if err := s.deleteOverlayRow(ctx, overlaySource(apiBaseURL, before.ID, v)); err != nil {
+		if err := s.deleteOverlayRow(ctx, source); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -171,7 +176,7 @@ func (s *Store) UpdateMapOverlays(ctx context.Context, apiBaseURL string, before
 	multi := len(after.Versions) > 1
 
 	for _, version := range after.Versions {
-		source := overlaySource(apiBaseURL, after.ID, version)
+		source := overlaySource(afterBaseURL, after.ID, version)
 		if err := s.upsertOverlayRow(ctx, source, after.Name, overlayCacheLocal(after.Name, version, multi)); err != nil {
 			errs = append(errs, err)
 		}

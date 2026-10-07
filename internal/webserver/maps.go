@@ -19,7 +19,7 @@ func listMapsAPIHandler(run Runner) http.HandlerFunc {
 	}
 }
 
-// remoteMapDTO is one entry of GET /api/remote-maps: a map tileserve-go
+// remoteMapDTO is one entry of GET /api/apis/{id}/remote-maps: a map tileserve-go
 // offers, and whether it is already configured here.
 type remoteMapDTO struct {
 	ID             string `json:"id"`
@@ -29,17 +29,19 @@ type remoteMapDTO struct {
 	Configured     bool   `json:"configured"`
 }
 
-// remoteMapsAPIHandler serves GET /api/remote-maps: the maps the configured
-// tileserve-go API exposes (see runner.Runner.RemoteMaps), for the Maps
-// tab's one-click add. An unconfigured API section is a 400, an unreachable
-// or failing API a 502. Requires edit_config_maps.
+// remoteMapsAPIHandler serves GET /api/apis/{id}/remote-maps: the maps the
+// configured tileserve-go API {id} exposes (see runner.Runner.RemoteMaps),
+// for the Maps tab's one-click add. An unknown API is a 404, an invalid one
+// a 400, an unreachable or failing API a 502. Requires edit_config_maps.
 func remoteMapsAPIHandler(run Runner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		remote, err := run.RemoteMaps(r.Context())
+		remote, err := run.RemoteMaps(r.Context(), r.PathValue("id"))
 		if err != nil {
 			status := http.StatusBadGateway
 			if errors.Is(err, runner.ErrInvalid) {
 				status = http.StatusBadRequest
+			} else if errors.Is(err, runner.ErrAPINotFound) {
+				status = http.StatusNotFound
 			}
 
 			writeJSON(w, status, map[string]string{"error": err.Error()})

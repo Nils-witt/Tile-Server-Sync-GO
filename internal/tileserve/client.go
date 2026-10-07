@@ -45,6 +45,14 @@ func (c *Client) SetToken(token string) {
 	c.token = token
 }
 
+// SetCredentials records a username/password for the client to log in with
+// lazily, on its first request (and again whenever a request gets a 401),
+// instead of logging in up front with Login.
+func (c *Client) SetCredentials(username, password string) {
+	c.username = username
+	c.password = password
+}
+
 // Ping checks that the base URL answers HTTP at all (any status code
 // counts), for testing connection settings when no login is involved, i.e.
 // when a token was configured directly.
@@ -177,7 +185,13 @@ func (c *Client) Maps(ctx context.Context) ([]RemoteMap, error) {
 // error messages.
 func (c *Client) getJSON(ctx context.Context, path, desc string, out any) error {
 	if c.token == "" {
-		return errors.New("client is not authenticated: call Login or SetToken first")
+		if c.username == "" {
+			return errors.New("client is not authenticated: call Login, SetCredentials or SetToken first")
+		}
+
+		if err := c.Login(ctx, c.username, c.password); err != nil {
+			return fmt.Errorf("login for %s: %w", desc, err)
+		}
 	}
 
 	body, status, err := c.getOnce(ctx, path, desc)

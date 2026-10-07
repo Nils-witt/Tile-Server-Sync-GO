@@ -182,7 +182,8 @@ func assertLegacyConfigIntact(ctx context.Context, t *testing.T, s *Store) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if cfg.API.BaseURL != "https://legacy.example" || cfg.API.Token != "tok123" || !cfg.Database.PruneMissing {
+	if len(cfg.APIs) != 1 || cfg.APIs[0].ID != legacyAPIID || cfg.APIs[0].BaseURL != "https://legacy.example" ||
+		cfg.APIs[0].Token != "tok123" || !cfg.Database.PruneMissing {
 		t.Errorf("legacy config_scalar lost: %+v", cfg)
 	}
 
@@ -190,7 +191,7 @@ func assertLegacyConfigIntact(ctx context.Context, t *testing.T, s *Store) {
 		Host: "db.example", Port: 3307, User: "user", Password: "pass", Name: "db", TLS: true,
 	})
 
-	if len(cfg.Maps) != 1 || cfg.Maps[0].ID != "legacy-map" || cfg.Maps[0].Interval != "10m" || len(cfg.Maps[0].Versions) != 1 {
+	if len(cfg.Maps) != 1 || cfg.Maps[0].ID != "legacy-map" || cfg.Maps[0].APIID != legacyAPIID || cfg.Maps[0].Interval != "10m" || len(cfg.Maps[0].Versions) != 1 {
 		t.Errorf("legacy map lost: %+v", cfg.Maps)
 	}
 }

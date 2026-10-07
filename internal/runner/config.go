@@ -17,9 +17,9 @@ import (
 // silently dropped) fails the test instead of hanging the request.
 const connectionTestTimeout = 10 * time.Second
 
-// Config returns a copy of the stored config with its secrets
-// (API.Password, Database.Password) blanked: stored secrets never leave the
-// runner, and SaveAPI/SaveDatabase treat a blank secret as "unchanged". An
+// Config returns a copy of the stored config with its secrets (every
+// API's Password, Database.Password) blanked: stored secrets never leave the
+// runner, and UpdateAPI/SaveDatabase treat a blank secret as "unchanged". An
 // unconfigured install returns an all-zero config, not an error.
 func (r *Runner) Config() config.Config {
 	cfg := r.storedCopy()
@@ -28,25 +28,19 @@ func (r *Runner) Config() config.Config {
 	return *cfg
 }
 
-// SaveAPI replaces the stored API section with api (a blank Password keeps
-// the stored one) in three steps: test it on its own (as TestAPI does), and
-// only if that passes persist it, record config_saved in the security log,
-// and try to apply the whole config live. A failed test is returned wrapped
-// in ErrInvalid or ErrTestFailed, with nothing saved. Otherwise it returns
-// the new stored config (redacted, like Config).
+// SaveDatabase replaces the stored Database section with db (a blank
+// Password keeps the stored one) in three steps: test it on its own (as
+// TestDatabase does), and only if that passes persist it, record
+// config_saved in the security log, and try to apply the whole config live.
+// A failed test is returned wrapped in ErrInvalid or ErrTestFailed, with
+// nothing saved. Otherwise it returns the new stored config (redacted, like
+// Config).
 //
 // Applying is deliberately not a precondition of the save: during initial
 // setup each section is saved on its own, so the whole config is
 // necessarily incomplete until every section is filled in. An
 // incomplete-but-persisted config is simply not applied, reported via
 // ChangeResult.ApplyErr.
-func (r *Runner) SaveAPI(ctx context.Context, actor Actor, api config.API) (config.Config, ChangeResult, error) {
-	return r.saveSection(ctx, actor, "api",
-		func(cfg *config.Config) []string { return mergeAPI(cfg, api) },
-		func(cfg *config.Config) error { return r.testAPI(ctx, actor, cfg.API) })
-}
-
-// SaveDatabase is the Database analogue of SaveAPI.
 func (r *Runner) SaveDatabase(
 	ctx context.Context, actor Actor, db config.Database,
 ) (config.Config, ChangeResult, error) {
@@ -55,20 +49,8 @@ func (r *Runner) SaveDatabase(
 		func(cfg *config.Config) error { return r.testDatabase(ctx, actor, cfg.Database) })
 }
 
-// mergeAPI replaces cfg.API with api (a blank Password keeps cfg's) and
-// reports what changed.
-func mergeAPI(cfg *config.Config, api config.API) []string {
-	if api.Password == "" {
-		api.Password = cfg.API.Password
-	}
-
-	changes := diffAPI(cfg.API, api)
-	cfg.API = api
-
-	return changes
-}
-
-// mergeDatabase is the Database analogue of mergeAPI.
+// mergeDatabase replaces cfg.Database with db (a blank Password keeps
+// cfg's) and reports what changed.
 func mergeDatabase(cfg *config.Config, db config.Database) []string {
 	if db.Password == "" {
 		db.Password = cfg.Database.Password
@@ -83,13 +65,16 @@ func mergeDatabase(cfg *config.Config, db config.Database) []string {
 // TestAPI validates api on its own and checks it against the server —
 // logging in with its username/password, or, for a configured token, just
 // checking that the base URL answers — without saving or applying it. A
-// blank Password means the stored one, as in SaveAPI. Invalid settings are
+// blank Password means the one stored for the API with api.ID (if any), as
+// in UpdateAPI. Invalid settings are
 // reported wrapped in ErrInvalid, a failed check wrapped in ErrTestFailed.
 // Every attempt is recorded in the security log, since it may send the
 // stored password to a newly entered host.
 func (r *Runner) TestAPI(ctx context.Context, actor Actor, api config.API) error {
 	if api.Password == "" {
-		api.Password = r.storedCopy().API.Password
+		if stored := r.storedCopy().API(api.ID); stored != nil {
+			api.Password = stored.Password
+		}
 	}
 
 	return r.testAPI(ctx, actor, api)
@@ -123,8 +108,8 @@ func (r *Runner) testAPI(ctx context.Context, actor Actor, api config.API) error
 	}
 
 	r.LogSecurityEvent(ctx, actor, "api_tested",
-		fmt.Sprintf("baseUrl=%q user=%q token=%v result=%s",
-			api.BaseURL, api.Username, api.Token != "", testResult(err)))
+		fmt.Sprintf("id=%q baseUrl=%q user=%q token=%v result=%s",
+			api.ID, api.BaseURL, api.Username, api.Token != "", testResult(err)))
 
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrTestFailed, err)
@@ -163,7 +148,7 @@ func testResult(err error) string {
 	return "ok"
 }
 
-// saveSection is the shared body of SaveAPI/SaveDatabase: merge (which
+// saveSection is the body of SaveDatabase: merge (which
 // overwrites one section of a copy of the stored config and reports what it
 // changed) is applied, the merged section tested by test, and — only if that
 // passes — the result persisted, made the new stored config, then applied
@@ -198,7 +183,10 @@ func (r *Runner) saveSection(
 }
 
 func redactSecrets(cfg *config.Config) {
-	cfg.API.Password = ""
+	for i := range cfg.APIs {
+		cfg.APIs[i].Password = ""
+	}
+
 	cfg.Database.Password = ""
 }
 
@@ -206,6 +194,7 @@ func redactSecrets(cfg *config.Config) {
 // out or modified without racing whoever else holds the original.
 func cloneConfig(cfg *config.Config) *config.Config {
 	out := *cfg
+	out.APIs = slices.Clone(cfg.APIs)
 	out.Database.Columns = maps.Clone(cfg.Database.Columns)
 	out.Maps = make([]config.MapTarget, len(cfg.Maps))
 

@@ -28,15 +28,27 @@ import (
 // attempted, so callers (RunLoop's logging, the web UI's per-map
 // "Sync" button) can tell the run as a whole was not fully successful.
 func syncAll(
-	ctx context.Context, maps []config.MapTarget, client *tileserve.Client, db *store.Store, rec *status.Recorder,
+	ctx context.Context, maps []config.MapTarget, clients map[string]*tileserve.Client, db *store.Store,
+	rec *status.Recorder,
 ) (totalSynced int, err error) {
 	defer func() { rec.RecordRun(totalSynced, err) }()
 
 	var errs []error
 
 	for _, m := range maps {
+		client := clients[m.APIID]
+
 		for _, version := range m.Versions {
-			log.Printf("fetching geo objects for map %s version %s", m.ID, version)
+			log.Printf("fetching geo objects for map %s version %s from api %s", m.ID, version, m.APIID)
+
+			if client == nil {
+				pairErr := fmt.Errorf("map %s version %s: api %q is not configured", m.ID, version, m.APIID)
+				log.Printf("sync error: %v", pairErr)
+				rec.RecordMapVersion(m.ID, version, 0, pairErr)
+				errs = append(errs, pairErr)
+
+				continue
+			}
 
 			objects, fetchErr := client.GeoObjects(ctx, m.ID, version)
 			if fetchErr != nil {

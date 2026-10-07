@@ -13,10 +13,11 @@ func validMaps(t *testing.T, maps []config.MapTarget) []config.MapTarget {
 	t.Helper()
 
 	for i := range maps {
+		maps[i].APIID = "a"
 		maps[i].Versions = []string{"current"}
 	}
 
-	cfg := &config.Config{Maps: maps}
+	cfg := &config.Config{APIs: []config.API{{ID: "a"}}, Maps: maps}
 	if err := cfg.ValidateMaps(); err != nil {
 		t.Fatalf("ValidateMaps: %v", err)
 	}

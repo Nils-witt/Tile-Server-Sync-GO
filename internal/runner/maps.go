@@ -15,15 +15,21 @@ func (r *Runner) Maps() []config.MapTarget {
 	return r.storedCopy().Maps
 }
 
-// RemoteMaps lists the maps the stored API section's credentials can see on
+// RemoteMaps lists the maps the stored API apiID's credentials can see on
 // tileserve-go, for the Maps tab's one-click add. It uses the stored (not
 // the active) API settings, so it works during initial setup before the
-// database is configured. An incomplete API section is reported wrapped in
-// ErrInvalid, a failed request wrapped in ErrTestFailed.
-func (r *Runner) RemoteMaps(ctx context.Context) ([]tileserve.RemoteMap, error) {
-	api := r.storedCopy().API
+// database is configured. An unknown apiID returns ErrAPINotFound, an
+// invalid API is reported wrapped in ErrInvalid, a failed request wrapped
+// in ErrTestFailed.
+func (r *Runner) RemoteMaps(ctx context.Context, apiID string) ([]tileserve.RemoteMap, error) {
+	stored := r.storedCopy().API(apiID)
+	if stored == nil {
+		return nil, fmt.Errorf("remote maps of api %q: %w", apiID, ErrAPINotFound)
+	}
+
+	api := *stored
 	if err := api.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: configure the API tab first: %w", ErrInvalid, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, connectionTestTimeout)
@@ -67,9 +73,10 @@ func (r *Runner) CreateMap(
 
 	cfg.Maps[len(cfg.Maps)-1] = cloneMap(*created)
 	r.setStored(cfg)
-	r.LogSecurityEvent(ctx, actor, "map_created", fmt.Sprintf("map %q created", created.ID))
+	r.LogSecurityEvent(ctx, actor, "map_created",
+		fmt.Sprintf("map %q created (api %q)", created.ID, created.APIID))
 
-	res := ChangeResult{OverlayErr: r.createMapOverlays(ctx, *created)}
+	res := ChangeResult{OverlayErr: r.createMapOverlays(ctx, apiBaseURL(cfg, created.APIID), *created)}
 	res.ApplyErr = r.apply(ctx)
 
 	return *created, res, nil
@@ -114,7 +121,8 @@ func (r *Runner) UpdateMap(
 
 	r.LogSecurityEvent(ctx, actor, "map_updated", detail)
 
-	res := ChangeResult{OverlayErr: r.updateMapOverlays(ctx, before, *updated)}
+	res := ChangeResult{OverlayErr: r.updateMapOverlays(ctx,
+		apiBaseURL(cfg, before.APIID), apiBaseURL(cfg, updated.APIID), before, *updated)}
 	res.ApplyErr = r.apply(ctx)
 
 	return *updated, res, nil
@@ -155,7 +163,7 @@ func (r *Runner) DeleteMap(ctx context.Context, actor Actor, id string) (ChangeR
 		detail = fmt.Sprintf("%s (%d synced object(s) deleted)", detail, res.ObjectsDeleted)
 	}
 
-	res.OverlayErr = r.deleteMapOverlays(ctx, before)
+	res.OverlayErr = r.deleteMapOverlays(ctx, apiBaseURL(cfg, before.APIID), before)
 	r.LogSecurityEvent(ctx, actor, "map_deleted", detail)
 	res.ApplyErr = r.apply(ctx)
 
@@ -164,7 +172,8 @@ func (r *Runner) DeleteMap(ctx context.Context, actor Actor, id string) (ChangeR
 
 // validateMaps runs config.ValidateMaps on cfg (the stored config with a
 // candidate change already merged in), which needs the full maps list to
-// catch a duplicate id or a staticColumns collision with database.columns.
+// catch a duplicate id or a staticColumns collision with database.columns,
+// and the APIs to check each map's apiId.
 func validateMaps(cfg *config.Config) error {
 	if err := cfg.ValidateMaps(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalid, err)
@@ -190,7 +199,7 @@ func (r *Runner) runSyncMaps(ctx context.Context, ids map[string]struct{}) (int,
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
 
-	cfg, client, db := r.active()
+	cfg, clients, db := r.active()
 	if db == nil {
 		r.rec.RecordRun(0, ErrNotConfigured)
 		return 0, ErrNotConfigured
@@ -208,7 +217,7 @@ func (r *Runner) runSyncMaps(ctx context.Context, ids map[string]struct{}) (int,
 		return 0, nil
 	}
 
-	return syncAll(ctx, due, client, db, r.rec)
+	return syncAll(ctx, due, clients, db, r.rec)
 }
 
 // deleteMapObjects deletes every previously synced geo_objects row for
@@ -257,42 +266,55 @@ func (r *Runner) removeActiveMap(mapID string) {
 	r.cfg = &newCfg
 }
 
+// apiBaseURL returns the base URL of cfg's API apiID, or "" if there is no
+// such API.
+func apiBaseURL(cfg *config.Config, apiID string) string {
+	if api := cfg.API(apiID); api != nil {
+		return api.BaseURL
+	}
+
+	return ""
+}
+
 // createMapOverlays, updateMapOverlays and deleteMapOverlays keep the EDP
 // map_src_overlays table (see internal/store's overlays.go) in sync with a
-// map change, serialized against syncs via syncMu. Each is a no-op before
-// the first successful apply.
-func (r *Runner) createMapOverlays(ctx context.Context, m config.MapTarget) error {
+// map change, serialized against syncs via syncMu. baseURL is that of the
+// map's API, which the overlay rows point at. Each is a no-op before the
+// first successful apply.
+func (r *Runner) createMapOverlays(ctx context.Context, baseURL string, m config.MapTarget) error {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
 
-	cfg, _, db := r.active()
+	_, _, db := r.active()
 	if db == nil {
 		return nil
 	}
 
-	return db.CreateMapOverlays(ctx, cfg.API.BaseURL, m)
+	return db.CreateMapOverlays(ctx, baseURL, m)
 }
 
-func (r *Runner) updateMapOverlays(ctx context.Context, before, after config.MapTarget) error {
+func (r *Runner) updateMapOverlays(
+	ctx context.Context, beforeBaseURL, afterBaseURL string, before, after config.MapTarget,
+) error {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
 
-	cfg, _, db := r.active()
+	_, _, db := r.active()
 	if db == nil {
 		return nil
 	}
 
-	return db.UpdateMapOverlays(ctx, cfg.API.BaseURL, before, after)
+	return db.UpdateMapOverlays(ctx, beforeBaseURL, afterBaseURL, before, after)
 }
 
-func (r *Runner) deleteMapOverlays(ctx context.Context, m config.MapTarget) error {
+func (r *Runner) deleteMapOverlays(ctx context.Context, baseURL string, m config.MapTarget) error {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
 
-	cfg, _, db := r.active()
+	_, _, db := r.active()
 	if db == nil {
 		return nil
 	}
 
-	return db.DeleteMapOverlays(ctx, cfg.API.BaseURL, m)
+	return db.DeleteMapOverlays(ctx, baseURL, m)
 }

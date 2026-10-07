@@ -9,10 +9,13 @@ import (
 )
 
 // configScalar is the singleton row (id=1) holding config.Config's non-list
-// scalar fields (API/Database). It has no exported use outside this
+// scalar fields (Database). It has no exported use outside this
 // package — Store.Load/Save translate to/from config.Config instead.
 type configScalar struct {
-	ID          int64  `gorm:"column:id;primaryKey;autoIncrement:false;check:cfg_scalar_singleton,id = 1"`
+	ID int64 `gorm:"column:id;primaryKey;autoIncrement:false;check:cfg_scalar_singleton,id = 1"`
+	// The api_* columns hold the single API of a database saved before
+	// multiple APIs were supported; migrateLegacyAPI moves it into apis and
+	// clears them, and nothing writes them any more.
 	APIBaseURL  string `gorm:"column:api_base_url;not null;default:''"`
 	APIUsername string `gorm:"column:api_username;not null;default:''"`
 	APIPassword string `gorm:"column:api_password;not null;default:''"`
@@ -47,6 +50,22 @@ type databaseColumn struct {
 
 func (databaseColumn) TableName() string { return "database_columns" }
 
+// apiRecord is one configured API (config.API), keyed internally by its own
+// autoincrement ID; APIID is the business identifier maps refer to (by
+// value, not by foreign key — runner refuses to delete an API still in use).
+type apiRecord struct {
+	ID        int64  `gorm:"column:id;primaryKey;autoIncrement"`
+	APIID     string `gorm:"column:api_id;not null;uniqueIndex:idx_apis_api_id"`
+	Name      string `gorm:"column:name;not null;default:''"`
+	SortOrder int    `gorm:"column:sort_order;not null"`
+	BaseURL   string `gorm:"column:base_url;not null;default:''"`
+	Username  string `gorm:"column:username;not null;default:''"`
+	Password  string `gorm:"column:password;not null;default:''"`
+	Token     string `gorm:"column:token;not null;default:''"`
+}
+
+func (apiRecord) TableName() string { return "apis" }
+
 // mapRecord is one configured map (config.MapTarget), keyed internally by
 // its own autoincrement ID (MapID is the business identifier used by the
 // REST/CLI layer — see maps.go's Get/Create/Update/DeleteMap). Versions and
@@ -57,6 +76,7 @@ func (databaseColumn) TableName() string { return "database_columns" }
 type mapRecord struct {
 	ID            int64             `gorm:"column:id;primaryKey;autoIncrement"`
 	MapID         string            `gorm:"column:map_id;not null;uniqueIndex:idx_maps_map_id"`
+	APIID         string            `gorm:"column:api_id;not null;default:''"`
 	Name          string            `gorm:"column:name;not null;default:''"`
 	SortOrder     int               `gorm:"column:sort_order;not null"`
 	Interval      string            `gorm:"column:interval;not null;default:''"`
@@ -240,6 +260,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := db.AutoMigrate(
 		&configScalar{},
 		&databaseColumn{},
+		&apiRecord{},
 		&mapRecord{},
 		&mapVersion{},
 		&mapStaticColumn{},
@@ -248,7 +269,58 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate config schema: %w", err)
 	}
 
-	return nil
+	return migrateLegacyAPI(db)
+}
+
+// legacyAPIID is the id given to the single API of a database saved before
+// multiple APIs were supported.
+const legacyAPIID = "default"
+
+// migrateLegacyAPI moves the single API stored in config_scalar's api_*
+// columns by an older version into the apis table (as legacyAPIID), points
+// every map without an API at it, and clears those columns so it never runs
+// again. A no-op on a fresh or already-migrated database.
+func migrateLegacyAPI(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var scalar configScalar
+
+		res := tx.Limit(1).Find(&scalar, 1)
+		if res.Error != nil {
+			return fmt.Errorf("migrate legacy api: %w", res.Error)
+		}
+
+		if res.RowsAffected == 0 || (scalar.APIBaseURL == "" && scalar.APIToken == "" && scalar.APIUsername == "") {
+			return nil
+		}
+
+		var taken int64
+		if err := tx.Model(&apiRecord{}).Where("api_id = ?", legacyAPIID).Count(&taken).Error; err != nil {
+			return fmt.Errorf("migrate legacy api: %w", err)
+		}
+
+		if taken == 0 {
+			legacy := apiRecord{
+				APIID: legacyAPIID, Name: "Default", BaseURL: scalar.APIBaseURL,
+				Username: scalar.APIUsername, Password: scalar.APIPassword, Token: scalar.APIToken,
+			}
+			if err := tx.Create(&legacy).Error; err != nil {
+				return fmt.Errorf("migrate legacy api: %w", err)
+			}
+		}
+
+		if err := tx.Model(&mapRecord{}).Where("api_id = ''").Update("api_id", legacyAPIID).Error; err != nil {
+			return fmt.Errorf("migrate legacy api: %w", err)
+		}
+
+		err := tx.Model(&configScalar{}).Where("id = 1").Updates(map[string]any{
+			"api_base_url": "", "api_username": "", "api_password": "", "api_token": "",
+		}).Error
+		if err != nil {
+			return fmt.Errorf("migrate legacy api: %w", err)
+		}
+
+		return nil
+	})
 }
 
 // removeObsoleteTables drops tables an older database still has but nothing

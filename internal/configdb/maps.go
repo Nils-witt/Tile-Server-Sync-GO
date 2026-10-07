@@ -103,11 +103,12 @@ func (s *Store) UpdateMap(ctx context.Context, id string, m config.MapTarget) (*
 			return fmt.Errorf("update map %q: %w", id, err)
 		}
 
+		record.APIID = m.APIID
 		record.Name = m.Name
 		record.Interval = m.Interval
 		record.Disabled = m.Disabled
 
-		if err := tx.Model(&record).Select("Name", "Interval", "Disabled").Updates(&record).Error; err != nil {
+		if err := tx.Model(&record).Select("APIID", "Name", "Interval", "Disabled").Updates(&record).Error; err != nil {
 			return fmt.Errorf("update map %q: %w", id, err)
 		}
 

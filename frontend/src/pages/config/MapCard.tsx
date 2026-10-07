@@ -1,7 +1,7 @@
 import { useId, useMemo, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import { Banner, type BannerState } from '../../components/Banner'
-import type { MapTarget } from '../../api/types'
+import type { ApiTarget, MapTarget } from '../../api/types'
 
 function parseStaticColumns(text: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -23,13 +23,15 @@ function staticColumnsText(cols: Record<string, string>): string {
 
 interface Props {
   initial: MapTarget
+  apis: ApiTarget[]
   disabled: boolean
   onRemoved: () => void
 }
 
-export function MapCard({ initial, disabled, onRemoved }: Props) {
+export function MapCard({ initial, apis, disabled, onRemoved }: Props) {
   const disabledCheckboxId = useId()
   const id = initial.id
+  const [apiId, setApiId] = useState(initial.apiId)
   const [name, setName] = useState(initial.name)
   const [versionsText, setVersionsText] = useState((initial.versions || []).join(', '))
   const [interval, setInterval_] = useState(initial.interval)
@@ -45,12 +47,14 @@ export function MapCard({ initial, disabled, onRemoved }: Props) {
   )
 
   const summaryId = name.trim() || id
-  const summaryMeta = `${versions.length === 1 ? '1 version' : `${versions.length} versions`} · ${interval.trim() ? `every ${interval.trim()}` : 'one-shot'}${syncDisabled ? ' · sync disabled' : ''}`
+  const apiLabel = apis.find((a) => a.id === apiId)?.name || apiId
+  const summaryMeta = `${apiLabel} · ${versions.length === 1 ? '1 version' : `${versions.length} versions`} · ${interval.trim() ? `every ${interval.trim()}` : 'one-shot'}${syncDisabled ? ' · sync disabled' : ''}`
 
   async function handleSave(e: React.MouseEvent) {
     e.preventDefault()
     const payload: MapTarget = {
       id,
+      apiId,
       name: name.trim(),
       versions,
       interval: interval.trim(),
@@ -108,6 +112,16 @@ export function MapCard({ initial, disabled, onRemoved }: Props) {
       <div className="map-body">
         <label>Map ID</label>
         <input type="text" value={id} disabled />
+
+        <label>API</label>
+        <select value={apiId} disabled={disabled} onChange={(e) => setApiId(e.target.value)}>
+          {!apis.some((a) => a.id === apiId) && <option value={apiId}>{apiId || '(none)'}</option>}
+          {apis.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name || a.id}
+            </option>
+          ))}
+        </select>
 
         <label>Name (human-readable; required to sync this map into EDP's overlay list)</label>
         <input type="text" value={name} disabled={disabled} onChange={(e) => setName(e.target.value)} />
