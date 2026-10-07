@@ -14,6 +14,10 @@ API described in [`openapi.yaml`](https://github.com/Nils-witt/Tileserve-GO/blob
 
 ## Commands
 
+`make build` does the two build steps below in the right order (SPA first, then the Go binary with
+GoReleaser-style version ldflags); `make check` runs vet + race tests + lint + govulncheck; `make
+help` lists every target.
+
 ```sh
 cd frontend && npm ci && npm run build && cd ..   # build the SPA into frontend/dist (embedded — see below)
 go build -o Tile-Server-Sync-GO ./cmd/Tile-Server-Sync-GO   # build (needs frontend/dist to exist first — see below)

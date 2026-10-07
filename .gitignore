@@ -11,3 +11,7 @@ node_modules/
 /.claude/skills/
 # Runtime log written next to the config file
 Tile-Server-Sync-GO.log
+
+# Locally built binary (make build / go build -o)
+/Tile-Server-Sync-GO
+/Tile-Server-Sync-GO.exe
